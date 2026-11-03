@@ -302,6 +302,26 @@ internal class AssistantProfileCoordinator(
         importOwner = importOwner
     )
 
+    /** Batch variant of [importWorldBookFile]: every file the picker returned, one status line. */
+    fun importWorldBookFiles(
+        uriStrings: List<String>,
+        scope: WorldBookScope = WorldBookScope.ASSISTANT,
+        importOwner: ContentImportOwner? = null
+    ) = importWorldBookFilesFor(
+        scope = this.scope,
+        isGenerating = { store.current.isGenerating },
+        showStatus = showStatus,
+        captureContentImportOwner = captureContentImportOwner,
+        importWorldBookOwned = { rawJson, bookScope, owner, fallbackName ->
+            importWorldBookOwned(rawJson, bookScope, owner, null, fallbackName)
+        },
+        readAttachmentText = readAttachmentText,
+        resolveFallbackName = resolveWorldBookFallbackName,
+        uriStrings = uriStrings,
+        scopeKind = scope,
+        importOwner = importOwner
+    )
+
     suspend fun finishCharacterCardImport(
         result: CharacterCardParseResult,
         owner: ContentImportOwner,

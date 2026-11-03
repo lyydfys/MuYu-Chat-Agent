@@ -24,6 +24,28 @@ internal class OpenAnyDocumentContract : ActivityResultContract<Unit, Uri?>() {
 }
 
 /**
+ * Same intent as [OpenAnyDocumentContract] but with multi-select enabled, so one picker round-trip
+ * can return several world books or presets. The MIME type stays the wildcard for the OEM reason
+ * above.
+ */
+internal class OpenAnyDocumentsContract : ActivityResultContract<Unit, List<Uri>>() {
+    override fun createIntent(context: Context, input: Unit): Intent =
+        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            type = ANY_MIME_TYPE
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): List<Uri> {
+        if (resultCode != Activity.RESULT_OK || intent == null) return emptyList()
+        return collectSelectedUris(intent.data, intent.clipData)
+    }
+}
+
+private const val ANY_MIME_TYPE = "*/*"
+
+/**
  * Opens every document type without EXTRA_MIME_TYPES. Several OEM file
  * managers incorrectly hide unknown extensions such as .gguf when AndroidX's
  * multi-MIME contract supplies a mixed filter list, even when that list also

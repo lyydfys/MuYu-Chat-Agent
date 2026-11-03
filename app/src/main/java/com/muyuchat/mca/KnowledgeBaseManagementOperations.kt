@@ -184,6 +184,64 @@ internal fun worldBookFallbackNameFromFile(displayName: String): String? = displ
     ?.substringBeforeLast('.')
     ?.takeIf { it.isNotBlank() }
 
+/**
+ * Batch world-book import from one multi-select picker round-trip.
+ *
+ * Each file is parsed and committed independently, so one bad export cannot block the rest; the
+ * final status line reports how many landed. The owner check is re-read per file: a book committed
+ * for a session that was deleted mid-batch must not resurrect a binding.
+ */
+internal fun importWorldBookFilesFor(
+    scope: CoroutineScope,
+    isGenerating: () -> Boolean,
+    showStatus: (String) -> Unit,
+    captureContentImportOwner: () -> ContentImportOwner,
+    importWorldBookOwned: suspend (String, WorldBookScope, ContentImportOwner, String?) -> Boolean,
+    readAttachmentText: (Uri, Int) -> Pair<String, Boolean>,
+    resolveFallbackName: (Uri) -> String,
+    uriStrings: List<String>,
+    scopeKind: WorldBookScope = WorldBookScope.ASSISTANT,
+    importOwner: ContentImportOwner? = null
+) {
+    if (isGenerating()) {
+        showStatus("请先停止当前生成，再导入世界书")
+        return
+    }
+    val targets = uriStrings.filter { it.isNotBlank() }.distinct()
+    if (targets.isEmpty()) return
+    val owner = importOwner ?: captureContentImportOwner()
+    scope.launch {
+        var imported = 0
+        val failures = mutableListOf<String>()
+        for (uriString in targets) {
+            val loaded = withContext(Dispatchers.IO) { runCatching {
+                val uri = Uri.parse(uriString)
+                val fallbackName = worldBookFallbackNameFromFile(resolveFallbackName(uri))
+                val (text, truncated) = readAttachmentText(uri, WORLD_BOOK_IMPORT_MAX_BYTES)
+                require(!truncated) { "世界书文件超过 8 MiB。" }
+                fallbackName to text
+            } }
+            val (fallbackName, text) = loaded.getOrElse { error ->
+                failures += "${Uri.parse(uriString).lastPathSegment ?: uriString}（${error.message ?: "无法读取文件"}）"
+                continue
+            }
+            val accepted = runCatching { importWorldBookOwned(text, scopeKind, owner, fallbackName) }
+                .getOrElse { error ->
+                    failures += "${fallbackName ?: uriString}（${error.message ?: "导入失败"}）"
+                    false
+                }
+            if (accepted) imported++ else failures += (fallbackName ?: uriString)
+        }
+        val message = when {
+            imported == 0 -> "世界书导入失败：${failures.joinToString("；")}"
+            targets.size == 1 -> null
+            failures.isEmpty() -> "已导入 $imported 本世界书"
+            else -> "已导入 $imported 本世界书，${failures.size} 本失败：${failures.joinToString("；")}"
+        }
+        message?.let(showStatus)
+    }
+}
+
 internal fun importWorldBookFileFor(
     scope: CoroutineScope,
     isGenerating: () -> Boolean,

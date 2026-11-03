@@ -4,6 +4,7 @@ package com.muyuchat.mca
 
 import android.content.Context
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -108,12 +109,14 @@ class MainActivity : ComponentActivity() {
             pendingAssistantCardOwner = null
             if (uri != null) startup.whenReady { it.importAssistantCardFile(uri.toString(), owner) }
         }
-        val worldBookImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
+        val worldBookImportLauncher = registerForActivityResult(OpenAnyDocumentsContract()) { uris ->
             val scope = pendingWorldBookImportScope
             val owner = pendingWorldBookOwner
             pendingWorldBookImportScope = WorldBookScope.GLOBAL
             pendingWorldBookOwner = null
-            if (uri != null) startup.whenReady { it.importWorldBookFile(uri.toString(), scope, owner) }
+            if (uris.isNotEmpty()) {
+                startup.whenReady { it.importWorldBookFiles(uris.map(Uri::toString), scope, owner) }
+            }
         }
         val knowledgeDocumentImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
             val baseId = pendingKnowledgeBaseId
@@ -620,6 +623,7 @@ private fun McaApp(
                     onResumeDownloads = viewModel::resumeManagedDownloads, onPauseImport = viewModel::pauseManagedImport,
                     onResumeImport = viewModel::resumeManagedImport, onBack = closePage, modifier = pageModifier,
                     onImportGenerationPreset = viewModel::importGenerationPreset,
+                    onImportGenerationPresets = viewModel::importGenerationPresets,
                     onDeleteGenerationPreset = viewModel::deleteGenerationPreset,
                     onSaveGenerationPresetBindings = viewModel::saveGenerationPresetBindings
                 )
@@ -638,6 +642,7 @@ private fun McaApp(
                     localModels = state.models,
                     cloudChatModels = state.cloudChatModelUiItems(),
                     onImportPreset = viewModel::importGenerationPreset,
+                    onImportPresets = viewModel::importGenerationPresets,
                     onDeletePreset = viewModel::deleteGenerationPreset,
                     onSaveBindings = viewModel::saveGenerationPresetBindings,
                     onBack = closePage,

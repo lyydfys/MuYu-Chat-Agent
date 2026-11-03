@@ -52,7 +52,9 @@ fun PresetManagerScreen(
     onDeletePreset: (String) -> Unit,
     onSaveBindings: (String, String, Set<String>, Set<String>) -> Unit,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Receives every selected file from one multi-select picker round-trip. */
+    onImportPresets: (List<String>) -> Unit = { uris -> uris.forEach(onImportPreset) }
 ) {
     Column(
         modifier = modifier
@@ -61,7 +63,7 @@ fun PresetManagerScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        PresetManagerHeader(onImportPreset = onImportPreset, onBack = onBack)
+        PresetManagerHeader(onImportPresets = onImportPresets, onBack = onBack)
         PresetManagerList(
             presets = presets,
             localModels = localModels,
@@ -79,13 +81,14 @@ internal fun GenerationPresetManagerSection(
     onImportPreset: (String) -> Unit,
     onDeletePreset: (String) -> Unit,
     onSaveBindings: (String, String, Set<String>, Set<String>) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onImportPresets: (List<String>) -> Unit = { uris -> uris.forEach(onImportPreset) }
 ) {
     Column(
         modifier = modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        PresetManagerHeader(onImportPreset = onImportPreset)
+        PresetManagerHeader(onImportPresets = onImportPresets)
         PresetManagerList(
             presets = state.generationPresets,
             localModels = state.localModels,
@@ -99,12 +102,15 @@ internal fun GenerationPresetManagerSection(
 
 @Composable
 private fun PresetManagerHeader(
-    onImportPreset: (String) -> Unit,
+    onImportPresets: (List<String>) -> Unit,
     modifier: Modifier = Modifier,
     onBack: (() -> Unit)? = null
 ) {
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { onImportPreset(it.toString()) }
+    // Multi-select: importing five presets used to mean five picker round-trips. The launcher now
+    // returns every selected file and the caller imports them in one store write.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val targets = uris.mapNotNull { it?.toString() }.filter { it.isNotBlank() }
+        if (targets.isNotEmpty()) onImportPresets(targets)
     }
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -133,7 +139,7 @@ private fun PresetManagerHeader(
             }
         }
         Text(
-            "预设只保存采样与输出参数；提示词、模板和宏请继续在角色卡中导入。",
+            "可一次选择多个预设文件；预设只保存采样与输出参数，提示词、模板和宏请继续在角色卡中导入。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

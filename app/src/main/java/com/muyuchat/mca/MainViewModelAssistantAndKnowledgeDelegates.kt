@@ -61,6 +61,12 @@ fun MainViewModel.importWorldBookFile(
     importOwner: ContentImportOwner? = null
 ) = assistantProfileCoordinator.importWorldBookFile(uriString, scope, importOwner)
 
+fun MainViewModel.importWorldBookFiles(
+    uriStrings: List<String>,
+    scope: WorldBookScope = WorldBookScope.ASSISTANT,
+    importOwner: ContentImportOwner? = null
+) = assistantProfileCoordinator.importWorldBookFiles(uriStrings, scope, importOwner)
+
 fun MainViewModel.deleteWorldBook(worldBookId: String) =
     assistantProfileCoordinator.deleteWorldBook(worldBookId)
 

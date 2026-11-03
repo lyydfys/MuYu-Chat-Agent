@@ -210,6 +210,7 @@ fun ModelHubScreen(
     onPauseImport: (String) -> Unit = {},
     onResumeImport: (String) -> Unit = {},
     onImportGenerationPreset: (String) -> Unit = {},
+    onImportGenerationPresets: (List<String>) -> Unit = { uris -> uris.forEach(onImportGenerationPreset) },
     onDeleteGenerationPreset: (String) -> Unit = {},
     onSaveGenerationPresetBindings: (String, String, Set<String>, Set<String>) -> Unit = { _, _, _, _ -> },
     modifier: Modifier = Modifier
@@ -333,7 +334,8 @@ fun ModelHubScreen(
                         onImportPreset = onImportGenerationPreset,
                         onDeletePreset = onDeleteGenerationPreset,
                         onSaveBindings = onSaveGenerationPresetBindings,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        onImportPresets = onImportGenerationPresets
                     )
                 }
             }

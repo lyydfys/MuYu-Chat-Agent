@@ -36,48 +36,84 @@ internal fun importGenerationPresetFor(
     uiStateWriter: UiStateWriter<GenerationPresetFields>,
     presetStore: GenerationPresetStore,
     uriString: String
+) = importGenerationPresetsFor(
+    scope = scope,
+    application = application,
+    uiStateWriter = uiStateWriter,
+    presetStore = presetStore,
+    uriStrings = listOf(uriString)
+)
+
+/**
+ * Batch import: one picker result, one store write, one status line.
+ *
+ * Importing presets one at a time meant one picker round-trip and one status message per file.
+ * Each file still parses independently, so one unreadable file no longer aborts the rest; the
+ * caller sees "已导入 N 个，M 个失败" instead of a single error.
+ */
+internal fun importGenerationPresetsFor(
+    scope: CoroutineScope,
+    application: Application,
+    uiStateWriter: UiStateWriter<GenerationPresetFields>,
+    presetStore: GenerationPresetStore,
+    uriStrings: List<String>
 ) {
+    val targets = uriStrings.filter { it.isNotBlank() }.distinct()
+    if (targets.isEmpty()) return
     scope.launch(Dispatchers.IO) {
-        val result = runCatching {
-            val uri = Uri.parse(uriString)
-            val json = requireNotNull(application.contentResolver.openInputStream(uri)) {
-                "无法读取所选预设文件。"
-            }.use { readSillyTavernPresetJson(it) }
-            SillyTavernPresetCodec.parse(
-                rawJson = json,
-                fallbackName = uri.lastPathSegment?.substringAfterLast('/') ?: "模型预设"
-            )
-        }
-        result.onSuccess { preset ->
-            val defaults = GenerationParams()
-            val params = defaults.copy(
-                nPredict = preset.maxTokens?.coerceIn(16, 65_536) ?: defaults.nPredict,
-                temperature = preset.temperature ?: defaults.temperature,
-                topK = preset.topK ?: defaults.topK,
-                topP = preset.topP ?: defaults.topP,
-                minP = preset.minP ?: defaults.minP,
-                repeatPenalty = preset.repeatPenalty ?: defaults.repeatPenalty,
-                presencePenalty = preset.presencePenalty ?: defaults.presencePenalty,
-                frequencyPenalty = preset.frequencyPenalty ?: defaults.frequencyPenalty,
-                stopWords = preset.stopWords ?: defaults.stopWords
-            )
-            val record = GenerationPresetRecord(
-                name = preset.name.take(64),
-                paramsJson = params.toAssistantGenerationJson()
-            )
-            val records = presetStore.load() + record
-            presetStore.save(records)
-            val promptNote = if (preset.promptAppendix != null) "；提示词请在角色卡中导入" else ""
-            uiStateWriter.update {
-                it.copy(
-                    generationPresets = records,
-                    statusMessage = "已导入模型预设：${record.name}$promptNote"
+        val imported = mutableListOf<GenerationPresetRecord>()
+        val failures = mutableListOf<String>()
+        var promptAppendixSeen = false
+        targets.forEach { uriString ->
+            runCatching {
+                val uri = Uri.parse(uriString)
+                val json = requireNotNull(application.contentResolver.openInputStream(uri)) {
+                    "无法读取所选预设文件。"
+                }.use { readSillyTavernPresetJson(it) }
+                SillyTavernPresetCodec.parse(
+                    rawJson = json,
+                    fallbackName = uri.lastPathSegment?.substringAfterLast('/') ?: "模型预设"
                 )
+            }.onSuccess { preset ->
+                val defaults = GenerationParams()
+                val params = defaults.copy(
+                    nPredict = preset.maxTokens?.coerceIn(16, 65_536) ?: defaults.nPredict,
+                    temperature = preset.temperature ?: defaults.temperature,
+                    topK = preset.topK ?: defaults.topK,
+                    topP = preset.topP ?: defaults.topP,
+                    minP = preset.minP ?: defaults.minP,
+                    repeatPenalty = preset.repeatPenalty ?: defaults.repeatPenalty,
+                    presencePenalty = preset.presencePenalty ?: defaults.presencePenalty,
+                    frequencyPenalty = preset.frequencyPenalty ?: defaults.frequencyPenalty,
+                    stopWords = preset.stopWords ?: defaults.stopWords
+                )
+                imported += GenerationPresetRecord(
+                    name = preset.name.take(64),
+                    paramsJson = params.toAssistantGenerationJson()
+                )
+                if (preset.promptAppendix != null) promptAppendixSeen = true
+            }.onFailure { error ->
+                val name = Uri.parse(uriString).lastPathSegment ?: uriString
+                failures += "$name（${error.message ?: "请确认文件格式"}）"
             }
-        }.onFailure { error ->
-            uiStateWriter.update {
-                it.copy(statusMessage = "模型预设导入失败：${error.message ?: "请确认文件格式。"}")
-            }
+        }
+        // One read-modify-write for the whole batch; the store lock only guards single calls.
+        if (imported.isNotEmpty()) {
+            presetStore.save(presetStore.load() + imported)
+        }
+        val records = presetStore.load()
+        val promptNote = if (promptAppendixSeen) "；提示词请在角色卡中导入" else ""
+        val message = when {
+            imported.isEmpty() -> "模型预设导入失败：${failures.joinToString("；")}"
+            failures.isEmpty() && imported.size == 1 -> "已导入模型预设：${imported.first().name}$promptNote"
+            failures.isEmpty() -> "已导入 ${imported.size} 个模型预设$promptNote"
+            else -> "已导入 ${imported.size} 个模型预设，${failures.size} 个失败：${failures.joinToString("；")}"
+        }
+        uiStateWriter.update {
+            it.copy(
+                generationPresets = records,
+                statusMessage = message
+            )
         }
     }
 }
