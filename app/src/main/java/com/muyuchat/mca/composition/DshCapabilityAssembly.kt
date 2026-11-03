@@ -43,6 +43,13 @@ import com.muyuchat.core.dsh.vscreen.DshPrivilegedProcessRunner
 import com.muyuchat.core.dsh.vscreen.DshShizukuDexProvisioner
 import com.muyuchat.core.dsh.vscreen.DshShizukuShellChannel
 import com.muyuchat.core.dsh.vscreen.DshVscreenCaptureService
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelHost
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelStatus
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandFailure
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandResult
+import com.muyuchat.feature.dsh.workspace.device.DshShellChannelChoice
+import com.muyuchat.feature.dsh.workspace.device.dshShellChannelChoice
+import com.muyuchat.feature.dsh.workspace.device.dshShellUnavailableDetail
 import com.muyuchat.core.dsh.vscreen.DshVscreenLimits
 import com.muyuchat.core.dsh.vscreen.DshVscreenPreviewRelay
 import com.muyuchat.core.dsh.vscreen.DshVscreenProjectionGrantResult
@@ -254,6 +261,12 @@ internal class DshCapabilityAssembly(
      * The runner owns consent, timeout, output limits and channel selection; this adapter only maps
      * the typed outcome onto the shell contract. A dead or ungranted channel is an infrastructure
      * failure, never a silent non-zero exit.
+     *
+     * ADB fallback (additive): when the root/Shizuku channel is not usable and the process-level ADB
+     * channel is READY, the same command is executed through [DshDeviceChannelHost] instead. The
+     * channel choice is the pure [dshShellChannelChoice] function; a READY (or not-yet-classified)
+     * privileged channel always keeps the existing path, so the verified root/Shizuku behaviour is
+     * unchanged. The ADB branch runs through the same command policy, timeout and output ceiling.
      */
     private val shizukuShellTransport = DshShizukuShellTransport { invocation ->
         val execution = shizukuChannel.executeShell(
@@ -262,6 +275,24 @@ internal class DshCapabilityAssembly(
             stdoutLimit = invocation.stdoutLimit,
             stderrLimit = invocation.stderrLimit
         )
+        val deviceHost = runCatching { DshDeviceChannelHost.of(appContext) }.getOrNull()
+        val adbReady = deviceHost?.let {
+            runCatching { it.adbStatus() == DshDeviceChannelStatus.READY }.getOrDefault(false)
+        } ?: false
+        val choice = dshShellChannelChoice(
+            privilegedReady = execution.state == DshPrivilegedChannelState.READY ||
+                execution.state == DshPrivilegedChannelState.UNKNOWN,
+            adbReady = adbReady
+        )
+        if (choice == DshShellChannelChoice.ADB && deviceHost != null) {
+            return@DshShizukuShellTransport deviceHost
+                .adbShell(
+                    command = invocation.command,
+                    timeoutMs = invocation.timeoutMillis,
+                    outputLimitBytes = invocation.stdoutLimit
+                )
+                .toShellRunResult()
+        }
         DshShellRunResult(
             exitCode = execution.exitCode,
             stdout = execution.stdout,
@@ -271,13 +302,57 @@ internal class DshCapabilityAssembly(
             failure = when {
                 execution.state != DshPrivilegedChannelState.READY &&
                     execution.state != DshPrivilegedChannelState.UNKNOWN ->
-                    DshAndroidActionFailure.of(DshAndroidActionErrorCode.CAPABILITY_UNAVAILABLE, execution.detail)
+                    DshAndroidActionFailure.of(
+                        DshAndroidActionErrorCode.CAPABILITY_UNAVAILABLE,
+                        // Name both missing families when ADB is not usable either.
+                        dshShellUnavailableDetail(execution.detail)
+                    )
 
                 execution.timedOut ->
                     DshAndroidActionFailure.of(DshAndroidActionErrorCode.TIMEOUT, null)
 
                 else -> null
             }
+        )
+    }
+
+    /**
+     * Maps the feature-side device result onto the privileged shell contract.
+     *
+     * Only a policy refusal or an SELinux refusal is a permission-shaped failure; transport problems
+     * stay `CAPABILITY_UNAVAILABLE` and a truncation keeps the existing `stdoutTruncated` shape.
+     */
+    private fun DshDeviceCommandResult.toShellRunResult(): DshShellRunResult {
+        val reasonCode = reason?.code
+        val truncated = reasonCode == DshDeviceCommandFailure.OUTPUT_LIMIT.code
+        val failure = when (reasonCode) {
+            null -> null
+
+            // Truncation keeps the existing `stdoutTruncated` shape instead of an infrastructure error.
+            DshDeviceCommandFailure.OUTPUT_LIMIT.code -> null
+
+            DshDeviceCommandFailure.POLICY_BLOCKED.code,
+            DshDeviceCommandFailure.SELINUX_DENIED.code ->
+                DshAndroidActionFailure.of(
+                    DshAndroidActionErrorCode.PERMISSION_DENIED,
+                    reasonCode
+                )
+
+            DshDeviceCommandFailure.TIMEOUT.code ->
+                DshAndroidActionFailure.of(DshAndroidActionErrorCode.TIMEOUT, null)
+
+            else -> DshAndroidActionFailure.of(
+                DshAndroidActionErrorCode.CAPABILITY_UNAVAILABLE,
+                reasonCode
+            )
+        }
+        return DshShellRunResult(
+            exitCode = exitCode,
+            stdout = stdout,
+            stderr = stderr,
+            stdoutTruncated = truncated,
+            stderrTruncated = false,
+            failure = failure
         )
     }
 
@@ -388,6 +463,11 @@ internal class DshCapabilityAssembly(
         // file is reported as unproven until the first privileged command succeeds.
         val shizukuProven = runCatching { shizukuChannel.lastProbeAvailable() }.getOrNull() == true
         val rootCandidate = runCatching { channels.rootAvailable() }.getOrDefault(false)
+        // ADB counts only after a real CNXN handshake: `adbStatus()` is the channel's own READY state,
+        // never a "configured" guess.
+        val adbChannelReady = runCatching {
+            DshDeviceChannelHost.of(appContext).adbStatus() == DshDeviceChannelStatus.READY
+        }.getOrDefault(false)
         val overlayGranted = runCatching { Settings.canDrawOverlays(appContext) }.getOrDefault(false)
         val captureGranted = isScreenCaptureGranted()
         val a11yRunning = runCatching { DshA11yController.instance.isRunning }.getOrDefault(false)
@@ -409,12 +489,16 @@ internal class DshCapabilityAssembly(
                 state = when {
                     !bridgeRunning -> DshCapabilityState.NOT_ENABLED
                     shizukuProven -> DshCapabilityState.GRANTED
+                    // The ADB fallback really is a working /shell channel, so it is GRANTED too —
+                    // but only after its handshake reached READY.
+                    adbChannelReady -> DshCapabilityState.GRANTED
                     else -> DshCapabilityState.NOT_ENABLED
                 },
                 toolRegistered = bridgeRunning,
                 detail = when {
                     !bridgeRunning -> "App-local bridge is not running"
                     shizukuProven -> "Shizuku answered uid 2000 in this process"
+                    adbChannelReady -> "ADB channel is connected (no root/Shizuku)"
                     rootCandidate -> "su binary present but not probed; the first /shell command proves it"
                     else -> "no proven root or Shizuku channel yet; /shell probes on first use"
                 }

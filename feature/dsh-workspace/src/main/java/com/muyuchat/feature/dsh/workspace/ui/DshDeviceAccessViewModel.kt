@@ -14,21 +14,19 @@ import com.muyuchat.feature.dsh.workspace.device.DshAdbEndpointStore
 import com.muyuchat.feature.dsh.workspace.device.DshAdbProvisioner
 import com.muyuchat.feature.dsh.workspace.device.DshAdbProvisioningStepResult
 import com.muyuchat.feature.dsh.workspace.device.DshAdbRetryDecision
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelHost
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelKind
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelStatus
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandFailure
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandResult
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceProbe
 import com.muyuchat.feature.dsh.workspace.device.DshRootChannel
-import com.muyuchat.feature.dsh.workspace.device.FileDshAdbEndpointStore
-import com.muyuchat.feature.dsh.workspace.device.SocketAdbTransport
 import com.muyuchat.feature.dsh.workspace.device.dshAdbAfterEnable
 import com.muyuchat.feature.dsh.workspace.device.dshAdbAfterFailure
 import com.muyuchat.feature.dsh.workspace.device.dshAdbAfterManualDisconnect
 import com.muyuchat.feature.dsh.workspace.device.dshAdbAfterSuccess
 import com.muyuchat.feature.dsh.workspace.device.dshAdbLoopbackEndpoint
 import com.muyuchat.feature.dsh.workspace.device.dshAdbRetryDecision
-import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -196,7 +194,7 @@ const val DSH_DEVICE_UNPROBED_LABEL: String = "未探测"
 class DshDeviceAccessViewModel internal constructor(
     private val root: DshRootChannel,
     private val adb: DshAdbChannel,
-    /** Root-based one-tap provisioning; null when the console was built without a key file. */
+    /** Root-based one-tap provisioning; borrowed from the process-level host. */
     private val provisioner: DshAdbProvisioner? = null,
     /** Remembers the last endpoint that connected; null keeps everything in memory only. */
     private val endpointStore: DshAdbEndpointStore? = null
@@ -380,9 +378,13 @@ class DshDeviceAccessViewModel internal constructor(
         }
     }
 
-    /** Releases the ADB transport (no-op while none is wired). */
+    /**
+     * The page deliberately does not close the ADB transport: it is borrowed from the process-level
+     * [DshDeviceChannelHost], and the agent `/shell` path may still be using it. Only the explicit
+     * [disconnectAdb] intent closes the shared socket.
+     */
     override fun onCleared() {
-        runCatching { adb.close() }
+        adbJob?.cancel()
     }
 
     /** One connect attempt plus the bounded auto-reconnect loop described by the policy. */
@@ -456,29 +458,19 @@ class DshDeviceAccessViewModel internal constructor(
 
     companion object {
         /**
-         * Builds the page state holder.
+         * Builds the page state holder for the process-level device host.
          *
-         * [adbIdentityFile] is the app-private PKCS#8 key file (the console passes
-         * `filesDir/dsh/adbkey.pkcs8`); it also provides the directory for the remembered endpoint and
-         * the root provisioner. When null the ADB channel stays an honest "not wired" skeleton and
-         * provisioning is unavailable.
+         * The channels, key file, transport and remembered endpoint all come from the host, so the
+         * console and the agent `/shell` path drive exactly one ADB session. The page never closes
+         * them: only the explicit "断开" intent does.
          */
-        fun factory(
-            adbIdentityFile: File? = null,
-            endpointStore: DshAdbEndpointStore? = null
-        ): ViewModelProvider.Factory = viewModelFactory {
+        fun factory(host: DshDeviceChannelHost): ViewModelProvider.Factory = viewModelFactory {
             initializer {
-                val root = DshRootChannel()
-                val transport = adbIdentityFile?.let { SocketAdbTransport(it) }
-                val provisioner = adbIdentityFile?.let { DshAdbProvisioner(root = root, identityFile = it) }
-                val store = endpointStore ?: adbIdentityFile?.parentFile?.let {
-                    FileDshAdbEndpointStore(File(it, "adb_endpoint"))
-                }
                 DshDeviceAccessViewModel(
-                    root = root,
-                    adb = DshAdbChannel(transport),
-                    provisioner = provisioner,
-                    endpointStore = store
+                    root = host.root,
+                    adb = host.adb,
+                    provisioner = host.provisioner,
+                    endpointStore = host.endpointStore
                 )
             }
         }

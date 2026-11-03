@@ -28,10 +28,10 @@ import com.muyuchat.feature.dsh.workspace.DshConsoleRow
 import com.muyuchat.feature.dsh.workspace.DshConsoleTone
 import com.muyuchat.feature.dsh.workspace.device.DshAdbAutoConnectPolicy
 import com.muyuchat.feature.dsh.workspace.device.DshAdbProvisioningStepResult
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelHost
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelKind
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelStatus
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandFailure
-import java.io.File
 
 /**
  * "设备权限" block of the read-only DSH console.
@@ -47,10 +47,10 @@ import java.io.File
 @Composable
 fun DshDeviceAccessSection(modifier: Modifier = Modifier) {
     val context = LocalContext.current.applicationContext
-    // The ADB identity lives in app-private storage: the key must survive page re-entries and must
-    // never be readable by other apps. Its directory also stores the remembered endpoint.
-    val identityFile = remember(context) { File(context.filesDir, "dsh/adbkey.pkcs8") }
-    val factory = remember(identityFile) { DshDeviceAccessViewModel.factory(identityFile) }
+    // One process-level host owns the RSA identity, the ADB transport and the endpoint memory, so the
+    // console and the agent `/shell` path drive the same session.
+    val host = remember(context) { DshDeviceChannelHost.of(context) }
+    val factory = remember(host) { DshDeviceAccessViewModel.factory(host) }
     val viewModel: DshDeviceAccessViewModel = viewModel(
         key = "dsh-device-access",
         factory = factory
