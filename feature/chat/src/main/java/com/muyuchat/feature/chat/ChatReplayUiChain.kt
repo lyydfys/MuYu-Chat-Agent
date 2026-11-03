@@ -101,7 +101,7 @@ public class ChatReplayFrameProjection internal constructor(
     public val blockCount: Int get() = blocks.size
 
     /** The branch of the first block, i.e. the first renderer the page selects. */
-    public val primaryBranch: ChatReplayRenderBranch get() = blockBranches.first()
+    public val primaryBranch: ChatReplayRenderBranch get() = blockBranches.firstOrNull() ?: ChatReplayRenderBranch.RICH
 
     /** Distinct branches this frame selects, in renderer order. */
     public val branches: Set<ChatReplayRenderBranch> get() = LinkedHashSet(blockBranches)

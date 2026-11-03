@@ -115,6 +115,12 @@ import org.junit.Test
  * RuntimeFieldTransitions (2 resets) and ChatExecutionFieldTransitions (1 start, 2 resets) are the
  * field-limited equivalents of the existing pure root transitions. Both remain in this inventory
  * while the legacy pure helpers still have compatibility-test callers.
+ *
+ * ## Re-derivation recorded (send-path crash repair 2026-11-03)
+ *
+ * The submission failure guard added one reset in `ChatWorkflowCoordinator.kt` (0 -> 1): a throw
+ * raised before the provider call is reported instead of escaping the launched coroutine. The
+ * start site is unchanged (1).
  */
 class GenerationFlagAccountingContractTest {
 
@@ -177,7 +183,7 @@ class GenerationFlagAccountingContractTest {
     private val expectedTrueInAssistantImageContinuation = 1
     private val expectedFalseInAssistantImageContinuation = 1
     private val expectedTrueInChatWorkflow = 1
-    private val expectedFalseInChatWorkflow = 0
+    private val expectedFalseInChatWorkflow = 1
     private val expectedTrueInConversationReplay = 1
     private val expectedFalseInConversationReplay = 1
     private val expectedFalseInRuntimeFieldTransitions = 2

@@ -11,6 +11,7 @@ import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.compressChatRequestContext
 import com.muyuchat.core.engine.localContextWindowAdmission
 import com.muyuchat.feature.chat.ChatMessageIdentity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -121,18 +122,27 @@ internal class ChatWorkflowCoordinator(
         if (preparedInput.imageAttachments.size > 1) {
             if (!chatImageSubmissionPreflight.compareAndSet(false, true)) return false
             viewModel.viewModelScope.launch(Dispatchers.IO) {
-                // The composer already performs an asynchronous dedup pass, but keep a final
-                // model-boundary check here as well. This protects message persistence and the
-                // actual runner input if a picker/import callback races that UI preflight.
-                val uniqueAttachments = preparedInput.imageAttachments
-                    .deduplicatedVisionAttachmentsForSend(viewModel.getApplication<Application>())
-                withContext(Dispatchers.Main.immediate) {
-                    val current = store.current
-                    if (current.input != state.input || current.isGenerating) return@withContext
-                    sendPreparedMessageAsync(viewModel, current, preparedInput.copy(imageAttachments = uniqueAttachments))
+                try {
+                    // The composer already performs an asynchronous dedup pass, but keep a final
+                    // model-boundary check here as well. This protects message persistence and the
+                    // actual runner input if a picker/import callback races that UI preflight.
+                    val uniqueAttachments = preparedInput.imageAttachments
+                        .deduplicatedVisionAttachmentsForSend(viewModel.getApplication<Application>())
+                    withContext(Dispatchers.Main.immediate) {
+                        val current = store.current
+                        if (current.input != state.input || current.isGenerating) return@withContext
+                        sendPreparedMessageAsync(viewModel, current, preparedInput.copy(imageAttachments = uniqueAttachments))
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    // A failed submission must never escape a viewModelScope coroutine: an
+                    // uncaught throw here reaches the thread's default handler and kills the
+                    // process, which is exactly what "tap send, app disappears" looked like.
+                    reportSubmissionFailure(error)
+                } finally {
+                    chatImageSubmissionPreflight.set(false)
                 }
-            }.invokeOnCompletion {
-                chatImageSubmissionPreflight.set(false)
             }
             return true
         }
@@ -148,11 +158,32 @@ internal class ChatWorkflowCoordinator(
         viewModel.viewModelScope.launch {
             try {
                 sendPreparedMessageAsync(viewModel, state, preparedInput)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                reportSubmissionFailure(error)
             } finally {
                 chatImageSubmissionPreflight.set(false)
             }
         }
         return true
+    }
+
+    /**
+     * Turns a submission-time failure into a visible status line instead of an uncaught exception.
+     *
+     * Everything before the provider call (context composition, admission, session persistence)
+     * can fail on damaged storage or a store read error. Those paths used to escape the launched
+     * coroutine and take the process down before any UI was published.
+     */
+    private fun reportSubmissionFailure(error: Throwable) {
+        val reason = error.message?.takeIf { it.isNotBlank() } ?: error::class.java.simpleName
+        store.update {
+            it.copy(
+                isGenerating = false,
+                statusMessage = "发送失败：$reason。请重试；若持续失败，请检查会话数据是否损坏。"
+            )
+        }
     }
 
     internal suspend fun sendPreparedMessageAsync(

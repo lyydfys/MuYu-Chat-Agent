@@ -51,6 +51,12 @@ internal suspend fun commitImageLibraryTransaction(
     jobId: String,
     generatedImages: List<ImageAssetRecord>
 ): Throwable? {
+    // An empty batch has nothing to commit. Indexing it below (`generatedImages.first()`) threw
+    // NoSuchElementException inside the image owner's coroutine and took the process down after a
+    // generation that produced no files.
+    if (generatedImages.isEmpty()) {
+        return IllegalStateException("生图结果为空，未写入图片库。")
+    }
     val uiState = port.uiState
     val imageLibraryMutationMutex = port.imageLibraryMutationMutex
     val chatSessionPersistenceMutex = port.chatSessionPersistenceMutex

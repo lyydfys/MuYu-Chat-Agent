@@ -289,7 +289,12 @@ internal class ContextCompressionCoordinator(
                         }
                     }
                 } else {
-                    collectContextSummary(cloudChatProvider.streamChat(checkNotNull(cloudConfig), summaryRequest), ::ownerCurrent)
+                    // The summary model is chosen before this branch; re-read defensively instead of
+                    // asserting, because a model deleted between selection and inference would turn
+                    // a summarization miss into an uncaught NPE.
+                    val config = cloudConfig
+                        ?: throw CancellationException("Summary cloud model is no longer available.")
+                    collectContextSummary(cloudChatProvider.streamChat(config, summaryRequest), ::ownerCurrent)
                 }
             }
         )

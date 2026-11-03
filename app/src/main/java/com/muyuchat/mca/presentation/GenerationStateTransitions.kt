@@ -201,7 +201,7 @@ internal fun MainUiState.restoreAfterConversationMutationFailure(
     val durableActiveSessionId = rollback.activeChatSessionId
         ?.takeIf { activeId -> durableSessions.any { it.id == activeId } }
     val durableMessages = durableActiveSessionId
-        ?.let { activeId -> durableSessions.first { it.id == activeId }.messages }
+        ?.let { activeId -> durableSessions.firstOrNull { it.id == activeId }?.messages }
         .orEmpty()
     return copy(
         messages = durableMessages,

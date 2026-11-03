@@ -343,7 +343,10 @@ class AssistantStore(context: Context) {
         val selected = prefs.getString("selected_assistant_id", null)
         return selected?.takeIf { id -> assistants.any { it.id == id } }
             ?: AssistantRecord.DEFAULT_ID.takeIf { id -> assistants.any { it.id == id } }
-            ?: assistants.first().id
+            // An empty store is a damaged or first-run state, not a crash: fall back to the
+            // well-known default id and let the caller recreate the assistant.
+            ?: assistants.firstOrNull()?.id
+            ?: AssistantRecord.DEFAULT_ID
     }
 
     fun saveSelectedAssistantId(id: String) {

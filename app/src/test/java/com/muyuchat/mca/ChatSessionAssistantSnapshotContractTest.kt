@@ -37,8 +37,14 @@ class ChatSessionAssistantSnapshotContractTest {
 
         assertTrue(functionBody(source, "sendPreparedMessage")
             .contains("sendPreparedMessageAsync(viewModel, state, preparedInput)"))
-        assertTrue(startGeneration.contains("val frozenSession = initialState.chatSessions.first"))
-        assertTrue(startGeneration.contains("val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)"))
+        // Crash repair 2026-11-03: the lookup used to be `first { }` + `requireNotNull`, which
+        // threw NoSuchElementException / IllegalArgumentException inside the launched generation
+        // coroutine and killed the process on send. The contract now pins the guarded form: the
+        // same snapshot still feeds the request and the prefix cache, but a missing session or
+        // snapshot settles the turn instead of throwing.
+        assertTrue(startGeneration.contains("val frozenSession = initialState.chatSessions.firstOrNull"))
+        assertTrue(startGeneration.contains("val frozenAssistantSnapshot = frozenSession?.assistantSnapshot"))
+        assertTrue(startGeneration.contains("if (frozenSession == null || frozenAssistantSnapshot == null)"))
         assertTrue(startGeneration.contains("val assistantSnapshot = frozenAssistantSnapshot"))
         assertTrue(startGeneration.contains("val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams"))
         assertTrue(startGeneration.contains("assistantId = assistantSnapshot?.assistantId"))

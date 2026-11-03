@@ -230,10 +230,12 @@ internal fun deleteAssistantFor(
     }
     val removed = state.assistants.firstOrNull { it.id == assistantId } ?: return
     val remaining = state.assistants.filterNot { it.id == assistantId }
+    // A store holding only the deleted record would make a plain `first` on the remainder throw;
+    // keep the default assistant as the fallback and skip the switch when nothing is left.
     val next = if (state.selectedAssistantId == assistantId) {
-        remaining.firstOrNull { it.id == AssistantRecord.DEFAULT_ID } ?: remaining.first()
+        remaining.firstOrNull { it.id == AssistantRecord.DEFAULT_ID } ?: remaining.firstOrNull()
     } else {
-        remaining.firstOrNull { it.id == state.selectedAssistantId } ?: remaining.first()
+        remaining.firstOrNull { it.id == state.selectedAssistantId } ?: remaining.firstOrNull()
     }
     try {
         assistantStore.saveAssistants(remaining)
@@ -246,16 +248,23 @@ internal fun deleteAssistantFor(
         return
     }
     val deletingSelectedAssistant = state.selectedAssistantId == assistantId
-    if (deletingSelectedAssistant) assistantStore.saveSelectedAssistantId(next.id)
+    // With nothing left to select there is no consistent selection to publish; keep the stored id
+    // so the next app start recreates the default assistant instead of pointing at a deleted one.
+    val nextSelection = next
+    if (deletingSelectedAssistant && nextSelection != null) {
+        assistantStore.saveSelectedAssistantId(nextSelection.id)
+    }
     val nextModelPreset = currentModelGenerationProfileKey()
         ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, state.params) }
         ?: state.params
-    val updatedParams = if (deletingSelectedAssistant) {
-        next.toGenerationParams(nextModelPreset)
+    val updatedParams = if (deletingSelectedAssistant && nextSelection != null) {
+        nextSelection.toGenerationParams(nextModelPreset)
     } else {
         state.params
     }
-    if (deletingSelectedAssistant) GenerationPreferences.persistGenerationParams(application, updatedParams)
+    if (deletingSelectedAssistant && nextSelection != null) {
+        GenerationPreferences.persistGenerationParams(application, updatedParams)
+    }
     val updatedSessions = state.chatSessions
     store.update {
         it.copy(
@@ -263,7 +272,11 @@ internal fun deleteAssistantFor(
             assistantMemories = it.assistantMemories.filterNot { memory ->
                 memory.assistantId == assistantId
             },
-            selectedAssistantId = if (deletingSelectedAssistant) next.id else it.selectedAssistantId,
+            selectedAssistantId = if (deletingSelectedAssistant && nextSelection != null) {
+                nextSelection.id
+            } else {
+                it.selectedAssistantId
+            },
             params = updatedParams,
             chatSessions = updatedSessions,
             statusMessage = "已删除助手：${removed.name}"
@@ -284,8 +297,8 @@ internal fun deleteAssistantFor(
         WorldBookScope.ASSISTANT,
         remaining.mapTo(hashSetOf()) { it.id }
     )
-    if (deletingSelectedAssistant) {
-        selectAssistant(next.id)
+    if (deletingSelectedAssistant && nextSelection != null) {
+        selectAssistant(nextSelection.id)
         persistChatSessions(null)
     } else {
         persistChatSessions(updatedSessions)

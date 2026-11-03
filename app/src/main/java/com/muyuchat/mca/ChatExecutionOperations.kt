@@ -75,8 +75,21 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         settleGenerationUi(engine.stats.value, "此对话的角色归属不明确，无法继续生成；请先手动分支。")
         return
     }
-    val frozenSession = initialState.chatSessions.first { it.id == initialState.activeChatSessionId }
-    val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)
+    val frozenSession = initialState.chatSessions.firstOrNull {
+        it.id == initialState.activeChatSessionId
+    }
+    // The active session id can point at a session that is no longer in the list (a store read
+    // that failed mid-save, a deleted session restored from an old snapshot, or a concurrent
+    // reset). `first {}` threw NoSuchElementException here and killed the process on send.
+    val frozenAssistantSnapshot = frozenSession?.assistantSnapshot
+    if (frozenSession == null || frozenAssistantSnapshot == null) {
+        terminalEventSeen = true
+        settleGenerationUi(
+            engine.stats.value,
+            "当前会话缺少角色信息，无法继续生成；请新建对话或从历史中重新打开该会话。"
+        )
+        return
+    }
     val frozenAssistantId = frozenAssistantSnapshot.assistantId
     val effectiveChatBackend = if (chatModelIdOverride != null) {
         ChatBackend.CLOUD

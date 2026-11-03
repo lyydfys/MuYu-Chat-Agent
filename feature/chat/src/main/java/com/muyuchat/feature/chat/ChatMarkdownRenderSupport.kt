@@ -170,18 +170,26 @@ internal fun buildInlineMarkdown(
                 }
             }
             urlMatchAt(index)?.let { it.range.first == index } == true -> {
-                val match = urlMatchAt(index)!!
-                withLink(LinkAnnotation.Url(match.value)) {
-                    withStyle(
-                        SpanStyle(
-                            color = linkColor,
-                            textDecoration = TextDecoration.Underline
-                        )
-                    ) {
-                        append(wrapForDisplay(match.value))
+                // Re-read the same cached match instead of asserting non-null: the helper caches
+                // the result for this cursor, so a null here means the cursor moved and the plain
+                // character path below is the correct fallback rather than a crash.
+                val match = urlMatchAt(index)
+                if (match != null) {
+                    withLink(LinkAnnotation.Url(match.value)) {
+                        withStyle(
+                            SpanStyle(
+                                color = linkColor,
+                                textDecoration = TextDecoration.Underline
+                            )
+                        ) {
+                            append(wrapForDisplay(match.value))
+                        }
                     }
+                    index = match.range.last + 1
+                } else {
+                    appendPlain(value[index].toString())
+                    index++
                 }
-                index = match.range.last + 1
             }
             value.startsWith("`", index) -> {
                 val end = value.indexOf('`', startIndex = index + 1)
@@ -374,6 +382,7 @@ internal fun buildHighlightedCode(code: String, language: String?): AnnotatedStr
         append(code)
         for (match in CODE_SYNTAX_TOKEN_PATTERN.findAll(code)) {
             val token = match.value
+            if (token.isEmpty()) continue
             val first = token[0]
             val color = when {
                 token.startsWith("//") || token.startsWith("/*") ||
