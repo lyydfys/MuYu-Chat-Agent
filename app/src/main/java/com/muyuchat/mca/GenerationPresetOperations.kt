@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import android.app.Application
 import android.net.Uri
+import android.provider.OpenableColumns
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.feature.chat.SillyTavernPresetCodec
 import com.muyuchat.feature.chat.readSillyTavernPresetJson
@@ -45,6 +46,24 @@ internal fun importGenerationPresetFor(
 )
 
 /**
+ * Real file name of a picked document, or null when the provider exposes none.
+ *
+ * `Uri.lastPathSegment` cannot stand in for this: SAF providers put their opaque document id there
+ * (`document:1000156859`), which is exactly the text that used to reach the preset list. Injected as
+ * a `(Uri) -> String?` lambda so the naming order stays pure and unit-testable.
+ */
+private fun openableDisplayNameReader(application: Application): (Uri) -> String? = { uri ->
+    runCatching {
+        application.contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+            }
+    }.getOrNull()
+}
+
+/**
  * Batch import: one picker result, one store write, one status line.
  *
  * Importing presets one at a time meant one picker round-trip and one status message per file.
@@ -60,19 +79,26 @@ internal fun importGenerationPresetsFor(
 ) {
     val targets = uriStrings.filter { it.isNotBlank() }.distinct()
     if (targets.isEmpty()) return
+    val readDisplayName = openableDisplayNameReader(application)
     scope.launch(Dispatchers.IO) {
         val imported = mutableListOf<GenerationPresetRecord>()
         val failures = mutableListOf<String>()
         var promptAppendixSeen = false
-        targets.forEach { uriString ->
+        for (uriString in targets) {
+            val uri = runCatching { Uri.parse(uriString) }.getOrNull()
+            // Resolved once per file: it names both the imported record and any failure line.
+            val displayName = uri?.let(readDisplayName)
+            val fallbackName = GenerationPresetNaming.fallbackName(displayName, uri?.lastPathSegment)
             runCatching {
-                val uri = Uri.parse(uriString)
-                val json = requireNotNull(application.contentResolver.openInputStream(uri)) {
+                val target = uri ?: error("无法识别所选文件。")
+                val json = requireNotNull(application.contentResolver.openInputStream(target)) {
                     "无法读取所选预设文件。"
                 }.use { readSillyTavernPresetJson(it) }
                 SillyTavernPresetCodec.parse(
                     rawJson = json,
-                    fallbackName = uri.lastPathSegment?.substringAfterLast('/') ?: "模型预设"
+                    // Priority: the preset file's own name (codec) → DISPLAY_NAME → normalized
+                    // lastPathSegment → `模型预设`; a raw lastPathSegment is a provider id.
+                    fallbackName = fallbackName
                 )
             }.onSuccess { preset ->
                 val defaults = GenerationParams()
@@ -88,13 +114,13 @@ internal fun importGenerationPresetsFor(
                     stopWords = preset.stopWords ?: defaults.stopWords
                 )
                 imported += GenerationPresetRecord(
-                    name = preset.name.take(64),
+                    name = GenerationPresetNaming.recordName(preset.name),
                     paramsJson = params.toAssistantGenerationJson()
                 )
                 if (preset.promptAppendix != null) promptAppendixSeen = true
             }.onFailure { error ->
-                val name = Uri.parse(uriString).lastPathSegment ?: uriString
-                failures += "$name（${error.message ?: "请确认文件格式"}）"
+                // Same normalization as the success path: no provider ids in user-visible text.
+                failures += "$fallbackName（${error.message ?: "请确认文件格式"}）"
             }
         }
         // One read-modify-write for the whole batch; the store lock only guards single calls.
