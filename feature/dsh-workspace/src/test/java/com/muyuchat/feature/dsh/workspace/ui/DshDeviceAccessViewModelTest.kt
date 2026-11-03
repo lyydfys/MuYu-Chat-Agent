@@ -3,12 +3,16 @@ package com.muyuchat.feature.dsh.workspace.ui
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.feature.dsh.workspace.DshConsoleTone
 import com.muyuchat.feature.dsh.workspace.device.AdbTransport
+import com.muyuchat.feature.dsh.workspace.device.DshAdbAutoConnectPolicy
 import com.muyuchat.feature.dsh.workspace.device.DshAdbChannel
 import com.muyuchat.feature.dsh.workspace.device.DshAdbEndpoint
+import com.muyuchat.feature.dsh.workspace.device.DshAdbEndpointStore
+import com.muyuchat.feature.dsh.workspace.device.DshAdbProvisioner
 import com.muyuchat.feature.dsh.workspace.device.DshAdbShellResult
 import com.muyuchat.feature.dsh.workspace.device.DshAdbTransportState
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelKind
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelStatus
+import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandFailure
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandResult
 import com.muyuchat.feature.dsh.workspace.device.DshProcessLauncher
 import com.muyuchat.feature.dsh.workspace.device.DshRootChannel
@@ -264,18 +268,178 @@ class DshDeviceAccessViewModelTest {
         assertNull(viewModel.state.value.busy)
     }
 
+    @Test
+    fun `a saved endpoint is restored when the console opens`() = runTest(dispatcher) {
+        val store = MemoryEndpointStore("192.168.1.7:5037")
+        val viewModel = viewModel(endpointStore = store)
+
+        viewModel.start()
+        advanceUntilIdle()
+
+        assertEquals("192.168.1.7:5037", viewModel.state.value.adbEndpoint)
+        assertTrue(viewModel.state.value.adb.probed)
+    }
+
+    @Test
+    fun `auto reconnect walks the backoff and gives up after five retries`() = runTest(dispatcher) {
+        val transport = FlakyTransport()
+        val viewModel = viewModel(transport = transport)
+
+        viewModel.setAutoReconnect(true)
+        advanceUntilIdle()
+
+        assertEquals("one initial attempt plus five retries", 6, transport.attempts)
+        assertEquals(
+            DshAdbAutoConnectPolicy.MAX_ATTEMPTS,
+            viewModel.state.value.autoConnect.attempts
+        )
+        assertNull(viewModel.state.value.retryNote)
+        assertEquals(DshDeviceChannelStatus.ERROR, viewModel.state.value.adb.status)
+        assertNull(viewModel.state.value.busy)
+    }
+
+    @Test
+    fun `a manual disconnect blocks further automatic retries`() = runTest(dispatcher) {
+        val transport = FlakyTransport()
+        val viewModel = viewModel(transport = transport)
+        viewModel.setAutoReconnect(true)
+        advanceUntilIdle()
+        val attemptsBeforeDisconnect = transport.attempts
+
+        viewModel.disconnectAdb()
+        assertTrue(viewModel.state.value.autoConnect.manualDisconnect)
+        assertNull(viewModel.state.value.retryNote)
+
+        viewModel.connectAdb()
+        advanceUntilIdle()
+
+        assertEquals(
+            "a manual disconnect allows exactly one attempt and no retry",
+            attemptsBeforeDisconnect + 1,
+            transport.attempts
+        )
+        assertTrue(viewModel.state.value.autoConnect.manualDisconnect)
+    }
+
+    @Test
+    fun `re-enabling auto reconnect clears the manual disconnect`() = runTest(dispatcher) {
+        val transport = FlakyTransport()
+        val viewModel = viewModel(transport = transport)
+        viewModel.setAutoReconnect(true)
+        advanceUntilIdle()
+        viewModel.disconnectAdb()
+
+        viewModel.setAutoReconnect(true)
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.autoConnect.manualDisconnect)
+        assertTrue(transport.attempts > 1)
+    }
+
+    @Test
+    fun `a successful connect resets the retry budget and saves the endpoint`() = runTest(dispatcher) {
+        val transport = FlakyTransport(succeedAfter = 2)
+        val store = MemoryEndpointStore()
+        val viewModel = viewModel(transport = transport, endpointStore = store)
+
+        viewModel.setAutoReconnect(true)
+        advanceUntilIdle()
+
+        assertEquals(DshDeviceChannelStatus.READY, viewModel.state.value.adb.status)
+        assertEquals(0, viewModel.state.value.autoConnect.attempts)
+        assertEquals("127.0.0.1:5555", store.saved)
+    }
+
+    @Test
+    fun `provisioning maps the run into step results`() = runTest(dispatcher) {
+        val provisioner = DshAdbProvisioner(
+            root = DshRootChannel(
+                RecordingLauncher { _, _ -> FakeDshProcess() },
+                probeTimeoutMs = 50L,
+                io = dispatcher
+            ),
+            identity = { error("no identity in this test") },
+            transport = { FlakyTransport() },
+            portReady = { true },
+            io = dispatcher
+        )
+        val viewModel = viewModel(provisioner = provisioner)
+
+        viewModel.provisionAdb()
+        advanceUntilIdle()
+
+        val provisioning = viewModel.state.value.provisioning
+        assertNotNull(provisioning)
+        assertFalse(provisioning!!.running)
+        assertEquals(1, provisioning.steps.size)
+        assertEquals(DshDeviceCommandFailure.POLICY_BLOCKED, provisioning.failure)
+        assertNull(viewModel.state.value.busy)
+    }
+
     // endregion
 
     private fun viewModel(
         launcher: DshProcessLauncher = RecordingLauncher { _, _ -> FakeDshProcess() },
-        transport: AdbTransport? = null
+        transport: AdbTransport? = null,
+        provisioner: DshAdbProvisioner? = null,
+        endpointStore: DshAdbEndpointStore? = null
     ): DshDeviceAccessViewModel {
         val created = DshDeviceAccessViewModel(
             root = DshRootChannel(launcher, probeTimeoutMs = 50L, io = dispatcher),
-            adb = if (transport == null) DshAdbChannel() else DshAdbChannel(transport)
+            adb = if (transport == null) DshAdbChannel() else DshAdbChannel(transport),
+            provisioner = provisioner,
+            endpointStore = endpointStore
         )
         viewModels += created
         return created
+    }
+}
+
+/** In-memory endpoint memory for the page-state tests. */
+private class MemoryEndpointStore(private var stored: String? = null) : DshAdbEndpointStore {
+
+    val saved: String?
+        get() = stored
+
+    override fun savedEndpoint(): String? = stored
+
+    override fun saveEndpoint(endpoint: String) {
+        stored = endpoint
+    }
+
+    override fun clearEndpoint() {
+        stored = null
+    }
+}
+
+/**
+ * Transport double that fails until [succeedAfter] connect attempts, then reports CONNECTED.
+ * No socket is opened.
+ */
+private class FlakyTransport(private val succeedAfter: Int = Int.MAX_VALUE) : AdbTransport {
+
+    var attempts: Int = 0
+        private set
+
+    private var current: DshAdbTransportState = DshAdbTransportState.NOT_CONFIGURED
+
+    override fun state(): DshAdbTransportState = current
+
+    override suspend fun connect(endpoint: DshAdbEndpoint): Boolean {
+        attempts += 1
+        current = if (attempts >= succeedAfter) {
+            DshAdbTransportState.CONNECTED
+        } else {
+            DshAdbTransportState.FAILED
+        }
+        return current == DshAdbTransportState.CONNECTED
+    }
+
+    override suspend fun shell(command: String): DshAdbShellResult =
+        DshAdbShellResult(exitCode = 0, stdout = "sdk_gphone64_arm64\n", stderr = "")
+
+    override fun close() {
+        current = DshAdbTransportState.NOT_CONFIGURED
     }
 }
 

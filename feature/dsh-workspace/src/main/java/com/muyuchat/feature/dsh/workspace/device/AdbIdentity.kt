@@ -56,14 +56,11 @@ class AdbIdentity private constructor(private val keyPair: KeyPair) {
         return out
     }
 
+    /** Single-line base64 of [publicKeyWireFormat]; this exact string is what `adb_keys` stores. */
+    fun publicKeyBase64(): String = Base64.getEncoder().encodeToString(publicKeyWireFormat())
+
     /** Payload of `AUTH(ADB_AUTH_RSAPUBLICKEY)`: base64 of [publicKeyWireFormat] plus a NUL. */
-    fun publicKeyPayload(): ByteArray {
-        val base64 = Base64.getEncoder().encode(publicKeyWireFormat())
-        val payload = ByteArray(base64.size + 1)
-        System.arraycopy(base64, 0, payload, 0, base64.size)
-        payload[base64.size] = 0
-        return payload
-    }
+    fun publicKeyPayload(): ByteArray = (publicKeyBase64() + "\u0000").toByteArray(Charsets.UTF_8)
 
     companion object {
 

@@ -114,10 +114,40 @@ class DshRootChannel internal constructor(
                 return notGranted(probed.status)
             }
         }
+        return runTrusted(
+            script = DshDeviceCommandPolicy.renderSafe(allowed.segments),
+            timeoutMs = timeoutMs
+        )
+    }
+
+    /**
+     * Runs one **constant, code-owned** root script without the user-command policy.
+     *
+     * Why this exists as a second path: [DshDeviceCommandPolicy] must keep refusing `setprop`,
+     * service restarts and file writes for anything a model asks for. ADB provisioning is not a
+     * model request — it is one fixed script with a fixed purpose, shown to the user in a
+     * confirmation dialog, parameterised only by a base64-validated public key. That is why this
+     * entry point is `internal` (only this module's [DshAdbProvisioner] may call it), while the
+     * public [exec] keeps gating every user/model command.
+     */
+    internal suspend fun runConstantScript(
+        script: String,
+        timeoutMs: Long = DSH_DEVICE_COMMAND_TIMEOUT_MS
+    ): DshDeviceCommandResult {
+        if (cachedStatus != DshDeviceChannelStatus.READY) {
+            val probed = probe()
+            if (probed.status != DshDeviceChannelStatus.READY) {
+                return notGranted(probed.status)
+            }
+        }
+        return runTrusted(script = script, timeoutMs = timeoutMs)
+    }
+
+    private suspend fun runTrusted(script: String, timeoutMs: Long): DshDeviceCommandResult {
         val effectiveTimeout = if (timeoutMs > 0) timeoutMs else DSH_DEVICE_COMMAND_TIMEOUT_MS
         val run = runDshProcess(
             launcher = launcher,
-            argv = listOf(SU_BINARY, "-c", DshDeviceCommandPolicy.renderSafe(allowed.segments)),
+            argv = listOf(SU_BINARY, "-c", script),
             timeoutMs = effectiveTimeout,
             dispatcher = io
         )

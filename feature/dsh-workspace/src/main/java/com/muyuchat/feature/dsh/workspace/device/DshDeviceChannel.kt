@@ -77,7 +77,10 @@ enum class DshDeviceCommandFailure(val code: String) {
     PROTOCOL_ERROR("protocol_error"),
 
     /** The device refuses this app's ADB key until it is registered in `adb_keys`. */
-    PAIRING_REQUIRED("pairing_required")
+    PAIRING_REQUIRED("pairing_required"),
+
+    /** A privileged step was refused by SELinux/LSM policy instead of failing on its own. */
+    SELINUX_DENIED("selinux_denied")
 }
 
 /**
