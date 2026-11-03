@@ -54,11 +54,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaHairline
 import com.muyuchat.core.designsystem.McaIconSize
 import com.muyuchat.core.designsystem.McaIcons
 import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.McaShape
 import com.muyuchat.core.designsystem.McaSwitch
 import com.muyuchat.core.video.contract.VideoNode
+import com.muyuchat.core.video.contract.VideoNodeTypeId
+import com.muyuchat.core.video.contract.VideoNodeValue
 import com.muyuchat.core.video.contract.VideoSubmitResult
 import com.muyuchat.core.video.contract.VideoWorkflowIssue
 import com.muyuchat.feature.video.workspace.ImportUiState
@@ -79,12 +83,22 @@ import kotlinx.coroutines.withContext
  * V1-05 adds the published-video library (playback/share/save-as/delete) through the top-bar
  * "作品" entry and the ComfyUI API-format import entry. Both are driven by the injected ports;
  * the page never fabricates a media row, a run stage or an import success.
+ *
+ * The onboarding pass keeps the first screen for the mode, the engine state and the model card:
+ * the two engine switches share one compact settings card, and the guide plus the example prompts
+ * are two collapsed accordion cards right below the model card. [onUsePrompt] is an optional
+ * override so a caller can redirect those taps without changing the page's default.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun VideoWorkspaceScreen(
     viewModel: VideoWorkspaceViewModel,
     onExit: () -> Unit,
+    /**
+     * Optional receiver of the example-prompt taps. When null (the default) the page writes the
+     * sentence into the current draft's text node itself, so existing call sites stay unchanged.
+     */
+    onUsePrompt: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val mode by viewModel.mode.collectAsState()
@@ -93,11 +107,41 @@ internal fun VideoWorkspaceScreen(
     val connectRejection by viewModel.lastConnectRejection.collectAsState()
     val importState by viewModel.importState.collectAsState()
     val remoteState by viewModel.remoteState.collectAsState()
+    val externalEngineEnabled by viewModel.externalEngineEnabled.collectAsState()
+    val fullVaeDecode by viewModel.fullVaeDecode.collectAsState()
     var submitNotice by remember { mutableStateOf<String?>(null) }
+    var promptNotice by remember { mutableStateOf<String?>(null) }
     var showLibrary by rememberSaveable { mutableStateOf(false) }
     val document = viewModel.document()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    /**
+     * Example prompts target the draft's text node instead of a fixed node id, so an imported or
+     * hand-edited graph works too. When the draft has no text node the tap is reported instead of
+     * being dropped silently; a caller-supplied [onUsePrompt] takes precedence.
+     */
+    val fillPrompt: (String) -> Unit = { prompt ->
+        val override = onUsePrompt
+        if (override != null) {
+            override(prompt)
+            promptNotice = "已填入提示词"
+        } else {
+            val inputNode = viewModel.document().nodes.firstOrNull {
+                it.typeId == VideoNodeTypeId.INPUT_TEXT.typeId
+            }
+            if (inputNode == null) {
+                promptNotice = "当前草稿没有「文字输入」节点，未填入提示词"
+            } else {
+                viewModel.setParam(
+                    inputNode.nodeId,
+                    "prompt",
+                    VideoNodeValue.TextValue(prompt),
+                )
+                promptNotice = "已填入提示词，可在「文字输入」中修改"
+            }
+        }
+    }
 
     val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -252,23 +296,29 @@ internal fun VideoWorkspaceScreen(
                 .padding(horizontal = 16.dp),
         ) {
             TemplateModeRow(mode, viewModel)
-            Text(
-                "默认走高性能引擎（sdcpp_external）；内置 MCA 回退路径已实测 64×64×9×1（约 4–6 分钟），480×832 超过 20 分钟。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .padding(top = 4.dp)
-                    .testTag("video.experimental_notice"),
-            )
-            ExternalEngineRow(
-                enabled = viewModel.externalEngineEnabled.collectAsState().value,
-                onCheckedChange = viewModel::setExternalEngineEnabled,
-            )
-            FullVaeRow(
-                enabled = viewModel.fullVaeDecode.collectAsState().value,
-                onCheckedChange = viewModel::setFullVaeDecode,
+            EngineDecodeSettingsCard(
+                externalEngineEnabled = externalEngineEnabled,
+                onExternalEngineChange = viewModel::setExternalEngineEnabled,
+                fullVaeEnabled = fullVaeDecode,
+                onFullVaeChange = viewModel::setFullVaeDecode,
+                modifier = Modifier.padding(top = 6.dp),
             )
             VideoModelAssetsSection(viewModel)
+            VideoUsageGuideCard(modifier = Modifier.padding(top = 12.dp))
+            VideoPromptExamplesCard(
+                onUsePrompt = fillPrompt,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            promptNotice?.let { notice ->
+                Text(
+                    notice,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .testTag("video.prompt_fill_notice"),
+                )
+            }
             VideoRecentRunsSection(viewModel)
             if (mode == VideoWorkspaceViewModel.TemplateMode.IMAGE_TO_VIDEO) {
                 InputImageRow(
@@ -299,6 +349,14 @@ internal fun VideoWorkspaceScreen(
             }
 
             if (viewMode == VideoWorkspaceViewModel.ViewMode.SIMPLIFIED) {
+                Text(
+                    "生成流程",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .testTag("video.chain_title"),
+                )
                 SimplifiedChainSection(viewModel)
             } else {
                 AdvancedSection(viewModel)
@@ -395,7 +453,7 @@ private fun TemplateModeRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .padding(top = 2.dp, bottom = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         ModeChip(
@@ -497,6 +555,71 @@ internal fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 /**
+ * One compact card for the engine and decode switches. It replaces the two full-width 16sp rows:
+ * both settings stay visible together, separated by an inset hairline, with the same semantics,
+ * test tags and honest trade-off lines as before.
+ */
+@Composable
+private fun EngineDecodeSettingsCard(
+    externalEngineEnabled: Boolean,
+    onExternalEngineChange: (Boolean) -> Unit,
+    fullVaeEnabled: Boolean,
+    onFullVaeChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = McaShape.CardAction,
+        border = BorderStroke(McaHairline.Width, McaHairline.default()),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("video.engine_settings"),
+    ) {
+        Column(Modifier.padding(vertical = 2.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "引擎与解码",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "改动只影响之后的提交",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            ExternalEngineRow(
+                enabled = externalEngineEnabled,
+                onCheckedChange = onExternalEngineChange,
+            )
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 12.dp),
+                thickness = McaHairline.Width,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+            )
+            FullVaeRow(
+                enabled = fullVaeEnabled,
+                onCheckedChange = onFullVaeChange,
+            )
+            Text(
+                "默认走高性能引擎（sdcpp_external）；内置 MCA 回退实测 64×64×9×1 约 4–6 分钟，480×832 超过 20 分钟。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 8.dp)
+                    .testTag("video.experimental_notice"),
+            )
+        }
+    }
+}
+
+/**
  * Decode-quality switch. Default ON: toggling only changes the decoder frozen into FUTURE submits;
  * existing runs and retries keep the decoder recorded in their snapshot.
  */
@@ -506,7 +629,7 @@ private fun FullVaeRow(enabled: Boolean, onCheckedChange: (Boolean) -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .toggleable(value = enabled, role = Role.Switch, onValueChange = onCheckedChange)
-            .padding(top = 4.dp, bottom = 4.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
             .testTag("video.full_vae_toggle")
             .semantics {
                 contentDescription = "完整 Wan VAE 解码（空间分块）"
@@ -517,17 +640,19 @@ private fun FullVaeRow(enabled: Boolean, onCheckedChange: (Boolean) -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(
                 "完整 Wan VAE 解码",
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
             )
             Text(
                 if (enabled) {
-                    "已启用（默认）：完整 VAE + 空间分块，画质更好；480p 一段约 30–40 分钟"
+                    "画质优先 · 480p 约 30–40 分钟"
                 } else {
-                    "关闭：TAE 解码，约 6 分钟；切换只影响之后的提交"
+                    "TAE 解码 · 约 6 分钟"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Spacer(Modifier.width(12.dp))
@@ -537,7 +662,6 @@ private fun FullVaeRow(enabled: Boolean, onCheckedChange: (Boolean) -> Unit) {
             modifier = Modifier.testTag("video.full_vae_switch"),
         )
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 }
 
 @Composable
@@ -546,7 +670,7 @@ private fun ExternalEngineRow(enabled: Boolean, onCheckedChange: (Boolean) -> Un
         modifier = Modifier
             .fillMaxWidth()
             .toggleable(value = enabled, role = Role.Switch, onValueChange = onCheckedChange)
-            .padding(top = 8.dp, bottom = 4.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
             .testTag("video.external_engine_toggle")
             .semantics {
                 contentDescription = "高性能视频引擎（sdcpp_external）"
@@ -557,17 +681,19 @@ private fun ExternalEngineRow(enabled: Boolean, onCheckedChange: (Boolean) -> Un
         Column(Modifier.weight(1f)) {
             Text(
                 "高性能视频引擎",
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
             )
             Text(
                 if (enabled) {
-                    "已启用（默认）：之后的提交使用 sdcpp_external（stable-diffusion.cpp 内核）"
+                    "sdcpp_external（stable-diffusion.cpp）"
                 } else {
-                    "关闭：使用内置 MCA 引擎；切换只影响之后的提交"
+                    "使用内置 MCA 引擎（回退）"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Spacer(Modifier.width(12.dp))
@@ -577,14 +703,13 @@ private fun ExternalEngineRow(enabled: Boolean, onCheckedChange: (Boolean) -> Un
             modifier = Modifier.testTag("video.external_engine_switch"),
         )
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 }
 
 @Composable
 private fun SimplifiedChainSection(viewModel: VideoWorkspaceViewModel) {
     val document = viewModel.document()
     val issues = viewModel.issues()
-    Column(Modifier.padding(top = 8.dp)) {
+    Column(Modifier.padding(top = 2.dp)) {
         VideoNodePresentations.simplifiedChainOrder.forEach { type ->
             document.nodes.filter { it.typeId == type.typeId }.forEach { node ->
                 NodeChainRow(
