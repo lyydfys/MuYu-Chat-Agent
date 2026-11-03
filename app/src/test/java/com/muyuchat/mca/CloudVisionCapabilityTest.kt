@@ -245,7 +245,11 @@ class CloudVisionCapabilityTest {
         val content = messages.getJSONObject(0).getJSONArray("content")
         val source = content.getJSONObject(0).getJSONObject("source")
 
-        assertTrue(root.getString("system").startsWith("系统设定"))
+        // The system prefix is now a cached content-block array; its first block keeps the text.
+        val systemText = root.getJSONArray("system").getJSONObject(0).getString("text")
+        assertTrue(systemText.startsWith("系统设定"))
+        assertEquals("ephemeral", root.getJSONArray("system").getJSONObject(0)
+            .getJSONObject("cache_control").getString("type"))
         assertEquals("claude-3-5-sonnet-latest", root.getString("model"))
         assertEquals("user", messages.getJSONObject(0).getString("role"))
         assertEquals("image", content.getJSONObject(0).getString("type"))
@@ -274,7 +278,7 @@ class CloudVisionCapabilityTest {
             )
         )
 
-        val system = root.getString("system")
+        val system = root.getJSONArray("system").getJSONObject(0).getString("text")
         assertTrue(system.contains("Role: Mira"))
         assertTrue(system.contains("The north gate is locked."))
         assertEquals("user", root.getJSONArray("messages").getJSONObject(0).getString("role"))

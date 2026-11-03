@@ -7,6 +7,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.deduplicateVisionAttachments
+import java.security.MessageDigest
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -122,6 +123,7 @@ internal fun buildOpenAiChatJson(config: CloudApiConfig, request: ChatRequest): 
                 root.put("stop", JSONArray(params.stopWords))
             }
             applyOpenAiCompatibleReasoning(root, config, params)
+            applyOpenAiPromptCacheKey(root, config, request)
         }
 }
 
@@ -134,7 +136,14 @@ internal fun buildAnthropicChatJson(config: CloudApiConfig, request: ChatRequest
         .put("max_tokens", params.effectiveNPredict().coerceIn(1, 8192))
         .put("temperature", params.temperature.toDouble())
         .put("top_p", params.topP.toDouble())
-        .put("system", split.system)
+        .also { root ->
+            // Anthropic only caches a prefix that carries an explicit breakpoint. The stable
+            // system prefix (role card plus world-book anchors) is the only part worth marking:
+            // message blocks stay unmarked so the request never exceeds the four-point limit.
+            if (split.system.isNotBlank()) {
+                root.put("system", anthropicCachedSystemJson(split.system))
+            }
+        }
         .put("messages", split.messages.toAnthropicMessagesJson())
         .also { root ->
             if (params.reasoningMode != ReasoningMode.OFF) {
@@ -147,6 +156,35 @@ internal fun buildAnthropicChatJson(config: CloudApiConfig, request: ChatRequest
             }
         }
 }
+
+/** System prompt as one cached text block; an empty system must omit the field entirely. */
+private fun anthropicCachedSystemJson(system: String): JSONArray =
+    JSONArray().put(
+        JSONObject()
+            .put("type", "text")
+            .put("text", system)
+            .put("cache_control", JSONObject().put("type", "ephemeral"))
+    )
+
+/**
+ * OpenAI prompt caching is keyed by the official endpoint only. Strict compatible gateways reject
+ * unknown top-level fields with a 400, so every other Base URL keeps the plain payload.
+ */
+private fun applyOpenAiPromptCacheKey(root: JSONObject, config: CloudApiConfig, request: ChatRequest) {
+    if (!config.baseUrl.contains("openai.com", ignoreCase = true)) return
+    val sessionId = request.persistentSessionId?.trim()?.takeIf { it.isNotBlank() } ?: return
+    root.put("prompt_cache_key", openAiPromptCacheKeyForSession(sessionId))
+}
+
+/**
+ * Opaque routing key: sha256 of the session identity, truncated to 32 hex chars. The raw
+ * conversation identity never leaves the app.
+ */
+internal fun openAiPromptCacheKeyForSession(sessionId: String): String =
+    MessageDigest.getInstance("SHA-256")
+        .digest(sessionId.toByteArray(Charsets.UTF_8))
+        .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+        .take(32)
 
 private fun applyOpenAiCompatibleReasoning(
     root: JSONObject,

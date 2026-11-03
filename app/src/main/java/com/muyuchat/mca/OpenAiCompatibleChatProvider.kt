@@ -153,6 +153,7 @@ class OpenAiCompatibleChatProvider(
                                 estimatedPromptTokens = estimatedPromptTokens,
                                 completionChars = completionChars,
                                 usage = usage,
+                                cachedInputTokens = usage.cachedInput,
                                 streaming = false
                             )
                         )
@@ -169,6 +170,7 @@ class OpenAiCompatibleChatProvider(
                             estimatedPromptTokens = estimatedPromptTokens,
                             completionChars = completionChars,
                             usage = usage,
+                            cachedInputTokens = usage.cachedInput,
                             streaming = false
                         )
                     )
@@ -185,7 +187,8 @@ class OpenAiCompatibleChatProvider(
                         finishedAt = finishedAt,
                         estimatedPromptTokens = estimatedPromptTokens,
                         completionChars = completionChars,
-                        usage = usage
+                        usage = usage,
+                        cachedInputTokens = usage.cachedInput
                     )
                 )
             )
@@ -534,6 +537,8 @@ class OpenAiCompatibleChatProvider(
         estimatedPromptTokens: Int = 0,
         completionChars: Int = 0,
         usage: CloudTokenUsage = CloudTokenUsage(),
+        /** Provider-reported prompt-cache reuse; null means the provider reported no such field. */
+        cachedInputTokens: Int? = null,
         streaming: Boolean = true
     ): RuntimeStats {
         val decodeMs = (finishedAt - (firstChunkAt ?: startedAt)).coerceAtLeast(0L)
@@ -542,6 +547,7 @@ class OpenAiCompatibleChatProvider(
         val totalMs = (finishedAt - startedAt).coerceAtLeast(0L)
         val e2eTps = if (totalMs > 0L) completionTokens * 1000.0 / totalMs else 0.0
         val tps = if (streaming && decodeMs > 0L) completionTokens * 1000.0 / decodeMs else e2eTps
+        val reusedTokens = (cachedInputTokens ?: 0).coerceAtLeast(0)
         return RuntimeStats(
             loaded = true,
             modelPath = "${config.apiFormat.label}/${config.chatModel}",
@@ -552,6 +558,11 @@ class OpenAiCompatibleChatProvider(
             decodeMs = decodeMs,
             decodeTps = tps,
             e2eTps = e2eTps,
+            cacheReuseHit = reusedTokens > 0,
+            cacheReusedTokens = reusedTokens,
+            cacheReuseHits = if (reusedTokens > 0) 1L else 0L,
+            cacheReuseMisses = if (cachedInputTokens != null && cachedInputTokens == 0) 1L else 0L,
+            cacheReuseReason = if (cachedInputTokens != null) PROVIDER_PROMPT_CACHE_REASON else "unknown",
             promptTokensEstimated = usage.input == null,
             completionTokensEstimated = usage.output == null
         )
@@ -569,5 +580,8 @@ class OpenAiCompatibleChatProvider(
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_NON_STREAM_BODY_CHARS = 1_048_576
         private const val MAX_LISTED_MODELS = 256
+
+        /** `cacheReuseReason` for provider-side prompt caching; matches the Responses decoder. */
+        private const val PROVIDER_PROMPT_CACHE_REASON = "provider_prompt_cache"
     }
 }
