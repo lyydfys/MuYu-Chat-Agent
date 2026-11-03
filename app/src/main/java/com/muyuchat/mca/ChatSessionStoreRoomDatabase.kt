@@ -162,7 +162,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
             instance ?: synchronized(this) {
                 val appContext = context.applicationContext
                 repairLegacySchemaIfNeeded(appContext)
-                repairOversizedSessionJsonIfNeeded(appContext)
+                repairOversizedRowsIfNeeded(appContext)
                 instance ?: Room.databaseBuilder(
                     appContext,
                     McaRoomDatabase::class.java,
@@ -219,14 +219,14 @@ abstract class McaRoomDatabase : RoomDatabase() {
          * the chat send path. The repair must therefore run on the raw database, where bounded
          * `substr` slices can still be read. Failures are logged and never block start-up.
          */
-        private fun repairOversizedSessionJsonIfNeeded(context: Context) {
+        private fun repairOversizedRowsIfNeeded(context: Context) {
             // Configured for every open, not just repair: the entity mappers use the same store.
-            SessionJsonOffload.configure(java.io.File(context.filesDir, "session_json"))
+            LargeRowOffload.configure(java.io.File(context.filesDir, "row_text"))
             val databaseFile = context.getDatabasePath("mca.db")
             if (!databaseFile.exists()) return
             runCatching {
                 SQLiteDatabase.openDatabase(databaseFile.path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
-                    val outcome = SessionJsonRepair.repairOversizedSessionJson(db)
+                    val outcome = LargeRowRepair.repair(db)
                     if (outcome.changed || outcome.failedRows > 0 || outcome.failureMessage != null) {
                         Log.w(
                             "MCA-ChatHistory",

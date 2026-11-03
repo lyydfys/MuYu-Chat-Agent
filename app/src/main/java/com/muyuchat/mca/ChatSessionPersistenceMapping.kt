@@ -222,10 +222,10 @@ internal fun ChatSessionRecord.toEntity(): ChatSessionEntity =
  * Funnelling here means no other write site can reintroduce an oversized row.
  */
 internal fun ChatSessionEntity.withOversizedJsonOffloaded(): ChatSessionEntity {
-    if (!SessionJsonOffload.isConfigured()) return this
-    val offloadedSnapshot = SessionJsonOffload.offload(id, assistantSnapshotJson)
-    val offloadedAppearance = SessionJsonOffload.offload(id, appearanceJson)
-    val offloadedSummaries = SessionJsonOffload.offload(id, contextSummariesJson)
+    if (!LargeRowOffload.isConfigured()) return this
+    val offloadedSnapshot = LargeRowOffload.offload(id, assistantSnapshotJson)
+    val offloadedAppearance = LargeRowOffload.offload(id, appearanceJson)
+    val offloadedSummaries = LargeRowOffload.offload(id, contextSummariesJson)
     if (offloadedSnapshot == assistantSnapshotJson &&
         offloadedAppearance == appearanceJson &&
         offloadedSummaries == contextSummariesJson
@@ -236,6 +236,45 @@ internal fun ChatSessionEntity.withOversizedJsonOffloaded(): ChatSessionEntity {
         assistantSnapshotJson = offloadedSnapshot,
         appearanceJson = offloadedAppearance,
         contextSummariesJson = offloadedSummaries
+    )
+}
+
+internal fun AssistantEntity.withOversizedTextOffloaded(): AssistantEntity {
+    if (!LargeRowOffload.isConfigured()) return this
+    return copy(
+        systemPrompt = LargeRowOffload.offload(id, systemPrompt).orEmpty(),
+        paramsJson = LargeRowOffload.offload(id, paramsJson).orEmpty(),
+        characterCardJson = LargeRowOffload.offload(id, characterCardJson),
+        appearanceJson = LargeRowOffload.offload(id, appearanceJson)
+    )
+}
+
+internal fun ChatMessageEntity.withOversizedTextOffloaded(): ChatMessageEntity {
+    if (!LargeRowOffload.isConfigured()) return this
+    return copy(
+        content = LargeRowOffload.offload("$sessionId-$position", content).orEmpty(),
+        reasoningContent = LargeRowOffload.offload("$sessionId-$position-reasoning", reasoningContent).orEmpty()
+    )
+}
+
+internal fun MemoryEntity.withOversizedTextOffloaded(): MemoryEntity {
+    if (!LargeRowOffload.isConfigured()) return this
+    return copy(content = LargeRowOffload.offload(id, content).orEmpty())
+}
+
+internal fun AssistantMemoryTurnEntity.withOversizedTextOffloaded(): AssistantMemoryTurnEntity {
+    if (!LargeRowOffload.isConfigured()) return this
+    return copy(
+        userText = LargeRowOffload.offload("$id-user", userText).orEmpty(),
+        assistantText = LargeRowOffload.offload("$id-assistant", assistantText).orEmpty()
+    )
+}
+
+internal fun FileAssetEntity.withOversizedTextOffloaded(): FileAssetEntity {
+    if (!LargeRowOffload.isConfigured()) return this
+    return copy(
+        text = LargeRowOffload.offload(id, text).orEmpty(),
+        preview = LargeRowOffload.offload("$id-preview", preview).orEmpty()
     )
 }
 
@@ -269,7 +308,7 @@ internal fun FileAssetRecord.toEntity(): FileAssetEntity =
         sizeBytes = sizeBytes,
         chatSessionId = chatSessionId,
         projectId = projectId
-    )
+    ).withOversizedTextOffloaded()
 
 internal fun MemoryRecord.toEntity(): MemoryEntity =
     MemoryEntity(
@@ -279,7 +318,7 @@ internal fun MemoryRecord.toEntity(): MemoryEntity =
         content = content,
         source = source,
         createdAt = createdAt
-    )
+    ).withOversizedTextOffloaded()
 
 internal fun MemoryRecord.boundedForPersistence(): MemoryRecord? {
     if (id.isBlank() || id.length > MAX_MEMORY_ID_CHARS ||
@@ -310,7 +349,7 @@ internal fun AssistantMemoryTurnRecord.toEntity(): AssistantMemoryTurnEntity =
         userText = userText,
         assistantText = assistantText,
         createdAt = createdAt
-    )
+    ).withOversizedTextOffloaded()
 
 internal fun AssistantRecord.toEntity(): AssistantEntity =
     AssistantEntity(
@@ -333,7 +372,7 @@ internal fun AssistantRecord.toEntity(): AssistantEntity =
         appearanceJson = appearance.takeUnless { it.isDefault }?.toJsonString(),
         createdAt = createdAt,
         updatedAt = updatedAt
-    )
+    ).withOversizedTextOffloaded()
 
 internal fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessageEntity =
     ChatMessageEntity(
@@ -355,16 +394,16 @@ internal fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessage
         generatedImageJson = generatedImageRequest?.toJson()?.toString(),
         pinned = pinned,
         contextAssemblyTraceJson = contextAssemblyTraceJson
-    )
+    ).withOversizedTextOffloaded()
 
 internal fun ChatMessageEntity.toChatMessage(): ChatMessage =
     ChatMessage(
         id = messageId.ifBlank { "$sessionId:$position:$createdAt" },
         role = runCatching { Role.valueOf(role) }.getOrDefault(Role.USER),
-        content = content,
+        content = LargeRowOffload.resolve(content).orEmpty(),
         createdAt = createdAt,
         tokenCount = tokenCount,
-        reasoningContent = reasoningContent,
+        reasoningContent = LargeRowOffload.resolve(reasoningContent).orEmpty(),
         reasoningDurationMs = reasoningDurationMs,
         imageAttachments = runCatching {
             JSONArray(imageAttachmentsJson)
@@ -405,8 +444,8 @@ internal fun FileAssetEntity.toFileAssetRecord(): FileAssetRecord =
         id = id,
         name = name,
         mimeType = mimeType,
-        text = text,
-        preview = preview,
+        text = LargeRowOffload.resolve(text).orEmpty(),
+        preview = LargeRowOffload.resolve(preview).orEmpty(),
         truncated = truncated,
         source = source,
         createdAt = createdAt,
@@ -420,7 +459,7 @@ internal fun MemoryEntity.toMemoryRecord(): MemoryRecord =
         id = id,
         assistantId = assistantId,
         scope = scope,
-        content = content,
+        content = LargeRowOffload.resolve(content).orEmpty(),
         source = source,
         createdAt = createdAt
     )
@@ -430,8 +469,8 @@ internal fun AssistantMemoryTurnEntity.toRecord(): AssistantMemoryTurnRecord =
         id = id,
         assistantId = assistantId,
         sessionId = sessionId,
-        userText = userText,
-        assistantText = assistantText,
+        userText = LargeRowOffload.resolve(userText).orEmpty(),
+        assistantText = LargeRowOffload.resolve(assistantText).orEmpty(),
         createdAt = createdAt
     )
 
@@ -441,11 +480,11 @@ internal fun AssistantEntity.toAssistantRecord(): AssistantRecord =
         name = name,
         avatar = avatar,
         tag = tag,
-        systemPrompt = systemPrompt,
+        systemPrompt = LargeRowOffload.resolve(systemPrompt).orEmpty(),
         defaultModelMode = defaultModelMode,
         defaultModelId = defaultModelId,
-        paramsJson = paramsJson,
-        characterCardJson = characterCardJson,
+        paramsJson = LargeRowOffload.resolve(paramsJson).orEmpty(),
+        characterCardJson = LargeRowOffload.resolve(characterCardJson),
         memoryEnabled = memoryEnabled,
         memorySummaryInterval = memorySummaryInterval.coerceIn(
             AssistantRecord.MIN_MEMORY_SUMMARY_INTERVAL,
@@ -453,7 +492,7 @@ internal fun AssistantEntity.toAssistantRecord(): AssistantRecord =
         ),
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,
-        appearance = ChatAppearance.fromJsonOrNull(appearanceJson) ?: ChatAppearance(),
+        appearance = ChatAppearance.fromJsonOrNull(LargeRowOffload.resolve(appearanceJson)) ?: ChatAppearance(),
         createdAt = createdAt,
         updatedAt = updatedAt
     )

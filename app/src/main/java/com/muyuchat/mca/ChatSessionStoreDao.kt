@@ -113,16 +113,16 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
                     projectId = session.projectId,
                     assistantId = session.assistantId,
                     assistantSnapshot = AssistantConversationSnapshot.fromJsonOrNull(
-                        SessionJsonOffload.resolve(session.assistantSnapshotJson)
+                        LargeRowOffload.resolve(session.assistantSnapshotJson)
                     ),
                     mixedAssistantHistory = session.mixedAssistantHistory,
                     modelMode = session.modelMode,
                     modelId = session.modelId,
                     appearanceOverride = ChatAppearance.fromJsonOrNull(
-                        SessionJsonOffload.resolve(session.appearanceJson)
+                        LargeRowOffload.resolve(session.appearanceJson)
                     ),
                     contextSummaries = contextSummariesFromJson(
-                        SessionJsonOffload.resolve(session.contextSummariesJson)
+                        LargeRowOffload.resolve(session.contextSummariesJson)
                     )
                 )
             }.onFailure { error ->
