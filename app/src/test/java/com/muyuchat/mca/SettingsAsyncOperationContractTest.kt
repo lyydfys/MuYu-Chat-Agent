@@ -87,6 +87,21 @@ class SettingsAsyncOperationContractTest {
         assertFalse(featureSources.contains("Deferred<"))
     }
 
+    @Test
+    fun droppedPrefixCacheOptOutIsReportedInsteadOfIgnored() {
+        val setter = functionBody(sourceFile("MainViewModel.kt"), "setPersistentPrefixCacheEnabled(")
+
+        // The opt-out shares the cleanup single-flight slot; when another cleanup holds it the
+        // switch used to stay on with no explanation at all.
+        assertTrue(
+            setter.contains(
+                "val started = launchSettingsCleanup(SettingsCleanupOperation.PERSISTENT_PREFIX_CACHE)"
+            )
+        )
+        assertTrue(setter.contains("if (started == null && uiStateStore.current.persistentPrefixCacheEnabled)"))
+        assertTrue(setter.contains("showStatus(\"本机数据正在清理，请稍后再关闭持久化前缀缓存\")"))
+    }
+
     private fun functionBody(source: String, name: String): String {
         val declaration = source.indexOf("fun $name")
         require(declaration >= 0) { "Missing function $name" }

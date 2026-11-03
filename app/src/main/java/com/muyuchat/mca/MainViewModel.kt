@@ -776,11 +776,17 @@ class MainViewModel @JvmOverloads internal constructor(
 
     fun setPersistentPrefixCacheEnabled(enabled: Boolean) {
         if (enabled) {
+            // Enabling is a cheap local flip; only the opt-out has to wipe the disk-backed cache.
             cacheManagementCoordinator.setPersistentPrefixCacheEnabled(true)
-        } else {
-            launchSettingsCleanup(SettingsCleanupOperation.PERSISTENT_PREFIX_CACHE) {
-                cacheManagementCoordinator.setPersistentPrefixCacheEnabled(false)
-            }
+            return
+        }
+        val started = launchSettingsCleanup(SettingsCleanupOperation.PERSISTENT_PREFIX_CACHE) {
+            cacheManagementCoordinator.setPersistentPrefixCacheEnabled(false)
+        }
+        // The single-flight slot is shared with the other cleanups. Staying silent here left the
+        // switch on with no explanation, which reads as a stuck control.
+        if (started == null && uiStateStore.current.persistentPrefixCacheEnabled) {
+            showStatus("本机数据正在清理，请稍后再关闭持久化前缀缓存")
         }
     }
 
