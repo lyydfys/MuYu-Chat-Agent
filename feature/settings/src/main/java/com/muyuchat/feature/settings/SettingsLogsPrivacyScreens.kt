@@ -23,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -180,6 +181,18 @@ fun PrivacyDataScreen(
     var confirmClearImages by rememberSaveable { mutableStateOf(false) }
     var confirmClearFiles by rememberSaveable { mutableStateOf(false) }
     var confirmClearPersistentPrefixCache by rememberSaveable { mutableStateOf(false) }
+    // A two-step confirmation is armed against the counts the user just read. The owner runs one
+    // cleanup at a time and drops any concurrent request, so once any cleanup takes the slot every
+    // destructive control here is disabled. An armed label that survived that window would turn the
+    // next single tap into an immediate wipe.
+    LaunchedEffect(state.cleanupBusy.any) {
+        if (state.cleanupBusy.any) {
+            confirmClearChats = false
+            confirmClearImages = false
+            confirmClearFiles = false
+            confirmClearPersistentPrefixCache = false
+        }
+    }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -218,6 +231,9 @@ fun PrivacyDataScreen(
                 entryCount = state.persistentPrefixCacheEntryCount,
                 bytes = state.persistentPrefixCacheBytes,
                 busy = state.cleanupBusy.persistentPrefixCache,
+                // Clearing the prefix cache is itself a cleanup: it holds the shared single-flight
+                // slot, so the switch must not offer an opt-out it cannot honor right now.
+                blockedByCleanup = state.cleanupBusy.any && !state.cleanupBusy.persistentPrefixCache,
                 confirmClear = confirmClearPersistentPrefixCache,
                 onEnabledChanged = onPersistentPrefixCacheEnabledChanged,
                 onRequestClear = {
@@ -238,6 +254,7 @@ fun PrivacyDataScreen(
                 chatHistoryBusy = state.cleanupBusy.chatHistory,
                 imageLibraryBusy = state.cleanupBusy.imageLibrary,
                 fileLibraryBusy = state.cleanupBusy.fileLibrary,
+                anyCleanupBusy = state.cleanupBusy.any,
                 confirmClearChats = confirmClearChats,
                 confirmClearImages = confirmClearImages,
                 confirmClearFiles = confirmClearFiles,
@@ -282,10 +299,13 @@ private fun PersistentPrefixCacheCard(
     entryCount: Int,
     bytes: Long,
     busy: Boolean,
+    blockedByCleanup: Boolean,
     confirmClear: Boolean,
     onEnabledChanged: (Boolean) -> Unit,
     onRequestClear: () -> Unit
 ) {
+    // A switch that flips and snaps straight back reads as a broken control; disable it instead.
+    val interactive = !busy && !blockedByCleanup
     val usageText = remember(entryCount, bytes) {
         "缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}"
     }
@@ -306,8 +326,8 @@ private fun PersistentPrefixCacheCard(
                     Spacer(Modifier.width(12.dp))
                     McaSwitch(
                         checked = enabled,
-                        onCheckedChange = if (busy) null else onEnabledChanged,
-                        enabled = !busy,
+                        onCheckedChange = if (interactive) onEnabledChanged else null,
+                        enabled = interactive,
                         contentDescription = "持久化前缀缓存"
                     )
                 }
@@ -330,7 +350,7 @@ private fun PersistentPrefixCacheCard(
                 onClick = onRequestClear,
                 loading = busy,
                 loadingIndicatorColor = MaterialTheme.colorScheme.primary,
-                enabled = entryCount > 0 && !busy,
+                enabled = entryCount > 0 && interactive,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(if (confirmClear) "确认清空前缀缓存" else "清空前缀缓存")
@@ -347,6 +367,7 @@ private fun PrivacyCleanupCard(
     chatHistoryBusy: Boolean,
     imageLibraryBusy: Boolean,
     fileLibraryBusy: Boolean,
+    anyCleanupBusy: Boolean,
     confirmClearChats: Boolean,
     confirmClearImages: Boolean,
     confirmClearFiles: Boolean,
@@ -354,7 +375,9 @@ private fun PrivacyCleanupCard(
     onRequestClearImages: () -> Unit,
     onRequestClearFiles: () -> Unit
 ) {
-    val anyBusy = chatHistoryBusy || imageLibraryBusy || fileLibraryBusy
+    // The owner serializes cleanups and drops any concurrent request, so all three buttons follow
+    // the aggregate: a running prefix-cache clear blocks them too.
+    val anyBusy = anyCleanupBusy || chatHistoryBusy || imageLibraryBusy || fileLibraryBusy
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),

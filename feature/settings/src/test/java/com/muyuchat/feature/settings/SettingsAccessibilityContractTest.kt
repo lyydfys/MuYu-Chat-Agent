@@ -1,5 +1,6 @@
 package com.muyuchat.feature.settings
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -65,15 +66,26 @@ class SettingsAccessibilityContractTest {
             )
         }
         assertFalse("inline spinners must not grow cleanup button content", logs.contains("CircularProgressIndicator("))
-        assertTrue(logs.contains("enabled = !busy,"))
+        // The clear button used to be gated on `!busy` alone. The owner serializes cleanups into a
+        // single-flight slot, so the gate is now `interactive` = not busy AND no other cleanup
+        // holds the slot; that is stricter, not looser.
+        assertTrue(logs.contains("enabled = interactive,"))
+        assertTrue(logs.contains("enabled = entryCount > 0 && interactive,"))
+        assertTrue(logs.contains("val interactive = !busy && !blockedByCleanup"))
     }
 
     @Test
     fun `section selection has one tactile owner and does not tick for a reselected tab`() {
+        // The chip strip became a dashboard grid: the grid ticks once per opened section and the
+        // back gesture stays silent, so no path can fire two tactile events for one navigation.
         val screen = source("feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsScreens.kt")
-        val chips = screen.substringAfter("SettingsSection.entries.forEach").substringBefore("AnimatedContent(")
-        assertTrue(chips.contains("if (section != item) haptics.tick()"))
-        assertTrue(chips.contains("hapticsEnabled = false"))
+        val hub = screen.substringAfter("private fun SettingsHubContent(")
+            .substringBefore("private fun SettingsHubTopBar(")
+        assertEquals(1, Regex("haptics\\.tick\\(\\)").findAll(hub).count())
+        assertFalse(hub.contains("if (section != item)"))
+        // Returning to the dashboard is navigation, not a selection change.
+        val back = screen.substringAfter("val navigateBackToHub = {").substringBefore("}\n")
+        assertFalse(back.contains("haptics.tick()"))
     }
 
     private fun source(relativePath: String): String =

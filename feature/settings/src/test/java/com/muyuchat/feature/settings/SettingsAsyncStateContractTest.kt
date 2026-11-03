@@ -48,8 +48,30 @@ class SettingsAsyncStateContractTest {
         )
         assertTrue(privacy.contains("state.cleanupBusy.persistentPrefixCache"))
         assertTrue(privacy.contains("state.cleanupBusy.chatHistory"))
-        assertTrue(privacy.contains("enabled = entryCount > 0 && !busy"))
+        assertTrue(privacy.contains("enabled = entryCount > 0 && interactive"))
         assertTrue(privacy.contains("enabled = chatSessionCount > 0 && !anyBusy"))
+    }
+
+    @Test
+    fun everyPrivacyCleanupControlFollowsTheOwnersSingleFlightSlot() {
+        val privacy = sourceFile(
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsLogsPrivacyScreens.kt"
+        )
+
+        // The owner runs one cleanup at a time and drops a concurrent request without any message,
+        // so no control may stay armed while another cleanup holds the slot.
+        assertTrue(privacy.contains("anyCleanupBusy = state.cleanupBusy.any"))
+        assertTrue(
+            privacy.contains(
+                "blockedByCleanup = state.cleanupBusy.any && !state.cleanupBusy.persistentPrefixCache"
+            )
+        )
+        assertTrue(privacy.contains("onCheckedChange = if (interactive) onEnabledChanged else null"))
+        assertTrue(privacy.contains("enabled = entryCount > 0 && interactive"))
+        assertTrue(privacy.contains("val anyBusy = anyCleanupBusy ||"))
+        // An armed confirmation must not survive the wait, or one tap afterwards wipes the data.
+        assertTrue(privacy.contains("LaunchedEffect(state.cleanupBusy.any)"))
+        assertFalse(privacy.contains("if (busy) null else onEnabledChanged"))
     }
 
     private fun String.countOccurrences(value: String): Int =

@@ -4,10 +4,13 @@
    摘要: ${source.snippet}
    类型: ${listOf(source.trustLabel, source.hostLabel).filter { it.isNotBlank() }.joinToString(
 $openBaseAddress（需开启开放端口）
+${SettingsSection.entries.size} 个分区
 ${item.sourceCount} 源
 ${state.diagnostics.size} 条本机诊断记录
+${state.logs.size} 条
 .format(log.decodeTps)} token/s · 首 token ${log.ttftMs} ms
 /v1/models 可用于模型列表；/health 可用于连接检测；/ 是内置网页对话入口。
+99+ 条
 API Key 已填写。
 API Key（可选）
 API使用文档
@@ -56,6 +59,7 @@ http://本机局域网IP:11435/v1
 主搜索源限流、鉴权失败或没有可用结果时，MCA 只会按这里显式配置过的服务接力，不会调用未授权服务。
 仅在客户端要求填写完整请求地址，或你手动发起 HTTP 请求时使用。
 仅缓存固定的系统提示词和角色设定前缀，且只保存在本机；每次请求中的消息、附件和其他请求范围内容不会写入缓存。
+仍在打磨的能力，可能随版本调整。
 从官方 GitHub Releases 检查并安装稳定版更新。
 代理
 会发起一次 SSE 流式短输出，并检查 [DONE] 终止帧；未加载本地模型时会返回 503。
@@ -77,13 +81,16 @@ http://本机局域网IP:11435/v1
 公开 JSON 自检源只适合验证链路
 公开协议自检无需 Key，用于验证 JSON 接入、上下文注入、来源卡片和诊断链路；它不是通用搜索服务。
 公网
+关于
 关闭时不会发起请求
+关闭设置
 兼容 messages 里的 image_url，也兼容 Responses 风格 input_image。支持 data:image base64、本地可读路径、file: URL、可访问的 http(s) 图片。
 兼容接口
 内存
 内存不足，建议换小模型或降低上下文。
 冲突/不确定性: ${researchConflictWarnings.joinToString(
 刷新
+加载中
 协议自检
 协议自检、研究闭环、清空记录
 取消下载
@@ -105,6 +112,7 @@ http://本机局域网IP:11435/v1
 图片清理会移除 MCA 管理的本地图片副本；文件库清理只移除 MCA 保存的文本索引，不会删除外部原文件。
 图片输入
 在本机保存 llama.cpp 的前缀 KV 缓存，用于减少重复预填充。
+在线
 填入公开 JSON 协议自检源
 处理建议
 处理建议:
@@ -146,8 +154,10 @@ http://本机局域网IP:11435/v1
 局域网
 局域网 Base URL
 展开
+展开全部
 工作方式
 工具 / MCP
+已停用
 已加入故障接力链路
 已启用 ${listOf(backup0Enabled, backup1Enabled, backup2Enabled).count { it }} 个
 已启用：可读取网页链接
@@ -158,6 +168,7 @@ http://本机局域网IP:11435/v1
 已生成，复制后填入客户端 Key/Token
 已索引 ${state.fileAssetCount} 个文件
 已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。
+已配置
 已配置真实搜索：${state.realSearchProviderLabel.ifBlank { state.providerLabel }}
 已配置：${state.providerLabel}
 已配置：${state.webSearch.providerLabel}
@@ -187,13 +198,18 @@ http://本机局域网IP:11435/v1
 当前版本
 当前版本先提供助手侧的记忆开关；后续会在这里集中查看、编辑和删除本机记忆。
 当前配置可用于聊天页和助手默认联网检索。
+待安装
+待机
+待配置
 快速可用选 Tavily 或 Brave：到服务商官网注册并创建 Search API Key。
 性能
 手动
 手机端本地 AI 生图方案优缺点 生态 可行性 最新评测
 打开 Release
+打开${section.title}
 打开网络设置
 把当前问题扩展为官方、评测、限制和社区等多角度查询
+把模型、数据与联网能力的边界留在设备上。
 抓取网页正文
 报告包含引擎、模型、内存、参数和最近错误，默认不直接展示。
 持久化前缀缓存
@@ -208,6 +224,7 @@ http://本机局域网IP:11435/v1
 推荐校验流程
 推荐配置
 搜索接口地址
+搜索服务、触发策略与来源质量。
 搜索服务端暂时异常，先切换备用源或稍后重试；自建服务请检查服务日志和反代状态。
 搜索源配置、测试步骤、隐私边界
 收起
@@ -217,15 +234,19 @@ http://本机局域网IP:11435/v1
 无法解析
 无结果
 日志/诊断
+日志与诊断
 时间: $createdAtText
 普通
 智能
 智能调参
+暂无
 暂无健康评估
 暂无文件索引
 暂无研究综合评估
 暂无记录
+暂无运行日志
 更多测试
+更新中
 更新说明
 最新版本
 最近检索
@@ -252,11 +273,14 @@ http://本机局域网IP:11435/v1
 本地多模态
 本地导入
 本地数据
+本地智能，一处掌控
+本地模型
 本地模型不会直接联网，MCA 只把搜索摘要注入当前轮对话。
 本地生图
 本地生图速度取决于设备、模型包和分辨率；生成任务应在图片页显示状态、耗时、取消和失败重试。
 本机
 本机 Base URL
+本机数据清理与缓存边界。
 本机调用
 本机调用已开启；同设备客户端优先使用 127.0.0.1 地址。
 来源:
@@ -271,6 +295,7 @@ http://本机局域网IP:11435/v1
 检查中
 检查协议类型和 Base URL 是否匹配；自建网关可使用 /search?q={query}&limit={max_results} 这类 URL 模板，返回 results/items/data/hits/organic_results 等常见 JSON 结构。
 检索
+检索 · ${search.hubStatusLabel()}
 检索健康
 检索健康: $healthLabel ($healthScore/100)
 检索成功
@@ -278,7 +303,10 @@ http://本机局域网IP:11435/v1
 检索警告:
 检索词:
 检索词：${item.searchedQueries.joinToString(
+模型 · ${stats.hubModelLabel()}
+模型、数据与联网能力的一站式控制台。
 模型列表请求成功
+模型加载、生成参数、后端与内存。
 模型已加载。
 正在测试...
 每轮非空问题都会先检索
@@ -305,7 +333,11 @@ http://本机局域网IP:11435/v1
 清空文件库
 清空聊天
 清空记录
+点击刷新读取本机运行记录；生成诊断可收集引擎与设备信息，便于排查问题。
 点击在应用内查看
+版本
+版本更新、开源许可与项目信息。
+状态 · ${stats.hubRuntimeLabel()}
 状态: ${if (success) 
 状态：$statusLabel
 生成诊断
@@ -369,6 +401,7 @@ http://本机局域网IP:11435/v1
 让通用第三方 OpenAI-compatible 客户端调用 MCA 已加载的本地聊天模型。
 记录只保存在本机，包含检索词、来源数、耗时和失败摘要，不保存 API Key。
 记忆管理
+设置中心 / ${section.title}
 证据分组: ${researchEvidenceGroups.joinToString(
 识图接口请求成功
 诊断
@@ -388,25 +421,30 @@ http://本机局域网IP:11435/v1
 路径不存在
 输出 ${log.genTokens} · RSS ${formatKb(rssKb ?: log.nativePssKb)} · PSS ${formatKb(log.nativePssKb)}
 运行
-运行、日志、隐私与实验功能
 运行中
+运行日志、API 日志与诊断导出。
 运行正常
 运行状态
 运行记录
 运行记录（最近 ${visibleLogs.size} 条 / 共 ${state.logs.size} 条）
 返回
 返回聊天
+返回设置中心
 这可以兼容通用第三方 OpenAI-compatible 客户端的角色卡，同时避免模型重载后丢失 MCA 当前助手。
+进入
 连接前准备
 连接参数、接口路径、流式输出与排错
 连接自检
 适用于同一设备、本地浏览器、同网段电脑或其他受信任设备；模型仍在手机端本地运行。
 速度 ${
+配置中心
+配置即时生效，敏感数据留在本机。
 配置步骤
 重新复制 API Key，确认账号已开通对应搜索接口和额度；Brave 使用 X-Subscription-Token，Tavily/Jina 使用 Bearer Key。
 重试下载
 鉴权失败
 鉴权或权限
+链接可用
 错误
 闭环
 闭环自检
@@ -423,10 +461,8 @@ http://本机局域网IP:11435/v1
 需要在联网检索页配置服务
 需要排错时，可到“日志与接口”导出完整诊断。
 音频
+预览
 首 token ${state.stats.ttftMs} ms · 速度 ${
 高级设置
 ：选择 
 ；实际 
-暂无运行日志
-点击刷新读取本机运行记录；生成诊断可收集引擎与设备信息，便于排查问题。
-展开全部
