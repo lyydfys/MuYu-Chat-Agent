@@ -130,36 +130,15 @@ internal fun DshFloatingBall(
     )
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        // COMPACT keeps the phone ball exactly as before (12dp inset, 48dp target, full travel).
-        // MEDIUM/EXPANDED widen the safe inset margin, grow the target slightly, keep the ball off
-        // the wide-window rail and cap the drag band so it cannot smear across an unfolded display.
-        val availableWidthDp = maxWidth.value.roundToInt()
-        val windowWidth = dshWindowWidthFor(availableWidthDp)
-        val ballMetrics = dshBallMetricsFor(windowWidth)
-        val edge = ballMetrics.edgeMarginDp.dp
-        val ballSize = ballMetrics.ballSizeDp.dp
-        val railWidthDp = dshWorkspaceRailWidthFor(
-            availableWidthDp = availableWidthDp,
-            twoPane = dshSupportsRail(windowWidth)
-        )
-        val startInset = dshBallStartInsetDp(railWidthDp, ballMetrics.edgeMarginDp).dp
-        if (maxWidth < ballSize + startInset + edge || maxHeight < ballSize + edge * 2) {
-            return@BoxWithConstraints
-        }
+        val edge = 12.dp
+        val ballSize = 48.dp
+        if (maxWidth < ballSize + edge * 2 || maxHeight < ballSize + edge * 2) return@BoxWithConstraints
         val density = LocalDensity.current
-        val fullHorizontalTravel = (maxWidth - ballSize - startInset - edge).coerceAtLeast(0.dp)
+        val horizontalTravel = (maxWidth - ballSize - edge * 2).coerceAtLeast(0.dp)
         val verticalTravel = (maxHeight - ballSize - edge * 2).coerceAtLeast(0.dp)
-        val fullHorizontalTravelPx = with(density) { fullHorizontalTravel.toPx() }
-        val horizontalTravelPx = dshBallCappedTravelPx(
-            travelPx = fullHorizontalTravelPx,
-            capPx = dshBallTravelCapPx(ballMetrics.maxHorizontalTravelDp, density.density)
-        )
-        val horizontalTravel = with(density) { horizontalTravelPx.toDp() }
+        val horizontalTravelPx = with(density) { horizontalTravel.toPx() }
         val verticalTravelPx = with(density) { verticalTravel.toPx() }
         val edgePx = with(density) { edge.toPx() }
-        val startInsetPx = with(density) { startInset.toPx() }
-        val availableWidthPx = with(density) { maxWidth.toPx() }
-        val ballSizePx = with(density) { ballSize.toPx() }
 
         fun savePosition() {
             preferences.edit()
@@ -168,16 +147,13 @@ internal fun DshFloatingBall(
                 .apply()
         }
 
-        // Band-anchored horizontal placement: with the phone insets/travel this is exactly the
-        // previous `edge + travel * fraction`. `moveDshBallFraction` below uses the same
-        // (already capped) travel, so the ball stays under the finger on wide windows too.
-        val ballX = startInset + fullHorizontalTravel * 0.5f + horizontalTravel * (horizontalFraction - 0.5f)
+        val ballX = edge + horizontalTravel * horizontalFraction
         val ballY = edge + verticalTravel * verticalFraction
         val panelWidth = 168.dp
         val panelHeight = if (modelSwitch != null) 156.dp else 104.dp
         val panelBelow = ballY + ballSize + edge + panelHeight <= maxHeight
         val panelX = (ballX + ballSize - panelWidth)
-            .coerceIn(startInset, (maxWidth - panelWidth - edge).coerceAtLeast(startInset))
+            .coerceIn(edge, (maxWidth - panelWidth - edge).coerceAtLeast(edge))
         val panelY = if (panelBelow) {
             ballY + ballSize + edge
         } else {
@@ -262,14 +238,7 @@ internal fun DshFloatingBall(
                 // Read drag position during placement so pointer updates do not recompose the page.
                 .offset {
                     IntOffset(
-                        dshBallXOffsetPx(
-                            fraction = horizontalFraction,
-                            availableWidthPx = availableWidthPx,
-                            ballSizePx = ballSizePx,
-                            startInsetPx = startInsetPx,
-                            endInsetPx = edgePx,
-                            travelPx = horizontalTravelPx
-                        ).roundToInt(),
+                        (edgePx + horizontalTravelPx * horizontalFraction).roundToInt(),
                         (edgePx + verticalTravelPx * verticalFraction).roundToInt()
                     )
                 }

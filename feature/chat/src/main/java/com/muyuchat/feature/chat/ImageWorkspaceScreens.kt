@@ -280,9 +280,6 @@ internal fun ImagesWorkspaceScreen(
     val canvasModelId = activeJob?.takeIf { it.isWorking }?.modelId ?: selectedImageModelId
     val canvasModelName = activeJob?.takeIf { it.isWorking }?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName
     val canvasModelIsCloud = activeJob?.takeIf { it.isWorking }?.modelIsCloud ?: selectedImageModelIsCloud
-    // Same width ladder as the chat shell: MEDIUM/EXPANDED cap the prompt bar and the generation
-    // canvas at the shared reading measure; COMPACT returns null and nothing below is constrained.
-    val adaptiveLayout = chatAdaptiveLayout()
 
     LaunchedEffect(images.map(ImageAssetUiItem::id)) {
         val available = images.mapTo(mutableSetOf(), ImageAssetUiItem::id)
@@ -364,27 +361,22 @@ internal fun ImagesWorkspaceScreen(
                 .imePadding()
         ) {
         if (showGenerationCanvas) {
-            // MEDIUM/EXPANDED: the generation panel keeps the shared reading measure instead of
-            // stretching a single prompt line across an unfolded screen. COMPACT composes the
-            // canvas exactly as before (ChatReadingWidth inserts no wrapper there).
-            ChatReadingWidth(adaptiveLayout) {
-                ImageGenerationCanvas(
-                    prompt = activePrompt,
-                    job = activeJob,
-                    image = activeImage,
-                    images = activeImages,
-                    imageModels = imageModels,
-                    imageModelsLoading = imageModelsLoading,
-                    selectedImageModelId = canvasModelId,
-                    selectedImageModelName = canvasModelName,
-                    selectedImageModelIsCloud = canvasModelIsCloud,
-                    onBackToGallery = { showGenerationCanvas = false },
-                    onSelectImageModel = onSelectImageModel,
-                    onRetry = { activeJob?.let(onRetryJob) },
-                    onCancelGeneration = onCancelGeneration,
-                    onUseImageAsset = onUseImageAsset
-                )
-            }
+            ImageGenerationCanvas(
+                prompt = activePrompt,
+                job = activeJob,
+                image = activeImage,
+                images = activeImages,
+                imageModels = imageModels,
+                imageModelsLoading = imageModelsLoading,
+                selectedImageModelId = canvasModelId,
+                selectedImageModelName = canvasModelName,
+                selectedImageModelIsCloud = canvasModelIsCloud,
+                onBackToGallery = { showGenerationCanvas = false },
+                onSelectImageModel = onSelectImageModel,
+                onRetry = { activeJob?.let(onRetryJob) },
+                onCancelGeneration = onCancelGeneration,
+                onUseImageAsset = onUseImageAsset
+            )
         } else if (imageModels.isEmpty() && images.isEmpty()) {
             ImageWorkspaceEmptyState(
                 onBack = onBack,
@@ -606,13 +598,7 @@ internal fun ImagesWorkspaceScreen(
             )
         }
 
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                // Same reading ceiling as the chat message column. On COMPACT the modifier is the
-                // receiver unchanged, so the prompt bar keeps its full-width, bottom-anchored bar.
-                .chatReadingCeiling(adaptiveLayout)
-        ) {
+        Column(Modifier.align(Alignment.BottomCenter)) {
         (inputError ?: statusMessage)?.let { message ->
             when (imageStatusSurfaceFor(message)) {
                 ImageStatusSurface.GUIDANCE -> GuidanceNotice(

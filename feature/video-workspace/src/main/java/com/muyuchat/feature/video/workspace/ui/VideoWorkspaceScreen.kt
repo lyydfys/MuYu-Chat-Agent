@@ -7,7 +7,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,7 +17,9 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -59,7 +60,6 @@ import com.muyuchat.core.designsystem.McaIcons
 import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.McaShape
 import com.muyuchat.core.designsystem.McaSwitch
-import com.muyuchat.core.designsystem.mcaWindowWidth
 import com.muyuchat.core.video.contract.VideoNode
 import com.muyuchat.core.video.contract.VideoNodeTypeId
 import com.muyuchat.core.video.contract.VideoNodeValue
@@ -287,11 +287,14 @@ internal fun VideoWorkspaceScreen(
             }
         },
     ) { innerPadding ->
-        // Resolved once per configuration; COMPACT answers "no adaptation" (VideoWorkspaceAdaptiveLayout).
-        val adaptiveLayout = videoWorkspaceAdaptiveLayoutFor(mcaWindowWidth())
-
-        // Settings half: mode, engine/decode, model assets and the onboarding cards.
-        val settingsColumn: @Composable ColumnScope.() -> Unit = {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .testTag("video.workspace")
+                .padding(horizontal = 16.dp),
+        ) {
             TemplateModeRow(mode, viewModel)
             EngineDecodeSettingsCard(
                 externalEngineEnabled = externalEngineEnabled,
@@ -301,13 +304,9 @@ internal fun VideoWorkspaceScreen(
                 modifier = Modifier.padding(top = 6.dp),
             )
             VideoModelAssetsSection(viewModel)
-            VideoUsageGuideCard(
-                initiallyExpanded = adaptiveLayout.expandUsageCardsByDefault,
-                modifier = Modifier.padding(top = 12.dp),
-            )
+            VideoUsageGuideCard(modifier = Modifier.padding(top = 12.dp))
             VideoPromptExamplesCard(
                 onUsePrompt = fillPrompt,
-                initiallyExpanded = adaptiveLayout.expandUsageCardsByDefault,
                 modifier = Modifier.padding(top = 8.dp),
             )
             promptNotice?.let { notice ->
@@ -320,10 +319,6 @@ internal fun VideoWorkspaceScreen(
                         .testTag("video.prompt_fill_notice"),
                 )
             }
-        }
-
-        // Workflow half: recent runs, input/import, the canvas or chain, and the output preview.
-        val workflowColumn: @Composable ColumnScope.() -> Unit = {
             VideoRecentRunsSection(viewModel)
             if (mode == VideoWorkspaceViewModel.TemplateMode.IMAGE_TO_VIDEO) {
                 InputImageRow(
@@ -383,15 +378,6 @@ internal fun VideoWorkspaceScreen(
             )
             Spacer(Modifier.height(20.dp))
         }
-
-        // The width class only picks the outer layout; both halves below are the same content at
-        // every size (VideoWorkspacePanes keeps the COMPACT single-column branch untouched).
-        VideoWorkspacePanes(
-            layout = adaptiveLayout,
-            settings = settingsColumn,
-            workflow = workflowColumn,
-            modifier = Modifier.fillMaxSize().padding(innerPadding),
-        )
     }
 
     val sheetNode = selectedNodeId?.let { id -> document.node(id) }

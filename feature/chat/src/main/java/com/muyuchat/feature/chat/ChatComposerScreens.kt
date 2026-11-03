@@ -44,7 +44,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -83,7 +82,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatImageAttachment
@@ -166,13 +164,6 @@ internal fun ChatInputBar(
     onSelectWebSearchResearchMode: (String) -> Unit,
     onOpenWebSearchSettings: () -> Unit,
     onMeasuredHeight: (Int) -> Unit = {},
-    /**
-     * MEDIUM/EXPANDED ceiling for the composer shell, taken from the same width class as the
-     * message column (`mcaContentMaxWidthFor`). Only the floating shell is capped: the action menu
-     * and the research capsule stay full-window because they are anchored to the window edge.
-     * Null on a phone, where the shell keeps its existing full-width chain.
-     */
-    shellMaxWidth: Dp? = null,
     modifier: Modifier = Modifier
 ) {
     // R04：one owner for the sheet + research submenu pair. The two former booleans could disagree
@@ -288,12 +279,6 @@ internal fun ChatInputBar(
     )
     Surface(
         modifier = modifier
-            // Null on a phone: Modifier.then(Modifier) leaves this chain exactly as it was.
-            .then(
-                shellMaxWidth
-                    ?.let { maxWidth -> Modifier.widthIn(max = maxWidth) }
-                    ?: Modifier
-            )
             .fillMaxWidth()
             .onSizeChanged { onMeasuredHeight(it.height) }
             .padding(horizontal = 16.dp, vertical = 10.dp),

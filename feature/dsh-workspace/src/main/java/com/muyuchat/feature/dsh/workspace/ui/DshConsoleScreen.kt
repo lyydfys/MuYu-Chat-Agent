@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,23 +50,11 @@ fun DshConsoleScreen(
     modifier: Modifier = Modifier,
     maintenanceContent: @Composable ColumnScope.() -> Unit = {}
 ) {
-    // Wide windows centre the console body at the app-wide reading ceiling. COMPACT passes an
-    // empty modifier and the previous Start alignment, so the phone console is unchanged.
-    val windowWidth = dshWindowWidth()
-    val wide = dshSupportsRail(windowWidth)
-    val bodyModifier = if (wide) {
-        Modifier.widthIn(max = dshContentMaxWidthFor(windowWidth).dp)
-    } else {
-        Modifier
-    }
     Surface(
         modifier = modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            horizontalAlignment = if (wide) Alignment.CenterHorizontally else Alignment.Start
-        ) {
+        Column(modifier = Modifier.fillMaxSize()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -95,27 +82,18 @@ fun DshConsoleScreen(
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             when (val current = state) {
-                DshConsoleUiState.Loading -> DshConsoleLoading(modifier = bodyModifier)
-                is DshConsoleUiState.Failure -> DshConsoleFailure(
-                    failure = current,
-                    onIntent = onIntent,
-                    modifier = bodyModifier
-                )
-                is DshConsoleUiState.Ready -> DshConsoleContent(
-                    state = current,
-                    onIntent = onIntent,
-                    maintenanceContent = maintenanceContent,
-                    modifier = bodyModifier
-                )
+                DshConsoleUiState.Loading -> DshConsoleLoading()
+                is DshConsoleUiState.Failure -> DshConsoleFailure(current, onIntent)
+                is DshConsoleUiState.Ready -> DshConsoleContent(current, onIntent, maintenanceContent)
             }
         }
     }
 }
 
 @Composable
-private fun DshConsoleLoading(modifier: Modifier = Modifier) {
+private fun DshConsoleLoading() {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -134,11 +112,10 @@ private fun DshConsoleLoading(modifier: Modifier = Modifier) {
 @Composable
 private fun DshConsoleFailure(
     failure: DshConsoleUiState.Failure,
-    onIntent: (DshConsoleIntent) -> Unit,
-    modifier: Modifier = Modifier
+    onIntent: (DshConsoleIntent) -> Unit
 ) {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -172,13 +149,12 @@ private fun DshConsoleFailure(
 private fun DshConsoleContent(
     state: DshConsoleUiState.Ready,
     onIntent: (DshConsoleIntent) -> Unit,
-    maintenanceContent: @Composable ColumnScope.() -> Unit,
-    modifier: Modifier = Modifier
+    maintenanceContent: @Composable ColumnScope.() -> Unit
 ) {
     val available = state.availableIntents
     val enabled = !state.busy && !state.refreshing
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 12.dp),

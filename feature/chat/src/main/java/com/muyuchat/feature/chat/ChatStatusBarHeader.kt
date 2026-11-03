@@ -62,12 +62,7 @@ internal fun ChatStatusBar(
     onOpenModels: () -> Unit,
     onReasoningModeChange: (ReasoningMode) -> Unit,
     onCloudReasoningModeLocked: () -> Unit,
-    onOpenAppMenu: () -> Unit,
-    /**
-     * False on MEDIUM/EXPANDED, where the history panel is already a permanent rail and a drawer
-     * button would open nothing. Defaults to true, so the phone header keeps its exact controls.
-     */
-    showHistoryButton: Boolean = true
+    onOpenAppMenu: () -> Unit
 ) {
     val apiActive = state.selectedModelIsCloud || state.apiEnabled || state.restEnabled
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
@@ -97,33 +92,31 @@ internal fun ChatStatusBar(
             .padding(start = if (compactForLargeText) 12.dp else 18.dp, end = if (compactForLargeText) 12.dp else 18.dp, top = 14.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (showHistoryButton) {
-            Surface(
-                modifier = Modifier.size(48.dp),
-                color = MaterialTheme.colorScheme.surface,
-                shape = CircleShape,
-                border = capsuleBorder,
-                // Calibrated elevation + 0.5dp optical hairline keeps the capsule crisp in both light & dark themes.
-                shadowElevation = 2.dp
+        Surface(
+            modifier = Modifier.size(48.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shape = CircleShape,
+            border = capsuleBorder,
+            // Calibrated elevation + 0.5dp optical hairline keeps the capsule crisp in both light & dark themes.
+            shadowElevation = 2.dp
+        ) {
+            McaIconButton(
+                contentDescription = "打开历史",
+                onClick = onOpenHistory,
+                glyphSize = McaIconSize.L,
+                onClickLabel = "打开历史",
+                // Preserve the previous IconButton content colour (the Surface's onSurface),
+                // instead of the shared component's lower-emphasis default tint.
+                tint = LocalContentColor.current,
             ) {
-                McaIconButton(
-                    contentDescription = "打开历史",
-                    onClick = onOpenHistory,
-                    glyphSize = McaIconSize.L,
-                    onClickLabel = "打开历史",
-                    // Preserve the previous IconButton content colour (the Surface's onSurface),
-                    // instead of the shared component's lower-emphasis default tint.
-                    tint = LocalContentColor.current,
-                ) {
-                    Icon(
-                        McaIcons.Menu,
-                        contentDescription = null,
-                        modifier = Modifier.size(McaIconSize.L)
-                    )
-                }
+                Icon(
+                    McaIcons.Menu,
+                    contentDescription = null,
+                    modifier = Modifier.size(McaIconSize.L)
+                )
             }
-            Spacer(modifier = Modifier.width(12.dp))
         }
+        Spacer(modifier = Modifier.width(12.dp))
         Box(modifier = Modifier.weight(1f)) {
             Surface(
                 modifier = Modifier
