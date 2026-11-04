@@ -299,6 +299,19 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
         // retries and history recreation must preserve the captured job snapshot exactly.
         var queuedOptions = currentOptions
         val queuedInputDraft = jobSnapshot?.inputDraft ?: inputDraft
+        // 生成前的资产存在性检查：缺失/不可读的输入图在这里就被拦下，并给出可操作原因，
+        // 而不是让任务入队后以 worker 的原始 ENOENT 失败收场（也不留下悬空引用）。
+        if (requestedBackend == ImageBackend.LOCAL) {
+            val missingInputs = missingGenerationImageInputRoles(
+                references = localImageInputReferences(queuedInputDraft),
+                isReadable = { reference -> generationImageReferenceReadable(host.application, reference) },
+            )
+            if (missingInputs.isNotEmpty()) {
+                Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=missing_input jobId=$jobId")
+                host.showStatus(generationImageInputMissingMessage(missingInputs).orEmpty())
+                return false
+            }
+        }
         if (requestedBackend == ImageBackend.LOCAL) {
             try {
                 val resolvedSampler = requireNotNull(requestedLocalModel).validateProductTaskSampler(

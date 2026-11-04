@@ -56,20 +56,22 @@ internal fun ImageGenerationJobRecord.withCommittedImageJobUpdate(
     } else {
         status
     }
+    // 失败/取消的任务不保留任何图片资产引用：部分产物在失败清理时已被删除，若 job 仍带着
+    // imageAssetId(s)，详情/重试/历史会继续指向 image_assets 下不存在的文件（ENOENT 循环）。
+    val terminalWithoutAssets = committedStatus == ImageGenerationStatusRecord.FAILED ||
+        committedStatus == ImageGenerationStatusRecord.CANCELLED
     val committedMessage = if (ignoredLateUpdate) this.message else message
-    val committedImageAssetId = if (ignoredLateUpdate) {
-        this.imageAssetId
-    } else {
-        imageAssetId ?: this.imageAssetId
+    val committedImageAssetId = when {
+        ignoredLateUpdate -> this.imageAssetId
+        terminalWithoutAssets -> null
+        else -> imageAssetId ?: this.imageAssetId
     }
-    val committedImageAssetIds = if (ignoredLateUpdate) {
-        this.imageAssetIds
-    } else if (imageAssetIds.isNotEmpty()) {
-        imageAssetIds
-    } else if (imageAssetId != null) {
-        listOf(imageAssetId)
-    } else {
-        this.imageAssetIds
+    val committedImageAssetIds = when {
+        ignoredLateUpdate -> this.imageAssetIds
+        terminalWithoutAssets -> emptyList()
+        imageAssetIds.isNotEmpty() -> imageAssetIds
+        imageAssetId != null -> listOf(imageAssetId)
+        else -> this.imageAssetIds
     }
     val previewVisible = committedStatus == ImageGenerationStatusRecord.GENERATING
     val committedPreview = preview?.takeIf { candidate ->

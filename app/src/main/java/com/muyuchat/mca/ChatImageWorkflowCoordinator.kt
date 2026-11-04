@@ -73,6 +73,16 @@ internal class ChatImageWorkflowCoordinator(
         )
         val jobSnapshot = retrySnapshot
         val snapshot = jobSnapshot
+        // 重试前先确认原任务的输入图仍然可读：失败任务留下的失效引用不能再提交一次，
+        // 否则只会重复同一条 ENOENT 失败。原因直接告诉用户去重新选图，不需要新开聊天。
+        val missingInputs = missingGenerationImageInputRoles(
+            references = localImageInputReferences(snapshot.inputDraft),
+            isReadable = { reference -> generationImageReferenceReadable(application, reference) },
+        )
+        if (missingInputs.isNotEmpty()) {
+            showStatus(generationImageInputMissingMessage(missingInputs))
+            return
+        }
         imageGenerationOwner.submit(
             prompt = snapshot.prompt,
             inputDraft = snapshot.inputDraft,
