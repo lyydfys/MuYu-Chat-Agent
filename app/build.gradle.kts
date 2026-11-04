@@ -205,6 +205,19 @@ android {
     namespace = "com.muyuchat.mca"
     compileSdk = libs.versions.compileSdk.get().toInt()
 
+    // BouncyCastle ships identical licence files in bctls/bcutil/bcprov; AGP refuses to merge the
+    // same path from several jars. They are legal metadata, not runtime resources.
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/LICENSE.md",
+                "META-INF/LICENSE-notice.md",
+                "META-INF/NOTICE.md",
+                "META-INF/ASL2.0"
+            )
+        }
+    }
+
     defaultConfig {
         applicationId = "com.muyuchat.mca"
         minSdk = libs.versions.minSdk.get().toInt()
