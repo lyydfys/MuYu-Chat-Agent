@@ -83,5 +83,13 @@ data class WorldBookSource(
     val scope: WorldBookScope,
     val excerpt: String,
     val estimatedTokens: Int,
-    val reason: String
+    val reason: String,
+    /**
+     * Human name of the book at selection time.
+     *
+     * Stored in the persisted context trace so the "上下文来源" panel can show "雨夜世界书（全局）"
+     * instead of a raw UUID — and still does so after the book is deleted, which a live lookup alone
+     * could not.
+     */
+    val bookName: String? = null
 )

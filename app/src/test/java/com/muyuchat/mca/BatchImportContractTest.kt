@@ -27,11 +27,28 @@ class BatchImportContractTest {
         val source = source("app/src/main/java/com/muyuchat/mca/KnowledgeBaseManagementOperations.kt")
         assertTrue(source.contains("internal fun importWorldBookFilesFor("))
         assertTrue(source.contains("for (uriString in targets)"))
-        assertTrue(source.contains("已导入 \$imported 本世界书"))
-        assertTrue(source.contains("本失败"))
         // One unreadable export must not abort the rest of the batch.
         assertTrue(source.contains("continue"))
-        assertTrue(source.contains("importWorldBookOwned(text, scopeKind, owner, fallbackName)"))
+        // The picker result is read once; a per-file commit id replaces per-file preview staging,
+        // which is what used to make the import "jump" and keep only the last book.
+        assertTrue(source.contains("WorldBookDuplicateGuard.bookIdFor(fingerprint)"))
+        assertTrue(source.contains("importWorldBookOwned("))
+        // Duplicates are detected from content and counted, not silently dropped.
+        assertTrue(source.contains("WorldBookDuplicateGuard.fingerprints(existingWorldBooks())"))
+        assertTrue(source.contains("skippedDuplicates++"))
+        assertTrue(source.contains("WorldBookBatchImportSummary(imported, skippedDuplicates, failures)"))
+        assertTrue(source.contains("showStatus(summary.statusMessage())"))
+    }
+
+    @Test
+    fun `world book batch summary names every count and caps the failure list`() {
+        val guard = source("app/src/main/java/com/muyuchat/mca/WorldBookDuplicateGuard.kt")
+        assertTrue(guard.contains("已导入 "))
+        assertTrue(guard.contains(" 本世界书"))
+        assertTrue(guard.contains("跳过 "))
+        assertTrue(guard.contains(" 个重复"))
+        assertTrue(guard.contains(" 本失败："))
+        assertTrue(guard.contains("MAX_REPORTED_FAILURES"))
     }
 
     @Test

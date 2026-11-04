@@ -84,7 +84,8 @@ object WorldBookResolver {
                         candidate.entry.constant -> "constant"
                         candidate.entry.useRegex -> "regex"
                         else -> "keyword"
-                    }
+                    },
+                    bookName = candidate.book.name
                 )
             },
             skippedSources = skipped.map { candidate ->
@@ -94,7 +95,8 @@ object WorldBookResolver {
                     scope = candidate.book.scope,
                     excerpt = candidate.entry.content,
                     estimatedTokens = estimateTokens(candidate.entry.content),
-                    reason = "budget"
+                    reason = "budget",
+                    bookName = candidate.book.name
                 )
             }
         )

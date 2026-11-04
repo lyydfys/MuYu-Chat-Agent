@@ -187,18 +187,27 @@ internal fun worldBookFallbackNameFromFile(displayName: String): String? = displ
 /**
  * Batch world-book import from one multi-select picker round-trip.
  *
- * Each file is parsed and committed independently, so one bad export cannot block the rest; the
- * final status line reports how many landed. The owner check is re-read per file: a book committed
- * for a session that was deleted mid-batch must not resurrect a binding.
+ * The picker result is read once and every file is then handled independently, so one bad export
+ * cannot block the rest. Each file is committed directly (`commitId` supplied) instead of being
+ * staged as a preview: staging one preview per file is what made the old path look like it "jumped"
+ * through the selection and only kept the last one.
+ *
+ * Duplicate detection is content based ([WorldBookDuplicateGuard]): a book whose entries are already
+ * in the library — or were imported earlier in this same batch — is skipped and counted, so running
+ * the same selection twice is a no-op.
+ *
+ * The owner check is re-read per file: a book committed for a session that was deleted mid-batch
+ * must not resurrect a binding.
  */
 internal fun importWorldBookFilesFor(
     scope: CoroutineScope,
     isGenerating: () -> Boolean,
     showStatus: (String) -> Unit,
     captureContentImportOwner: () -> ContentImportOwner,
-    importWorldBookOwned: suspend (String, WorldBookScope, ContentImportOwner, String?) -> Boolean,
+    importWorldBookOwned: suspend (String, WorldBookScope, ContentImportOwner, String?, String) -> Boolean,
     readAttachmentText: (Uri, Int) -> Pair<String, Boolean>,
     resolveFallbackName: (Uri) -> String,
+    existingWorldBooks: () -> List<WorldBookRecord>,
     uriStrings: List<String>,
     scopeKind: WorldBookScope = WorldBookScope.ASSISTANT,
     importOwner: ContentImportOwner? = null
@@ -210,9 +219,20 @@ internal fun importWorldBookFilesFor(
     val targets = uriStrings.filter { it.isNotBlank() }.distinct()
     if (targets.isEmpty()) return
     val owner = importOwner ?: captureContentImportOwner()
+    // Same pre-condition as the single-file path: a chat-scoped book needs an active conversation.
+    // Checked before the loop so a batch is refused once with the real reason instead of reporting
+    // every file as "格式不正确".
+    if (scopeKind == WorldBookScope.CHAT && owner.sessionId == null) {
+        showStatus("当前没有活动对话，无法导入当前对话作用域的世界书")
+        return
+    }
     scope.launch {
         var imported = 0
+        var skippedDuplicates = 0
         val failures = mutableListOf<String>()
+        // Seeded from the library and extended per committed file, so both "already present" and
+        // "same file twice in this batch" are caught without re-reading the store between files.
+        val knownFingerprints = WorldBookDuplicateGuard.fingerprints(existingWorldBooks()).toMutableSet()
         for (uriString in targets) {
             val loaded = withContext(Dispatchers.IO) { runCatching {
                 val uri = Uri.parse(uriString)
@@ -225,20 +245,51 @@ internal fun importWorldBookFilesFor(
                 failures += "${Uri.parse(uriString).lastPathSegment ?: uriString}（${error.message ?: "无法读取文件"}）"
                 continue
             }
-            val accepted = runCatching { importWorldBookOwned(text, scopeKind, owner, fallbackName) }
-                .getOrElse { error ->
-                    failures += "${fallbackName ?: uriString}（${error.message ?: "导入失败"}）"
-                    false
-                }
-            if (accepted) imported++ else failures += (fallbackName ?: uriString)
+            // Parse once more, on the parse dispatcher, only to fingerprint the book. A file that
+            // cannot be parsed is a failure here and would fail in the import call as well.
+            val fingerprint = withContext(Dispatchers.Default) {
+                WorldBookCodec.parse(
+                    rawJson = text,
+                    scope = scopeKind,
+                    assistantId = owner.assistantId.takeIf { scopeKind == WorldBookScope.ASSISTANT },
+                    chatSessionId = owner.sessionId.takeIf { scopeKind == WorldBookScope.CHAT },
+                    fallbackName = fallbackName ?: "Imported World Book"
+                ).book?.let(WorldBookDuplicateGuard::fingerprint)
+            }
+            if (fingerprint == null) {
+                failures += "${fallbackName ?: uriString}（世界书格式不正确）"
+                continue
+            }
+            if (fingerprint in knownFingerprints) {
+                skippedDuplicates++
+                continue
+            }
+            val accepted = runCatching {
+                importWorldBookOwned(
+                    text,
+                    scopeKind,
+                    owner,
+                    fallbackName,
+                    WorldBookDuplicateGuard.bookIdFor(fingerprint)
+                )
+            }.getOrElse { error ->
+                failures += "${fallbackName ?: uriString}（${error.message ?: "导入失败"}）"
+                false
+            }
+            if (accepted) {
+                imported++
+                knownFingerprints += fingerprint
+            } else {
+                failures += (fallbackName ?: uriString)
+            }
         }
-        val message = when {
-            imported == 0 -> "世界书导入失败：${failures.joinToString("；")}"
-            targets.size == 1 -> null
-            failures.isEmpty() -> "已导入 $imported 本世界书"
-            else -> "已导入 $imported 本世界书，${failures.size} 本失败：${failures.joinToString("；")}"
+        val summary = WorldBookBatchImportSummary(imported, skippedDuplicates, failures)
+        when {
+            summary.isQuietSingleImport(targets.size) -> Unit
+            imported == 0 && skippedDuplicates == 0 && failures.isNotEmpty() ->
+                showStatus("世界书导入失败：${failures.joinToString("；")}")
+            else -> showStatus(summary.statusMessage())
         }
-        message?.let(showStatus)
     }
 }
 

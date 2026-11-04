@@ -43,10 +43,15 @@ data class ContextAssemblyTrace(
     private fun worldBookJson(sources: List<WorldBookSource>, budget: TraceStorageBudget): JSONArray = JSONArray().apply {
         sources.take(64).forEach { source ->
             if (source.bookId.length <= 512 && source.entryId.length <= 512) {
-                budget.append(this, source.excerpt, JSONObject()
+                val json = JSONObject()
                     .put("bookId", source.bookId).put("entryId", source.entryId)
                     .put("scope", source.scope.wireName)
-                    .put("estimatedTokens", source.estimatedTokens).put("reason", source.reason.take(256)))
+                    .put("estimatedTokens", source.estimatedTokens).put("reason", source.reason.take(256))
+                // Persisted so the "上下文来源" panel names the book instead of printing its UUID,
+                // and keeps naming it after the book was deleted. Omitted (never JSON null) when
+                // the name is unknown, so the reader can tell "no name recorded" from "named null".
+                boundedTraceName(source.bookName)?.let { json.put("bookName", it) }
+                budget.append(this, source.excerpt, json)
             }
         }
     }
@@ -84,6 +89,23 @@ data class ContextAssemblyTrace(
         }
     }
 }
+
+/**
+ * A book/base name as it may be stored inside a trace: one line, bounded, blank-collapsed.
+ *
+ * The trace is persisted per assistant message, so an unbounded or multi-line name would both
+ * inflate storage and break the single-line detail row the panel renders.
+ */
+internal fun boundedTraceName(value: String?): String? = value
+    ?.replace('\n', ' ')
+    ?.replace('\r', ' ')
+    ?.replace(Regex("\\s{2,}"), " ")
+    ?.trim()
+    ?.take(MCA_TRACE_NAME_MAX_CHARS)
+    ?.takeIf { it.isNotBlank() }
+
+/** Longest name kept in a trace; longer names are cut, never dropped. */
+internal const val MCA_TRACE_NAME_MAX_CHARS = 120
 
 data class ChatRuntimeContextPlan(
     val runtimeSystemContext: String = "",

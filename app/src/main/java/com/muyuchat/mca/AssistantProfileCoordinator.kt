@@ -312,11 +312,15 @@ internal class AssistantProfileCoordinator(
         isGenerating = { store.current.isGenerating },
         showStatus = showStatus,
         captureContentImportOwner = captureContentImportOwner,
-        importWorldBookOwned = { rawJson, bookScope, owner, fallbackName ->
-            importWorldBookOwned(rawJson, bookScope, owner, null, fallbackName)
+        // The batch commits each file directly (a content-addressed id), so the preview flow is
+        // never staged once per file — that staging is what made the import look like it jumped.
+        importWorldBookOwned = { rawJson, bookScope, owner, fallbackName, commitId ->
+            importWorldBookOwned(rawJson, bookScope, owner, commitId, fallbackName)
         },
         readAttachmentText = readAttachmentText,
         resolveFallbackName = resolveWorldBookFallbackName,
+        // Read once per batch, on the caller's side: the guard only needs the current library.
+        existingWorldBooks = { store.current.worldBooks },
         uriStrings = uriStrings,
         scopeKind = scope,
         importOwner = importOwner
