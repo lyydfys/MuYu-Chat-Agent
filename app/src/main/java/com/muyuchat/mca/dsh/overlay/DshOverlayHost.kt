@@ -8,8 +8,11 @@ import com.muyuchat.core.dsh.contract.DshOverlayReplyPreview
 import com.muyuchat.feature.dsh.workspace.device.DshCommandApproval
 import com.muyuchat.feature.dsh.workspace.device.DshCommandApprovalPresenter
 import com.muyuchat.feature.dsh.workspace.device.DshCommandApprovalRequest
+import com.muyuchat.feature.dsh.workspace.ui.DshOverlayStripSurfaceUi
+import com.muyuchat.feature.dsh.workspace.ui.DshOverlayStripUi
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiPort
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiSnapshot
+import kotlin.math.roundToInt
 
 /**
  * Typed seams the app composition lends to the overlay.
@@ -41,6 +44,7 @@ internal class DshOverlayRuntimeHooks(val ensureStarted: () -> Unit = {}) {
 internal class DshOverlayHost private constructor(private val appContext: Context) : DshOverlayUiPort {
 
     private val store = DshOverlayStore(appContext)
+    private val stripStore = DshOverlayStripStore(appContext)
     private val gate = DshOverlayBubbleGate()
 
     /**
@@ -146,7 +150,10 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
     /** Recomputes [streamingAllowed] after any write that can change it. */
     private fun refreshStreamingAllowed() {
         val settings = store.loadSettings()
-        streamingAllowed = settings.enabled && settings.streamingEnabled
+        // The strip is its own live surface: it must keep receiving deltas even when the ball's
+        // bubble/stream echo is switched off. Purely display-only either way.
+        val strip = stripStore.loadSettings()
+        streamingAllowed = settings.enabled && (settings.streamingEnabled || strip.enabled)
         if (!streamingAllowed) streamPresenter.reset()
     }
 
@@ -217,7 +224,8 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
             backgroundRunning = DshBackgroundService.isRunning,
             appearance = settings.toOverlayAppearance(),
             streamingEnabled = settings.streamingEnabled,
-            commandApprovalEnabled = settings.commandApprovalEnabled
+            commandApprovalEnabled = settings.commandApprovalEnabled,
+            strip = stripStore.loadSettings().toStripUi()
         )
     }
 
@@ -295,6 +303,34 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
         return null
     }
 
+    /**
+     * "顶部流式悬浮条" switch.
+     *
+     * Independent of the ball document: the strip store is written first, then the live service (if any)
+     * creates or removes only that window. The ball is never touched.
+     */
+    override fun setStripEnabled(enabled: Boolean): String? {
+        val next = stripStore.loadSettings().copy(enabled = enabled)
+        stripStore.saveSettings(next)
+        refreshStreamingAllowed()
+        DshOverlayService.instance?.applyStripSettings(next)
+        return null
+    }
+
+    /** Persists the strip's visual options and applies them to the live window, if attached. */
+    override fun saveStripSettings(strip: DshOverlayStripUi): String? {
+        val normalized = strip.normalized()
+        val next = stripStore.loadSettings().copy(
+            surface = DshOverlayStripSurface.valueOf(normalized.surface.name),
+            opacity = normalized.opacityPercent / 100f,
+            lines = normalized.lines,
+            safeArea = normalized.safeArea
+        ).normalized()
+        stripStore.saveSettings(next)
+        DshOverlayService.instance?.applyStripSettings(next)
+        return null
+    }
+
     override fun stopBackground(): String? = setEnabled(false)
 
     /** Notification action path: the user explicitly stops the background keep-alive. */
@@ -321,3 +357,19 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
             runCatching { Settings.canDrawOverlays(context.applicationContext) }.getOrDefault(false)
     }
 }
+
+/** App-owned strip document → feature-side edit model (clamped both ways at the boundary). */
+internal fun DshOverlayStripSettings.toStripUi(): DshOverlayStripUi = DshOverlayStripUi(
+    enabled = enabled,
+    surface = when (surface) {
+        DshOverlayStripSurface.LIGHT -> DshOverlayStripSurfaceUi.LIGHT
+        DshOverlayStripSurface.DARK -> DshOverlayStripSurfaceUi.DARK
+        DshOverlayStripSurface.TRANSLUCENT -> DshOverlayStripSurfaceUi.TRANSLUCENT
+    },
+    opacityPercent = (opacity * 100f).roundToInt().coerceIn(
+        DshOverlayStripUi.MIN_OPACITY_PERCENT,
+        DshOverlayStripUi.MAX_OPACITY_PERCENT
+    ),
+    lines = lines,
+    safeArea = safeArea
+)

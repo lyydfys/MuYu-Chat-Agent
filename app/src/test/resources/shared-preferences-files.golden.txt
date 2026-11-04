@@ -4,6 +4,7 @@
 chat_device_status_overlay
 content_import_preview_v1
 dsh_overlay_display
+dsh_overlay_strip
 dsh_workspace_floating_ball
 dsh_workspace_tree_grant
 image_loras_v1
@@ -21,6 +22,7 @@ mca_cloud_api
 mca_context_compression_v1
 mca_download_receipts
 mca_download_requests
+mca_dsh_runtime
 mca_generation_params
 mca_generation_presets_v1
 mca_image_generation_ui_parameters

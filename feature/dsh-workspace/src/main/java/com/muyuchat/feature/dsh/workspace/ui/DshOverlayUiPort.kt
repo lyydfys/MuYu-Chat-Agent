@@ -2,6 +2,41 @@ package com.muyuchat.feature.dsh.workspace.ui
 
 import com.muyuchat.core.dsh.contract.DshOverlayAppearance
 
+/** Background treatment of the top streaming strip; mirrors the app-owned setting without a dependency. */
+enum class DshOverlayStripSurfaceUi {
+    LIGHT,
+    DARK,
+    TRANSLUCENT
+}
+
+/**
+ * Editable state of the top streaming strip.
+ *
+ * The strip is a second, optional window (default off) that echoes the live turn at the top edge while
+ * the floating ball keeps its own bubbles. `opacityPercent` is 35..100 and [lines] is 1..2; the app
+ * clamps and persists the values, this type only carries them across the port boundary.
+ */
+data class DshOverlayStripUi(
+    val enabled: Boolean = false,
+    val surface: DshOverlayStripSurfaceUi = DshOverlayStripSurfaceUi.DARK,
+    val opacityPercent: Int = 100,
+    val lines: Int = 2,
+    /** Keep the strip below the status bar instead of drawing under it. */
+    val safeArea: Boolean = true
+) {
+    fun normalized(): DshOverlayStripUi = copy(
+        opacityPercent = opacityPercent.coerceIn(MIN_OPACITY_PERCENT, MAX_OPACITY_PERCENT),
+        lines = lines.coerceIn(MIN_LINES, MAX_LINES)
+    )
+
+    companion object {
+        const val MIN_OPACITY_PERCENT = 35
+        const val MAX_OPACITY_PERCENT = 100
+        const val MIN_LINES = 1
+        const val MAX_LINES = 2
+    }
+}
+
 /**
  * Display snapshot of the app-outside display, as the workspace settings panel renders it.
  *
@@ -39,7 +74,9 @@ data class DshOverlayUiSnapshot(
      * the page is left untouched. Persisting and rendering the switch belong to the settings owner;
      * this feature defines the field and its default.
      */
-    val accountReplyProbeEnabled: Boolean = true
+    val accountReplyProbeEnabled: Boolean = true,
+    /** The optional top streaming strip; off by default and fully independent of the ball. */
+    val strip: DshOverlayStripUi = DshOverlayStripUi()
 )
 
 /**
@@ -84,4 +121,16 @@ interface DshOverlayUiPort {
      * before this feature existed. Defaulted so an older app implementation keeps compiling.
      */
     fun setCommandApprovalEnabled(enabled: Boolean): String? = null
+
+    /**
+     * Turns the top streaming strip on/off; persists immediately and creates/removes only that window.
+     *
+     * Defaulted: an older app implementation without the strip simply persists nothing and the toggle
+     * stays decorative instead of crashing.
+     */
+    fun setStripEnabled(enabled: Boolean): String? = null
+
+    /** Persists the strip's visual options (surface, opacity, lines, safe area). Defaulted like above. */
+    fun saveStripSettings(strip: DshOverlayStripUi): String? = null
 }
+

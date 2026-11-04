@@ -59,3 +59,8 @@ tmp_*/
 # script prints size/SHA-256 for every artifact and the pinned baseline is in
 # docs/proposals/mca-native-video-workflow-v1/BASELINE_MANIFEST.md.
 /core/sd-native/src/main/jniLibs/
+
+# Offline container runtime (proot + Ubuntu rootfs) staged by tools/runtime/fetch-offline-runtime.ps1.
+/app/src/main/assets/offline/
+/artifacts/offline-runtime/
+

@@ -558,7 +558,7 @@ private fun rememberStreamClock(active: Boolean): Long {
  * MCA palette values for the roles this surface actually paints (the authority is `McaTheme.kt`).
  */
 @Composable
-private fun OverlayTheme(content: @Composable () -> Unit) {
+internal fun OverlayTheme(content: @Composable () -> Unit) {
     val scheme = if (isSystemInDarkTheme()) {
         darkColorScheme(
             primary = Color(0xFF8AB4F8),

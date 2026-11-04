@@ -2,6 +2,12 @@ package com.muyuchat.mca
 
 import android.content.Context
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.mca.secure.AndroidApiKeyVault
+import com.muyuchat.mca.secure.ApiKeyVaultState
+import com.muyuchat.mca.secure.ApiKeyVaultStatus
+import com.muyuchat.mca.secure.ApiKeyVaultUnavailable
+import com.muyuchat.mca.secure.planApiKeyCreate
+import com.muyuchat.mca.secure.planApiKeyRead
 import java.util.UUID
 import org.json.JSONArray
 
@@ -54,14 +60,33 @@ internal const val RICH_BLOCKS_ENABLED_KEY = "chat_rich_blocks_enabled"
 
     // ---- Local API switch and credential ------------------------------------------------
 
-    /** Returns the stored API key, creating and persisting one on first use. */
+    /**
+     * Returns the stored Local API key, creating and persisting one on first use.
+     *
+     * The slot is an Android-Keystore AES-GCM vault blob (`v1:` + base64). A value written by an
+     * older build is plaintext: it is re-encrypted on read and the plaintext is replaced by the
+     * blob. A blob that cannot be decrypted is **never cleared** — the caller gets a fail-closed
+     * per-process key instead, and [ApiKeyVaultState] reports `UNDECRYPTABLE_KEPT` so the failure is
+     * diagnosable and a later working keystore can still recover the original value.
+     */
     fun loadOrCreateApiKey(context: Context): String {
         val prefs = apiPreferences(context)
-        val existing = prefs.getString(KEY_API_KEY, null)
-        if (!existing.isNullOrBlank()) return existing
+        val stored = prefs.getString(KEY_API_KEY, null)
+        val cipher = AndroidApiKeyVault.forApp(context)
+        val plan = planApiKeyRead(stored, cipher)
+        plan.write?.let { encrypted -> prefs.edit().putString(KEY_API_KEY, encrypted).apply() }
+        ApiKeyVaultState.record(plan)
+        plan.value?.takeIf(String::isNotBlank)?.let { return it }
+        if (plan.status == ApiKeyVaultStatus.UNDECRYPTABLE_KEPT) {
+            // Fail closed: blanking the key would make the loopback server accept every request.
+            return ApiKeyVaultUnavailable.sessionKey
+        }
         val created = "mca-" + UUID.randomUUID().toString().replace("-", "").take(24)
-        prefs.edit().putString(KEY_API_KEY, created).apply()
-        return created
+        val create = planApiKeyCreate(created, cipher)
+        val persisted = create.write ?: created
+        prefs.edit().putString(KEY_API_KEY, persisted).apply()
+        ApiKeyVaultState.record(create)
+        return create.value ?: created
     }
 
     /**

@@ -57,24 +57,38 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
 
     private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
     private val ui = DshOverlayUiState()
+    private val stripUi = DshOverlayStripUiState()
+    private val stripApprovalQueue = DshOverlayStripApprovalQueue()
 
     private var windowManager: WindowManager? = null
     private var rootView: View? = null
     private var composeHost: DshOverlayComposeHost? = null
     private var layout: WindowManager.LayoutParams? = null
 
+    /** The optional second window: created only while the strip is enabled and has something to say. */
+    private var stripRootView: View? = null
+    private var stripComposeHost: DshOverlayComposeHost? = null
+    private var stripLayout: WindowManager.LayoutParams? = null
+
     /** Read by the approval gate from a channel coroutine: volatile so it never answers stale. */
     @Volatile
     private var attached = false
+
+    @Volatile
+    private var stripAttached = false
+
     private var status: DshOverlayStatus = DshOverlayStatus.unavailable()
     private var settings: DshOverlaySettings = DshOverlaySettings()
+    private var stripSettings: DshOverlayStripSettings = DshOverlayStripSettings()
     private var repliedReset: Runnable? = null
     private var bubbleHide: Runnable? = null
     private var noticeHide: Runnable? = null
+    private var stripHide: Runnable? = null
 
     private var density = 1f
     private var markPx = 0
     private var edgePx = 0
+    private var statusBarPx = 0
     private var screenWidthPx = 0
     private var screenHeightPx = 0
     private var markLeftPx = 0f
@@ -88,7 +102,9 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         windowManager = getSystemService(WindowManager::class.java)
         density = resources.displayMetrics.density
         settings = DshOverlayStore(this).loadSettings()
+        stripSettings = DshOverlayStripStore(this).loadSettings()
         applySettingsToUi(settings)
+        applyStripSettingsToUi(stripSettings)
         ui.headline = status.headline
         ui.summary = status.capabilitySummary
         instance = this
@@ -124,6 +140,7 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         measure()
         clampMarkPosition()
         updateWindowPosition()
+        if (stripAttached) updateStripLayout()
     }
 
     override fun onDestroy() {
@@ -162,6 +179,60 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         }
     }
 
+    /**
+     * Applies changed top-strip preferences: only the strip window is created/removed, the ball window
+     * is left untouched. Safe from any thread.
+     */
+    fun applyStripSettings(next: DshOverlayStripSettings) {
+        val normalized = next.normalized()
+        stripSettings = normalized
+        onMain {
+            applyStripSettingsToUi(normalized)
+            if (attached) measure()
+            if (!normalized.enabled) {
+                cancelStripHide()
+                stripUi.visible = false
+                stripUi.line = null
+                stripUi.fadeStartMs = null
+                stripUi.startedAtMs = 0L
+            }
+            // Priority rule: the strip owns a pending card while it is on; switching it off hands the
+            // card back to the ball (or denies it when no ball window exists either).
+            moveApprovalToCurrentOwner()
+            syncStripWindow()
+            updateStripLayout()
+        }
+    }
+
+    private fun applyStripSettingsToUi(next: DshOverlayStripSettings) {
+        stripUi.settings = next
+        stripUi.heightDp = DshOverlayStripLogic.heightDp(
+            lines = next.lines,
+            fontScale = resources.configuration.fontScale
+        )
+    }
+
+    private fun moveApprovalToCurrentOwner() {
+        val card = stripUi.approval ?: ui.approval ?: return
+        if (stripSettings.enabled) {
+            if (stripUi.approval?.id != card.id) {
+                stripUi.approval = card
+                stripUi.visible = true
+                stripUi.fadeStartMs = null
+                cancelStripHide()
+            }
+            ui.approval = null
+        } else {
+            stripUi.approval = null
+            if (attached) {
+                ui.approval = card
+            } else {
+                DshCommandApproval.decide(card.id, DshCommandApprovalDecision.DENY)
+                stripApprovalQueue.cancel(card.id)
+            }
+        }
+    }
+
     /** Shows one reply bubble and plays the one-shot "replied" cue; safe from any thread. */
     fun showReply(preview: DshOverlayReplyPreview) {
         onMain {
@@ -191,8 +262,10 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
                 is DshOverlayStream.Streaming -> {
                     cancelBubbleHide()
                     ui.bubble = null
-                    ui.streamActive = true
-                    ui.streamText = if (bubbleAllowed()) state.text else null
+                    // The ball only mirrors the stream when its own "流式上屏" switch is on; the strip
+                    // is an independent surface and does not force the ball's bubble/ring on.
+                    ui.streamActive = settings.streamingEnabled
+                    ui.streamText = if (settings.streamingEnabled && bubbleAllowed()) state.text else null
                     ui.streamLabel = null
                     if (ui.mood != DshOverlayBallMood.REPLIED) ui.mood = DshOverlayBallMood.WORKING
                 }
@@ -200,16 +273,57 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
                 is DshOverlayStream.ToolRunning -> {
                     cancelBubbleHide()
                     ui.bubble = null
-                    ui.streamActive = true
+                    ui.streamActive = settings.streamingEnabled
                     ui.streamText = null
-                    ui.streamLabel = if (bubbleAllowed()) state.label else null
+                    ui.streamLabel = if (settings.streamingEnabled && bubbleAllowed()) state.label else null
                     if (ui.mood != DshOverlayBallMood.REPLIED) ui.mood = DshOverlayBallMood.WORKING
                 }
 
                 is DshOverlayStream.Finished, DshOverlayStream.Idle -> clearStream()
             }
             updateWindowPosition()
+            updateStripForStream(state)
         }
+    }
+
+    /** Mirrors the live stream into the top strip; the strip owns its own window and timers. */
+    private fun updateStripForStream(state: DshOverlayStream) {
+        if (!stripSettings.enabled) {
+            cancelStripHide()
+            stripUi.visible = false
+            stripUi.line = null
+            stripUi.fadeStartMs = null
+            stripUi.startedAtMs = 0L
+            return
+        }
+        val line = DshOverlayStripLogic.lineFor(state, stripSettings.lines)
+        when (state) {
+            DshOverlayStream.Idle -> {
+                cancelStripHide()
+                stripUi.visible = false
+                stripUi.line = null
+                stripUi.fadeStartMs = null
+                stripUi.startedAtMs = 0L
+            }
+
+            is DshOverlayStream.Finished -> {
+                cancelStripHide()
+                stripUi.line = line
+                stripUi.visible = line != null
+                stripUi.fadeStartMs = if (line != null) System.currentTimeMillis() else null
+                if (line != null) scheduleStripHide()
+            }
+
+            is DshOverlayStream.Streaming, is DshOverlayStream.ToolRunning -> {
+                cancelStripHide()
+                stripUi.line = line
+                stripUi.visible = line != null
+                stripUi.fadeStartMs = null
+                if (stripUi.startedAtMs == 0L) stripUi.startedAtMs = System.currentTimeMillis()
+            }
+        }
+        syncStripWindow()
+        updateStripLayout()
     }
 
     /** Working mood while a DSH turn streams; the one-shot replied cue is never overwritten. */
@@ -225,25 +339,55 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
     // ------------------------------------------------------------------ command approval
 
     /**
-     * Shows the "DSH 想执行一条命令" card; called from the feature-side approval gate.
+     * Shows the "DSH 想执行一条命令" card.
      *
-     * Returns false when no window is attached: the gate then denies, so a prompt nobody can see never
-     * turns into a permission.
+     * The strip wins when it is switched on (and overlay permission exists); otherwise the ball shows
+     * it. The two windows are mutually exclusive for one request: the decision is made here, before
+     * any card state is written, so a request can never appear twice.
+     *
+     * Returns false when neither window is available: the gate then denies, so a prompt nobody can see
+     * never turns into a permission.
      */
     fun showApproval(request: DshCommandApprovalRequest): Boolean {
-        if (!attached) return false
+        val stripPossible = stripSettings.enabled && Settings.canDrawOverlays(this)
+        if (!stripPossible && !attached) return false
+        val card = DshOverlayApprovalUi(
+            id = request.id,
+            commandMasked = request.commandMasked,
+            deadlineMillis = request.deadlineMillis,
+            timeoutMillis = request.timeoutMillis
+        )
         onMain {
-            ui.approval = DshOverlayApprovalUi(
-                id = request.id,
-                commandMasked = request.commandMasked,
-                deadlineMillis = request.deadlineMillis,
-                timeoutMillis = request.timeoutMillis
-            )
+            if (stripPossible) {
+                if (stripApprovalQueue.present(request.id)) {
+                    stripUi.approval = card
+                    stripUi.visible = true
+                    stripUi.fadeStartMs = null
+                    cancelStripHide()
+                }
+                ui.approval = null
+            } else {
+                stripUi.approval = null
+                ui.approval = card
+            }
             ui.panel = DshOverlayPanel.NONE
             ui.bubble = null
             clearStream()
             cancelBubbleHide()
             updateWindowPosition()
+            syncStripWindow()
+            updateStripLayout()
+            // If the strip window could not attach (system refused the second overlay), the card must
+            // fall back to the ball instead of waiting on a surface nobody can see.
+            if (stripPossible && !stripAttached) {
+                stripUi.approval = null
+                stripUi.visible = false
+                stripApprovalQueue.cancel(card.id)
+                if (attached) {
+                    ui.approval = card
+                    updateWindowPosition()
+                }
+            }
         }
         return true
     }
@@ -251,18 +395,34 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
     /** Removes the card for [id] (answer, timeout or cancellation); a newer card is left alone. */
     fun dismissApproval(id: Long) {
         onMain {
-            if (ui.approval?.id != id) return@onMain
-            ui.approval = null
-            updateWindowPosition()
+            stripApprovalQueue.cancel(id)
+            var changed = false
+            if (ui.approval?.id == id) {
+                ui.approval = null
+                changed = true
+            }
+            if (stripUi.approval?.id == id) {
+                stripUi.approval = null
+                changed = true
+            }
+            if (changed) {
+                updateWindowPosition()
+                syncStripWindow()
+            }
         }
     }
 
     /** Removes whatever card is on screen, e.g. when the user switches approval off. */
     fun dismissAnyApproval() {
         onMain {
-            if (ui.approval == null) return@onMain
+            stripApprovalQueue.dismissAny()
+            val changed = ui.approval != null || stripUi.approval != null
             ui.approval = null
-            updateWindowPosition()
+            stripUi.approval = null
+            if (changed) {
+                updateWindowPosition()
+                syncStripWindow()
+            }
         }
     }
 
@@ -284,6 +444,23 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
                 DshCommandApprovalDecision.DENY
             }
         )
+    }
+
+    /** The strip's copy of [decideApproval]; a late second tap after the card cleared is a no-op. */
+    private fun decideStripApproval(allowOnce: Boolean) {
+        val current = stripUi.approval ?: return
+        stripUi.approval = null
+        if (stripApprovalQueue.decide(current.id)) {
+            DshCommandApproval.decide(
+                current.id,
+                if (allowOnce) {
+                    DshCommandApprovalDecision.ALLOW_ONCE
+                } else {
+                    DshCommandApprovalDecision.DENY
+                }
+            )
+        }
+        syncStripWindow()
     }
 
     // ------------------------------------------------------------------ window actions
@@ -368,6 +545,7 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         if (attached) {
             applyStatusTexts()
             DshOverlayWindowBus.host?.onWindowAttached()
+            syncStripWindow()
             return
         }
         measure()
@@ -403,6 +581,7 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
             attached = true
             host.attached()
             DshOverlayWindowBus.host?.onWindowAttached()
+            syncStripWindow()
         } catch (_: SecurityException) {
             host.release()
             reject(DshOverlayFailure.of(DshOverlayFailureCode.WINDOW_REJECTED, "系统拒绝了悬浮窗（权限）"))
@@ -413,6 +592,7 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
     }
 
     private fun removeWindow() {
+        removeStripWindow()
         val manager = windowManager
         val view = rootView
         rootView = null
@@ -427,6 +607,123 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         }
         composeHost?.release()
         composeHost = null
+    }
+
+    // ------------------------------------------------------------------ top streaming strip window
+
+    /**
+     * Creates or removes the strip window to match "enabled + something to show".
+     *
+     * The strip is deliberately removed instead of hidden: a full-width window at the top edge would
+     * otherwise intercept touches on the status bar while idle. Creation only happens on the same
+     * overlay permission the ball already required, and never while the ball is detached.
+     */
+    private fun syncStripWindow() {
+        val manager = windowManager ?: return
+        val shouldShow = attached && stripSettings.enabled &&
+            Settings.canDrawOverlays(this) &&
+            (stripUi.visible || stripUi.approval != null)
+        if (!shouldShow) {
+            removeStripWindow()
+            return
+        }
+        if (stripAttached) {
+            updateStripLayout()
+            return
+        }
+        attachStripWindow(manager)
+    }
+
+    private fun attachStripWindow(manager: WindowManager) {
+        val host = DshOverlayComposeHost(this)
+        val view = host.createView {
+            DshOverlayStripContent(
+                state = stripUi,
+                overlayUi = ui,
+                actions = this,
+                onTap = { returnToDsh() },
+                onApprovalDecision = ::decideStripApproval
+            )
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        params.y = if (stripSettings.safeArea) statusBarPx else 0
+        stripLayout = params
+        try {
+            manager.addView(view, params)
+            stripRootView = view
+            stripComposeHost = host
+            stripAttached = true
+            host.attached()
+        } catch (_: SecurityException) {
+            host.release()
+            stripRootView = null
+            stripComposeHost = null
+            stripLayout = null
+            stripAttached = false
+        } catch (_: RuntimeException) {
+            host.release()
+            stripRootView = null
+            stripComposeHost = null
+            stripLayout = null
+            stripAttached = false
+        }
+    }
+
+    private fun removeStripWindow() {
+        val manager = windowManager
+        val view = stripRootView
+        stripRootView = null
+        stripLayout = null
+        stripAttached = false
+        if (manager != null && view != null) {
+            runCatching { manager.removeView(view) }
+        }
+        stripComposeHost?.release()
+        stripComposeHost = null
+    }
+
+    private fun updateStripLayout() {
+        val params = stripLayout ?: return
+        val view = stripRootView ?: return
+        params.y = if (stripSettings.safeArea) statusBarPx else 0
+        if (stripAttached) runCatching { windowManager?.updateViewLayout(view, params) }
+    }
+
+    private fun scheduleStripHide() {
+        stripHide?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            stripHide = null
+            stripUi.visible = false
+            stripUi.line = null
+            stripUi.fadeStartMs = null
+            stripUi.startedAtMs = 0L
+            if (stripUi.approval == null) syncStripWindow()
+        }
+        stripHide = runnable
+        mainHandler.postDelayed(runnable, DshOverlayStripLogic.FADE_VISIBLE_MILLIS)
+    }
+
+    private fun cancelStripHide() {
+        stripHide?.let { mainHandler.removeCallbacks(it) }
+        stripHide = null
+    }
+
+    private fun statusBarHeightPx(): Int {
+        val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        if (resourceId > 0) {
+            return runCatching { resources.getDimensionPixelSize(resourceId) }
+                .getOrDefault((24 * density).roundToInt())
+        }
+        return (24 * density).roundToInt()
     }
 
     private fun reject(failure: DshOverlayFailure) {
@@ -444,6 +741,11 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         density = metrics.density
         markPx = (ui.markSizeDp * density).roundToInt().coerceAtLeast(1)
         edgePx = (DshOverlayGeometry.EDGE_DP * density).roundToInt()
+        statusBarPx = statusBarHeightPx()
+        stripUi.heightDp = DshOverlayStripLogic.heightDp(
+            lines = stripSettings.lines,
+            fontScale = resources.configuration.fontScale
+        )
     }
 
     private fun travelX(): Int = DshOverlayGeometry.travelPx(screenWidthPx, markPx, edgePx)
@@ -550,8 +852,18 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         ui.streamingEnabled = next.streamingEnabled
         ui.commandApprovalEnabled = next.commandApprovalEnabled
         // Switching approval off must also clear a card that is already waiting: it can no longer be
-        // answered, and the waiting channel has to be told DENY rather than left hanging.
-        if (!next.commandApprovalEnabled) decideApproval(allowOnce = false)
+        // answered, and the waiting channel has to be told DENY rather than left hanging. This covers
+        // both window owners because the switch is global.
+        if (!next.commandApprovalEnabled) {
+            decideApproval(allowOnce = false)
+            stripUi.approval?.let { card ->
+                stripUi.approval = null
+                if (stripApprovalQueue.decide(card.id)) {
+                    DshCommandApproval.decide(card.id, DshCommandApprovalDecision.DENY)
+                }
+                syncStripWindow()
+            }
+        }
         if (next.bubbleLines == 0 || !next.notifyReplies) ui.bubble = null
         // Turning live text off (or hiding bubbles) must drop the text already on screen; the progress
         // ring keeps showing that DSH is still working.
@@ -618,9 +930,11 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         repliedReset?.let { mainHandler.removeCallbacks(it) }
         bubbleHide?.let { mainHandler.removeCallbacks(it) }
         noticeHide?.let { mainHandler.removeCallbacks(it) }
+        stripHide?.let { mainHandler.removeCallbacks(it) }
         repliedReset = null
         bubbleHide = null
         noticeHide = null
+        stripHide = null
     }
 
     private fun onMain(block: () -> Unit) {

@@ -70,6 +70,11 @@ fun DshOverlayPanel(
         port.saveAppearance(appearance)?.let(onNotice)
     }
 
+    fun commitStrip(next: DshOverlayStripUi) {
+        port.saveStripSettings(next.normalized())?.let(onNotice)
+        refresh()
+    }
+
     // The overlay grant lives in system settings; re-read it when the user comes back.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -166,6 +171,65 @@ fun DshOverlayPanel(
                             refresh()
                         }
                     )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ToggleRow(
+                        title = "顶部流式悬浮条",
+                        description = "在屏幕顶部贴边显示一条歌词式横条（默认关闭）：生成中显示正在写的内容尾部，" +
+                            "工具调用显示「▸ 运行命令…」，结束后 6.5 秒淡出；点击返回 DSH，长按打开同一设置面板。",
+                        checked = snapshot.strip.enabled,
+                        onCheckedChange = { enabled ->
+                            port.setStripEnabled(enabled)?.let(onNotice)
+                            refresh()
+                        }
+                    )
+                    if (snapshot.strip.enabled) {
+                        StepRow(
+                            title = "条内行数",
+                            value = "${snapshot.strip.lines} 行",
+                            canDecrease = snapshot.strip.lines > DshOverlayStripUi.MIN_LINES,
+                            canIncrease = snapshot.strip.lines < DshOverlayStripUi.MAX_LINES,
+                            onDecrease = {
+                                commitStrip(snapshot.strip.copy(lines = snapshot.strip.lines - 1))
+                            },
+                            onIncrease = {
+                                commitStrip(snapshot.strip.copy(lines = snapshot.strip.lines + 1))
+                            }
+                        )
+                        StepRow(
+                            title = "不透明度",
+                            value = "${snapshot.strip.opacityPercent}%",
+                            canDecrease = snapshot.strip.opacityPercent >
+                                DshOverlayStripUi.MIN_OPACITY_PERCENT,
+                            canIncrease = snapshot.strip.opacityPercent <
+                                DshOverlayStripUi.MAX_OPACITY_PERCENT,
+                            onDecrease = {
+                                commitStrip(
+                                    snapshot.strip.copy(
+                                        opacityPercent = snapshot.strip.opacityPercent - 5
+                                    )
+                                )
+                            },
+                            onIncrease = {
+                                commitStrip(
+                                    snapshot.strip.copy(
+                                        opacityPercent = snapshot.strip.opacityPercent + 5
+                                    )
+                                )
+                            }
+                        )
+                        StripSurfaceRow(
+                            value = snapshot.strip.surface,
+                            onSelect = { surface -> commitStrip(snapshot.strip.copy(surface = surface)) }
+                        )
+                        ToggleRow(
+                            title = "避开状态栏",
+                            description = "开启后横条贴在状态栏下方；关闭则贴屏幕最顶部，适合全屏/刘海屏。",
+                            checked = snapshot.strip.safeArea,
+                            onCheckedChange = { safeArea ->
+                                commitStrip(snapshot.strip.copy(safeArea = safeArea))
+                            }
+                        )
+                    }
                     ToggleRow(
                         title = "允许拖动",
                         description = "关闭后悬浮球固定在当前位置，避免误触移动。",
@@ -244,6 +308,41 @@ private fun StepRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         StepButton(label = "＋", enabled = canIncrease, onClick = onIncrease)
+    }
+}
+
+/** Three-way background choice for the strip: 浅色 / 深色 / 半透明. */
+@Composable
+private fun StripSurfaceRow(
+    value: DshOverlayStripSurfaceUi,
+    onSelect: (DshOverlayStripSurfaceUi) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "底色",
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        DshOverlayStripSurfaceUi.entries.forEach { surface ->
+            val selected = surface == value
+            Text(
+                text = when (surface) {
+                    DshOverlayStripSurfaceUi.LIGHT -> "浅色"
+                    DshOverlayStripSurfaceUi.DARK -> "深色"
+                    DshOverlayStripSurfaceUi.TRANSLUCENT -> "半透明"
+                },
+                modifier = Modifier
+                    .clickable { onSelect(surface) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+        }
     }
 }
 
