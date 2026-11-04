@@ -62,6 +62,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    // ADB wireless pairing needs certificate TLS plus the RFC 5705 exporter; JSSE offers neither.
+    implementation(libs.bouncycastle.bctls)
+    implementation(libs.bouncycastle.bcprov)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     debugImplementation(libs.androidx.compose.ui.tooling)

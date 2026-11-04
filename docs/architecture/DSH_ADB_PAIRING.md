@@ -69,3 +69,44 @@ AES-GCM + protobuf 封装。因此：
 - ADB **直连**（已实现、已测）：协议客户端、RSA 身份、socket 传输、shell 流控、自动重连。
 - ADB **密钥登记**：有 root 一键完成；无 root 需手动。
 - ADB **无线配对**：**未实现**，本文档解释原因并给出路线。
+
+## 6. 当前实现状态与真机验证清单（2026-11 更新）
+
+状态：**实验性入口已接线，默认关闭**。
+
+已实现（纯 JVM 单测覆盖，79 例全绿）：
+
+| 部件 | 文件 | 状态 |
+|---|---|---|
+| 证书 TLS 1.3 + `exportKeyingMaterial("", null, 64)` | `AdbPairingTls.kt`（BC `TlsClientProtocol`，自签 EC P-256 证书由手写 DER 生成） | 编译通过（真实 bctls 1.86），**未真机验证** |
+| Curve25519 SPAKE2（BoringSSL 语义） | `Spake2Curve25519.kt`（M/N、口令标量 hack、transcript、64B key material 均按 `spake25519.cc` 逐行实现） | 单测通过，**未与真 adbd 互通** |
+| adb 配对包封装 | `AdbPairingPackets.kt`（6 字节头 + 大端 payload、protobuf 编码、AES-128-GCM、nonce 计数器） | 单测通过，**线格式未确认** |
+| 状态机与门控 | `AdbPairingController.kt` / `DshAdbPairingPort.kt` / `DshAdbChannel.pair` | 单测通过（5s/20s 超时、单飞、取消、稳定原因码） |
+| 控制台入口 | `ui/DshDeviceAccessSection.kt`（默认收起的「实验性：配对无线调试」） | 需 Gradle 编译验证 |
+
+### 四条未验证假设与翻 flag 的方法
+
+`AdbPairingWireAssumptions`（`AdbPairingPackets.kt`）有四个布尔项，默认全 `false`；为 `false` 时
+`AdbPairingController` 在任何网络动作之前返回 `UNSUPPORTED`，控制台会显示 `unsupported` 与假设名清单。
+**只有在真机抓到证据后才允许置为 `true`**，不要为了「跑通」而翻转：
+
+1. `tlsExporterLabel` — TLS exporter 的 label/context 用空串（对应 AOSP `SSL_export_keying_material(..., nullptr, 0, 0)`）。
+   证据：与 adbd 完成握手后 key material 能解出 PeerInfo。
+2. `aesGcmDerivation` — AES-128-GCM 的 key/nonce 如何从 SPAKE2 key material 派生（当前默认
+   `SHA-256(keyMaterial)` 前 16B/后 12B 是**假设**）。证据：`pairing_auth/aes_128_gcm.cpp` 源码或抓包。
+3. `peerInfoLayoutProtobuf` — `PeerInfo` 是 protobuf（字段 1/2/3）还是 `sizeof(PeerInfo)` 的裸结构体。
+   AOSP `pairing_connection.cpp` 两者线索都存在。证据：`pairing_connection.h` 的 `PeerInfo` 定义。
+4. `packetTypeValues` — `PairingPacket::Type` 的数值（当前假设 `SPAKE2_MSG=0`、`PEER_INFO=1`）。
+   证据：`pairing_connection/pairing.proto`。
+
+翻转方式：在构造 `DshAdbPairingPort` 时传入
+`assumptions = AdbPairingWireAssumptions(peerInfoLayoutProtobuf = true, aesGcmDerivation = true, packetTypeValues = true, exporterLabel = true)`
+（或逐项打开），并在文档里记录证据来源与日期。
+
+### 失败原因码（控制台原样显示）
+
+`tls_failed` · `spake2_failed` · `peer_info_rejected` · `timeout` · `cancelled` ·
+`concurrent_pairing` · `invalid_input` · `unsupported` · `transport_failed`
+
+成功只在「设备回的 PEER_INFO 能用我们的 key 解开」时产生；`PairingOutcome` 式的
+「握手成功即 READY」不在此列。

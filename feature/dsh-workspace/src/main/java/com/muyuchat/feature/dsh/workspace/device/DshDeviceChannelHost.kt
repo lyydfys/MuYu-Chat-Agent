@@ -123,10 +123,15 @@ class DshDeviceChannelHost internal constructor(
         private fun build(directory: File): DshDeviceChannelHost {
             val identityFile = File(directory, "adbkey.pkcs8")
             val root = DshRootChannel()
+            val endpointStore = FileDshAdbEndpointStore(File(directory, "adb_endpoint"))
             return DshDeviceChannelHost(
                 root = root,
-                adb = DshAdbChannel(SocketAdbTransport(identityFile)),
-                endpointStore = FileDshAdbEndpointStore(File(directory, "adb_endpoint")),
+                adb = DshAdbChannel(
+                    transport = SocketAdbTransport(identityFile),
+                    // Experimental pairing records the endpoint only after the device proves the exchange.
+                    pairingPort = DshAdbPairingPort(saveEndpoint = endpointStore::saveEndpoint)
+                ),
+                endpointStore = endpointStore,
                 provisionerFactory = { DshAdbProvisioner(root = root, identityFile = identityFile) }
             )
         }

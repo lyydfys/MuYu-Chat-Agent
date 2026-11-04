@@ -23,6 +23,10 @@ json = "20240303"
 # sandbox is host-side (ClassShutter + disabled globals + instruction observer), NOT an
 # isolatedProcess/UID boundary. Source/version checked in artifacts cards N10.
 rhino = "1.7.15"
+# ADB wireless pairing: certificate TLS + RFC 5705 exporter. JSSE exposes neither, and the
+# reference behaviour needs both; `bctls` is the only maintained JVM implementation. Same 1.79
+# line as bcprov/bcutil already resolved on this machine (see docs/architecture/DSH_ADB_PAIRING.md).
+bouncycastle = "1.86"
 # Agent V1 strict model-output parser. Streaming Core parser only; no databind is introduced.
 # Exact version/source is verified in docs/proposals/agent-v1/evidence/5e912ff9/dependency-verification.md.
 jackson = "2.22.4"
@@ -84,6 +88,9 @@ androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstall
 junit = { module = "junit:junit", version.ref = "junit" }
 json = { module = "org.json:json", version.ref = "json" }
 rhino = { module = "org.mozilla:rhino", version.ref = "rhino" }
+bouncycastle-bctls = { module = "org.bouncycastle:bctls-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-bcutil = { module = "org.bouncycastle:bcutil-jdk18on", version.ref = "bouncycastle" }
 # GenieX is deliberately absent from this catalog. The project does not depend on
 # com.qualcomm.qti:geniex-android from a repository: it builds against a locally patched AAR at
 # vendor/geniex/geniex-android-0.3.12-mca1.aar, referenced as files(...) in core/engine and app,

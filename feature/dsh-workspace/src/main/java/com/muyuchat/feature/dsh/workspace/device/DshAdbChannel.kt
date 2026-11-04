@@ -1,7 +1,9 @@
 package com.muyuchat.feature.dsh.workspace.device
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -48,10 +50,14 @@ data class DshAdbShellResult(
  * Replaceable transport behind [DshAdbChannel].
  *
  * [SocketAdbTransport] is the production implementation: a plain-text adb session on
- * `host:port` with the standard CNXN/AUTH handshake. Wireless **pairing** with a pairing code
- * (SPAKE2 + TLS-PSK on the pairing port) is still not implemented: the app can only authenticate with
- * a key the device already trusts, so a fresh device answers NEEDS_PAIRING until the user registers
- * the app key.
+ * `host:port` with the standard CNXN/AUTH handshake.
+ *
+ * Wireless **pairing** (the `adb pair` flow on the pairing port) is a separate, experimental path in
+ * [DshAdbChannel]: certificate TLS → `ExportKeyingMaterial(64)` folded into the pairing code →
+ * BoringSSL-style Curve25519 SPAKE2 → AES-GCM `PeerInfo` exchange. It is gated by
+ * [AdbPairingWireAssumptions] (four wire-format decisions are not yet device-verified), so treats a
+ * fresh device as NEEDS_PAIRING until either pairing succeeds or the user registers the app key.
+ * See `docs/architecture/DSH_ADB_PAIRING.md`.
  */
 interface AdbTransport {
 
@@ -102,11 +108,65 @@ internal fun dshBoundOutput(
  * `UNAVAILABLE` and returns `not_integrated`; it never pretends to be READY.
  */
 class DshAdbChannel internal constructor(
-    private val transport: AdbTransport?
+    private val transport: AdbTransport?,
+    /**
+     * Experimental wireless pairing, if this host wired it. Null keeps the channel exactly as before:
+     * [pair] reports `unsupported` and never touches a socket.
+     */
+    private val pairingPort: DshAdbPairingPort? = null
 ) : DshDeviceChannel {
 
     /** No transport: the honest "ADB not wired in this host" state. */
     constructor() : this(null)
+
+    /** Endpoints proven by a successful experimental pairing during this process. */
+    private val pairedEndpoints = linkedSetOf<String>()
+
+
+    private fun endpointKey(endpoint: DshAdbEndpoint): String = "${endpoint.host}:${endpoint.port}"
+
+    /** True when the experimental pairing switch is on. */
+    fun isExperimentalPairingEnabled(): Boolean = pairingPort?.isExperimentalEnabled() == true
+
+    /** Turns the experimental pairing switch on/off. Off is the default and hides the console block. */
+    fun setExperimentalPairingEnabled(enabled: Boolean) {
+        pairingPort?.setExperimentalEnabled(enabled)
+    }
+
+    /** True when [endpoint] was recorded by a successful experimental pairing in this process. */
+    fun isPairedEndpoint(endpoint: DshAdbEndpoint): Boolean =
+        synchronized(pairedEndpoints) { endpointKey(endpoint) in pairedEndpoints }
+
+    /**
+     * Runs one experimental wireless pairing attempt.
+     *
+     * Blocks on the pairing socket, so the controller runs on [Dispatchers.IO]. The endpoint is recorded
+     * only when the device proved the exchange; a failure leaves the endpoint memory untouched, which is
+     * what makes [connectAfterPairing] a real ordering gate instead of a convention.
+     */
+    suspend fun pair(host: String, port: Int, pairingCode: String): DshAdbPairingResult {
+        val portDelegate = pairingPort ?: return DshAdbPairingResult.failure(
+            AdbPairingFailure.UNSUPPORTED,
+            listOf(DshAdbPairingPort.NOT_ENABLED_ASSUMPTION)
+        )
+        val result = withContext(Dispatchers.IO) { portDelegate.pair(host, port, pairingCode) }
+        if (result.succeeded) {
+            val endpoint = result.endpoint ?: "$host:$port"
+            synchronized(pairedEndpoints) { pairedEndpoints += endpoint }
+        }
+        return result
+    }
+
+    /**
+     * Connects only to an endpoint that a successful pairing proved.
+     *
+     * Returns null (and does not touch the transport) otherwise, so the console cannot offer "connect"
+     * for a device that never completed pairing.
+     */
+    suspend fun connectAfterPairing(endpoint: DshAdbEndpoint): DshDeviceProbe? {
+        if (!isPairedEndpoint(endpoint)) return null
+        return connect(endpoint)
+    }
 
     override val kind: DshDeviceChannelKind = DshDeviceChannelKind.ADB
 
