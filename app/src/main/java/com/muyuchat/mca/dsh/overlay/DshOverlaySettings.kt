@@ -31,18 +31,29 @@ data class DshOverlayPosition(
 /**
  * Everything the app-outside display owner persists.
  *
- * [DshOverlayAppearance] is the contract type the workspace panel edits; [enabled] and [position]
- * are app-owned facts the contract deliberately does not carry (a contract type is shared by the
- * renderer and the picker, while "is it on" is an app lifecycle decision). A missing or broken
- * document decodes to these defaults, which never throws and never blocks the window from opening.
+ * [DshOverlayAppearance] is the contract type the workspace panel edits; [enabled], [streamingEnabled]
+ * and [position] are app-owned facts the contract deliberately does not carry (a contract type is
+ * shared by the renderer and the picker, while "is it on" and "do I want live text" are app lifecycle
+ * decisions). A missing or broken document decodes to these defaults, which never throws and never
+ * blocks the window from opening.
  */
 data class DshOverlaySettings(
     val enabled: Boolean = false,
     val appearance: DshOverlayAppearance = DshOverlayAppearance(),
-    val position: DshOverlayPosition = DshOverlayPosition()
+    val position: DshOverlayPosition = DshOverlayPosition(),
+    /**
+     * Live "AI output on screen": show assistant text while it streams, plus a tool label and a
+     * progress arc. On by default because it is the point of the app-outside window; off restores the
+     * finished-bubble-only behaviour exactly.
+     */
+    val streamingEnabled: Boolean = DEFAULT_STREAMING_ENABLED
 ) {
     fun normalized(): DshOverlaySettings =
         copy(appearance = appearance.normalized(), position = position.normalized())
+
+    companion object {
+        const val DEFAULT_STREAMING_ENABLED = true
+    }
 }
 
 /**
@@ -64,6 +75,7 @@ internal object DshOverlaySettingsCodec {
     private const val KEY_BUBBLE_LINES = "bubbleLines"
     private const val KEY_NOTIFY_REPLIES = "notifyReplies"
     private const val KEY_DRAGGABLE = "draggable"
+    private const val KEY_STREAMING = "streaming"
     private const val KEY_X = "x"
     private const val KEY_Y = "y"
 
@@ -79,6 +91,7 @@ internal object DshOverlaySettingsCodec {
             .put(KEY_BUBBLE_LINES, normalized.appearance.bubbleLines)
             .put(KEY_NOTIFY_REPLIES, normalized.appearance.notifyReplies)
             .put(KEY_DRAGGABLE, normalized.appearance.draggable)
+            .put(KEY_STREAMING, normalized.streamingEnabled)
             .put(KEY_X, normalized.position.xFraction.toDouble())
             .put(KEY_Y, normalized.position.yFraction.toDouble())
             .toString()
@@ -108,6 +121,10 @@ internal object DshOverlaySettingsCodec {
                         .toFloat(),
                     yFraction = root.optDouble(KEY_Y, DshOverlayPosition.DEFAULT_Y_FRACTION.toDouble())
                         .toFloat()
+                ),
+                streamingEnabled = root.optBoolean(
+                    KEY_STREAMING,
+                    DshOverlaySettings.DEFAULT_STREAMING_ENABLED
                 )
             ).normalized()
         }.getOrElse { DshOverlaySettings() }

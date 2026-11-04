@@ -165,6 +165,10 @@ class DshOverlayService : Service() {
     /** Shows one reply bubble and plays the one-shot "replied" cue; safe from any thread. */
     fun showReply(preview: DshOverlayReplyPreview) {
         onMain {
+            // The finished bubble replaces any live text from the same turn.
+            ui.streamText = null
+            ui.streamLabel = null
+            ui.streamActive = false
             ui.bubble = preview.text
             ui.bubbleLines = settings.appearance.bubbleLines.coerceIn(1, MAX_BUBBLE_LINES)
             ui.mood = McaMascotMood.REPLIED
@@ -173,6 +177,58 @@ class DshOverlayService : Service() {
             updateWindowPosition()
         }
     }
+
+    /**
+     * Renders the live stream state ("AI output on screen"); safe from any thread.
+     *
+     * Only [DshOverlayStream.Streaming] and [DshOverlayStream.ToolRunning] produce content. A finished
+     * turn clears the live text here and lets [showReply] own the bubble, so there is exactly one
+     * bubble on screen and the existing 2 s / 30 s / 6.5 s rules keep applying to it.
+     */
+    fun applyStream(state: DshOverlayStream) {
+        onMain {
+            when (state) {
+                is DshOverlayStream.Streaming -> {
+                    cancelBubbleHide()
+                    ui.bubble = null
+                    ui.streamActive = true
+                    ui.streamText = if (bubbleAllowed()) state.text else null
+                    ui.streamLabel = null
+                    if (ui.mood != McaMascotMood.REPLIED) ui.mood = McaMascotMood.WORKING
+                }
+
+                is DshOverlayStream.ToolRunning -> {
+                    cancelBubbleHide()
+                    ui.bubble = null
+                    ui.streamActive = true
+                    ui.streamText = null
+                    ui.streamLabel = if (bubbleAllowed()) state.label else null
+                    if (ui.mood != McaMascotMood.REPLIED) ui.mood = McaMascotMood.WORKING
+                }
+
+                is DshOverlayStream.Finished, DshOverlayStream.Idle -> clearStream()
+            }
+            updateWindowPosition()
+        }
+    }
+
+    /** Drops the live text but keeps the mark's working mood; the observer settles the mood. */
+    private fun clearStream() {
+        ui.streamActive = false
+        ui.streamText = null
+        ui.streamLabel = null
+    }
+
+    private fun cancelBubbleHide() {
+        bubbleHide?.let { mainHandler.removeCallbacks(it) }
+        bubbleHide = null
+    }
+
+    /** Bubbles are hidden by the user's own switches; the progress arc still shows the work. */
+    private fun bubbleAllowed(): Boolean =
+        settings.appearance.notifyReplies &&
+            settings.appearance.bubbleLines > 0 &&
+            settings.streamingEnabled
 
     /** Working mood while a DSH turn streams; the one-shot replied cue is never overwritten. */
     fun setWorking(isWorking: Boolean) {
@@ -285,6 +341,10 @@ class DshOverlayService : Service() {
     private fun bubbleBlockHeightPx(): Int =
         (((ui.bubbleLines.coerceIn(1, MAX_BUBBLE_LINES) * 20) + 32) * density).roundToInt()
 
+    /** True while the mark carries any bubble content: a finished reply or the live stream text. */
+    private fun hasContentBubble(): Boolean =
+        ui.bubble != null || ui.streamText != null || ui.streamLabel != null
+
     private fun panelBlockHeightPx(): Int = ((2 * 18 + 16) * density).roundToInt()
 
     /**
@@ -298,7 +358,7 @@ class DshOverlayService : Service() {
         ui.alignEnd = rightAnchored
         val growthAbove = when {
             ui.panelVisible -> panelBlockHeightPx()
-            ui.bubble != null -> bubbleBlockHeightPx()
+            hasContentBubble() -> bubbleBlockHeightPx()
             else -> 0
         }
         val bubbleBelow = growthAbove > 0 && markTopPx - growthAbove - edgePx < 0
@@ -373,6 +433,13 @@ class DshOverlayService : Service() {
         ui.bubbleLines = appearance.bubbleLines.coerceIn(0, MAX_BUBBLE_LINES)
         ui.draggable = appearance.draggable
         if (appearance.bubbleLines == 0 || !appearance.notifyReplies) ui.bubble = null
+        // Turning live text off (or hiding bubbles) must drop the text already on screen; the
+        // progress arc keeps showing that DSH is still working.
+        if (!next.streamingEnabled || !bubbleAllowed()) {
+            ui.streamText = null
+            ui.streamLabel = null
+        }
+        if (!next.streamingEnabled) ui.streamActive = false
     }
 
     /** Decodes the user's image off the main thread; a failed decode keeps the vector fallback. */

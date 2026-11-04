@@ -15,7 +15,14 @@ data class DshOverlayUiSnapshot(
     val backgroundRunning: Boolean = false,
     val appearance: DshOverlayAppearance = DshOverlayAppearance(),
     /** A custom image is selected but its private file is missing or was never committed. */
-    val customImageMissing: Boolean = false
+    val customImageMissing: Boolean = false,
+    /**
+     * Whether DSH's streaming text is echoed into the overlay while a turn runs.
+     *
+     * Persisted separately from the visual appearance because it is a "how loud" choice, not a
+     * "how it looks" one; turning it off leaves the one-shot end-of-turn bubble untouched.
+     */
+    val streamingEnabled: Boolean = true
 )
 
 /**
@@ -42,4 +49,12 @@ interface DshOverlayUiPort {
 
     /** The explicit "停止后台运行" intent: window removed, keep-alive service stopped. */
     fun stopBackground(): String?
+
+    /**
+     * Turns the live streaming echo on or off; persists immediately.
+     *
+     * Off means the overlay never shows in-progress text: it falls back to the single
+     * end-of-turn bubble, which is what someone who only wants "done" notifications wants.
+     */
+    fun setStreamingEnabled(enabled: Boolean): String?
 }

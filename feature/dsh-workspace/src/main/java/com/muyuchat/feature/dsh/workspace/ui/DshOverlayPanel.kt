@@ -262,6 +262,15 @@ fun DshOverlayPanel(
                         onValueChangeFinished = { commit(appearance) }
                     )
                     ToggleRow(
+                        title = "流式上屏",
+                        description = "DSH 生成时把正在写的内容实时显示在悬浮窗旁（最多三行）；关闭后只在回答结束时弹一次气泡。",
+                        checked = snapshot.streamingEnabled,
+                        onCheckedChange = { enabled ->
+                            port.setStreamingEnabled(enabled)?.let(onNotice)
+                            refresh()
+                        }
+                    )
+                    ToggleRow(
                         title = "回复时弹出气泡",
                         description = "DSH 一轮回答结束后，在小鲸鱼旁显示开头几句；关闭后仍会用动效表示正在生成。",
                         checked = appearance.notifyReplies,

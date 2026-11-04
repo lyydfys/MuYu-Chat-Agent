@@ -43,6 +43,29 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
     private val store = DshOverlayStore(appContext)
     private val gate = DshOverlayBubbleGate()
 
+    /**
+     * Cached "may the window show live text right now" fact.
+     *
+     * The observer asks this on every delta, so it must not decode the preference document per chunk.
+     * It is recomputed on every write the host performs (enable/disable, appearance save, image import,
+     * restore), which are the only places the answer can change.
+     */
+    @Volatile
+    private var streamingAllowed: Boolean = false
+
+    /**
+     * One presenter per process: it owns the streaming state machine between the gateway and the
+     * window. The window is looked up on each push because the service may be attached or not.
+     */
+    private val streamPresenter = DshOverlayStreamPresenter(
+        onState = { state -> DshOverlayService.instance?.applyStream(state) },
+        streamingEnabled = { streamingAllowed }
+    )
+
+    init {
+        refreshStreamingAllowed()
+    }
+
     /** Live status provider of the DSH runtime, installed by the capability assembly when it exists. */
     @Volatile
     internal var statusProvider: DshOverlayStatusProvider = DshOverlayStatusProvider.Unavailable
@@ -92,8 +115,17 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
         delegate = delegate,
         onBusy = { DshOverlayService.instance?.setWorking(true) },
         onIdle = { DshOverlayService.instance?.setWorking(false) },
-        onReply = ::onReply
+        onReply = ::onReply,
+        stream = streamPresenter,
+        streamingEnabled = { streamingAllowed }
     )
+
+    /** Recomputes [streamingAllowed] after any write that can change it. */
+    private fun refreshStreamingAllowed() {
+        val settings = store.loadSettings()
+        streamingAllowed = settings.enabled && settings.streamingEnabled
+        if (!streamingAllowed) streamPresenter.reset()
+    }
 
     fun ensureRuntimeStarted() {
         runtime.ensureStarted()
@@ -105,6 +137,7 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
      */
     fun restoreIfEnabled() {
         val settings = store.loadSettings()
+        refreshStreamingAllowed()
         if (!settings.enabled) return
         if (!canDrawOverlays(appContext)) return
         if (!DshBackgroundService.start(appContext)) return
@@ -134,14 +167,26 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
             appearance = appearance,
             // A metadata check only (no content read): the panel explains a missing file instead of
             // silently showing the vector fallback.
-            customImageMissing = customPath != null && !DshOverlayCustomImage.exists(customPath)
+            customImageMissing = customPath != null && !DshOverlayCustomImage.exists(customPath),
+            streamingEnabled = settings.streamingEnabled
         )
+    }
+
+    override fun setStreamingEnabled(enabled: Boolean): String? {
+        val settings = store.loadSettings()
+        store.saveSettings(settings.copy(streamingEnabled = enabled))
+        // Recompute the cached gate so the very next delta already obeys the new choice, and drop
+        // any half-written text so a disabled overlay cannot keep showing a stale in-progress line.
+        refreshStreamingAllowed()
+        if (!enabled) DshOverlayService.instance?.applyStream(DshOverlayStream.Idle)
+        return null
     }
 
     override fun setEnabled(enabled: Boolean): String? {
         val settings = store.loadSettings()
         if (!enabled) {
             store.saveSettings(settings.copy(enabled = false))
+            refreshStreamingAllowed()
             controller.hide()
             DshBackgroundService.stop(appContext)
             gate.reset()
@@ -152,6 +197,7 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
             return "请先在系统设置中允许 MCA 显示在其他应用上层"
         }
         store.saveSettings(settings.copy(enabled = true))
+        refreshStreamingAllowed()
         if (!DshBackgroundService.start(appContext)) {
             store.saveSettings(settings.copy(enabled = false))
             return "无法启动后台保持服务，App 外显示未开启"
@@ -170,6 +216,7 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
     override fun saveAppearance(appearance: DshOverlayAppearance): String? {
         val settings = store.loadSettings().copy(appearance = appearance)
         store.saveSettings(settings)
+        refreshStreamingAllowed()
         DshOverlayService.instance?.applySettings(store.loadSettings())
         return null
     }
@@ -185,6 +232,7 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
             )
         )
         store.saveSettings(next)
+        refreshStreamingAllowed()
         DshOverlayService.instance?.applySettings(next)
         return null
     }

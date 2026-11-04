@@ -30,7 +30,8 @@ class DshOverlaySettingsCodecTest {
                 notifyReplies = false,
                 draggable = false
             ),
-            position = DshOverlayPosition(xFraction = 0.25f, yFraction = 0.8f)
+            position = DshOverlayPosition(xFraction = 0.25f, yFraction = 0.8f),
+            streamingEnabled = false
         )
 
         val decoded = DshOverlaySettingsCodec.decode(DshOverlaySettingsCodec.encode(original))
@@ -104,6 +105,25 @@ class DshOverlaySettingsCodecTest {
         assertFalse(decoded.enabled)
         assertEquals(0f, decoded.position.xFraction, 0.0001f)
         assertEquals(0f, decoded.position.yFraction, 0.0001f)
+    }
+
+    @Test
+    fun theStreamingSwitchDefaultsOnAndSurvivesARoundTrip() {
+        assertEquals(
+            DshOverlaySettings.DEFAULT_STREAMING_ENABLED,
+            DshOverlaySettingsCodec.decode(null).streamingEnabled
+        )
+        assertTrue(DshOverlaySettingsCodec.decode("""{"enabled":true}""").streamingEnabled)
+        assertFalse(
+            DshOverlaySettingsCodec.decode("""{"enabled":true,"streaming":false}""").streamingEnabled
+        )
+        assertFalse(
+            DshOverlaySettingsCodec.decode(
+                DshOverlaySettingsCodec.encode(
+                    DshOverlaySettings(enabled = true, streamingEnabled = false)
+                )
+            ).streamingEnabled
+        )
     }
 
     @Test
