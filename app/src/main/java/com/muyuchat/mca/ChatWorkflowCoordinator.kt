@@ -11,6 +11,7 @@ import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.compressChatRequestContext
 import com.muyuchat.core.engine.localContextWindowAdmission
 import com.muyuchat.feature.chat.ChatMessageIdentity
+import com.muyuchat.feature.chat.withQuotedContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -338,6 +339,10 @@ internal class ChatWorkflowCoordinator(
             },
             imageAttachments = preparedInput.imageAttachments
         )
+        // A quote is a request-scoped modifier: the persisted user message keeps the visible text,
+        // while this copy carries the structured quote block into admission, token accounting and
+        // every provider payload. No "他刚才说..." sentence is written into stored content.
+        val requestUser = user.withQuotedContext(preparedInput.quotedMessage)
         // Context compression must run before the first admission decision.  The
         // old ordering rejected an over-budget request (or let a trimmed
         // request proceed without using that trimmed list) before the automatic
@@ -346,7 +351,7 @@ internal class ChatWorkflowCoordinator(
         // and perform the final safety admission.  The persisted conversation
         // remains untouched; only the request crossing the runtime boundary is
         // compressed/trimmed.
-        val preflightMessages = state.messages + user
+        val preflightMessages = state.messages + requestUser
         val preflightContext = withContext(Dispatchers.IO) { viewModel.chatContextComposer.compose(
             messages = preflightMessages,
             params = conversationParams,

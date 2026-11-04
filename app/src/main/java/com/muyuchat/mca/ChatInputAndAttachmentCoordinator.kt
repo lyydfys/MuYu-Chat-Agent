@@ -85,7 +85,8 @@ internal class ChatInputAndAttachmentCoordinator(
             .trim()
         return PreparedChatInput(
             text = textWithoutAttachments,
-            imageAttachments = attachments.deduplicateVisionAttachmentsForDisplay()
+            imageAttachments = attachments.deduplicateVisionAttachmentsForDisplay(),
+            quotedMessage = state.quotedMessage
         )
     }
 
