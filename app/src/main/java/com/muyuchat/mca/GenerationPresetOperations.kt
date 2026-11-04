@@ -222,12 +222,26 @@ internal fun saveGenerationPresetBindingsFor(
         boundLocalModelIds.forEach { modelId ->
             val key = ModelGenerationProfileKey.local(modelId)
             val base = modelGenerationProfileStore.loadOrCreate(key, GenerationParams())
-            modelGenerationProfileStore.save(key, modelGenerationParamsFromJson(presetJson, base))
+            // A phone model cannot honour a web-scale output budget; the cloud branch below keeps it.
+            modelGenerationProfileStore.save(
+                key,
+                PresetOutputBudget.apply(
+                    modelGenerationParamsFromJson(presetJson, base),
+                    isLocal = true
+                )
+            )
         }
         boundCloudModelIds.forEach { modelId ->
             val key = ModelGenerationProfileKey.cloud(modelId)
             val base = modelGenerationProfileStore.loadOrCreate(key, GenerationParams())
-            modelGenerationProfileStore.save(key, modelGenerationParamsFromJson(presetJson, base))
+            // Cloud endpoints really do support long output, so the imported value is kept.
+            modelGenerationProfileStore.save(
+                key,
+                PresetOutputBudget.apply(
+                    modelGenerationParamsFromJson(presetJson, base),
+                    isLocal = false
+                )
+            )
         }
     }
 

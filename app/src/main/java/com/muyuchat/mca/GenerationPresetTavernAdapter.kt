@@ -108,11 +108,12 @@ internal object SillyTavernPresetAdapter {
     /**
      * Import ceiling for a Tavern preset's output length.
      *
-     * Tavern users are used to 30k-60k token outputs and write them into the preset; a phone-side
-     * MCA preset that large fails its own context admission on the first request, so the imported
-     * value is capped and the clamp is reported.
+     * The declared value is **kept**: a preset authored for a cloud model legitimately asks for 30k-60k
+     * output. The budget is applied per bound model instead (see [PresetOutputBudget]): local models
+     * are clamped to the phone ceiling, cloud models keep the requested value. This constant only
+     * stops nonsense above the sampler ceiling.
      */
-    const val MAX_PREDICT_TAVERN: Int = 8_192
+    const val MAX_PREDICT_TAVERN: Int = MAX_PREDICT
 
     /** Storage cap for the flattened prompt bundle; a longer one is truncated with an ellipsis. */
     const val MAX_PROMPT_APPENDIX_CHARS: Int = 32_000

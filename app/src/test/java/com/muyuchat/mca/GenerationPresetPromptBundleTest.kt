@@ -77,7 +77,7 @@ class GenerationPresetPromptBundleTest {
     }
 
     @Test
-    fun `tavern output length is capped below the mca ceiling and the clamp is reported`() {
+    fun `tavern output length is imported as declared so a cloud binding keeps it`() {
         val json = JSONObject()
             .put("temperature", 1.0)
             .put("openai_max_tokens", 60000)
@@ -85,8 +85,8 @@ class GenerationPresetPromptBundleTest {
         val parsed = SillyTavernPresetAdapter.adapt(json.toString())
         val mapping = (parsed as GenerationPresetParseResult.Tavern).mapping
 
-        assertEquals(SillyTavernPresetAdapter.MAX_PREDICT_TAVERN, mapping.params.nPredict)
-        assertTrue(mapping.clamped.any { it.key == "openai_max_tokens" })
+        // Import keeps the author's value; the per-model budget decides what a local model may use.
+        assertEquals(60000, mapping.params.nPredict)
     }
 
     @Test

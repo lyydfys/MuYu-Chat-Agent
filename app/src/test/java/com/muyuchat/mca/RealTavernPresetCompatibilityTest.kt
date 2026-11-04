@@ -29,8 +29,8 @@ class RealTavernPresetCompatibilityTest {
         assertEquals(0.0f, mapping.params.minP, 0.0001f)
         assertEquals(0.0f, mapping.params.presencePenalty, 0.0001f)
         assertEquals(0.0f, mapping.params.frequencyPenalty, 0.0001f)
-        // 60k output is a web-model number; the imported preset is capped so the phone accepts it.
-        assertEquals(SillyTavernPresetAdapter.MAX_PREDICT_TAVERN, mapping.params.nPredict)
+        // The declared 60k output is kept; only a local binding narrows it.
+        assertEquals(60_000, mapping.params.nPredict)
         assertEquals(-1, mapping.params.seed)
         assertNotNullBundle(mapping.promptAppendix)
         assertTrue("the bundle reports its real size", mapping.promptChars > 1_000)
@@ -45,7 +45,7 @@ class RealTavernPresetCompatibilityTest {
         val mapping = (parsed as GenerationPresetParseResult.Tavern).mapping
 
         assertEquals(0.95f, mapping.params.topP, 0.0001f)
-        assertEquals(SillyTavernPresetAdapter.MAX_PREDICT_TAVERN, mapping.params.nPredict)
+        assertEquals(30_000, mapping.params.nPredict)
         assertNotNullBundle(mapping.promptAppendix)
     }
 
@@ -60,7 +60,7 @@ class RealTavernPresetCompatibilityTest {
         assertEquals(1.03f, mapping.params.temperature, 0.0001f)
         assertEquals(1.2f, mapping.params.presencePenalty, 0.0001f)
         assertEquals(1.1f, mapping.params.frequencyPenalty, 0.0001f)
-        assertEquals(SillyTavernPresetAdapter.MAX_PREDICT_TAVERN, mapping.params.nPredict)
+        assertEquals(46_999, mapping.params.nPredict)
         assertNotNullBundle(mapping.promptAppendix)
     }
 
