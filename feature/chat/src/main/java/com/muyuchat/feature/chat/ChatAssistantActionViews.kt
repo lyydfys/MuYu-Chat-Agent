@@ -90,8 +90,8 @@ internal fun AssistantActionRow(
     readOnly: Boolean,
     canRegenerate: Boolean,
     onRegenerate: () -> Unit,
-    onDelete: () -> Unit,
     onDeleteLastTurn: () -> Unit,
+    onQuote: () -> Unit,
     onCopy: () -> Unit,
     copied: Boolean = false,
     pinned: Boolean,
@@ -278,6 +278,14 @@ internal fun AssistantActionRow(
                     }
                 )
                 DropdownMenuItem(
+                    text = { Text("引用回复") },
+                    leadingIcon = { Icon(McaIcons.ChatBubbleOutline, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onQuote()
+                    }
+                )
+                DropdownMenuItem(
                     text = { Text("\u5220\u9664\u672c\u8f6e\u5bf9\u8bdd", color = MaterialTheme.colorScheme.error) },
                     leadingIcon = {
                         Icon(
@@ -289,20 +297,6 @@ internal fun AssistantActionRow(
                     onClick = {
                         menuOpen = false
                         onDeleteLastTurn()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("删除本条", color = MaterialTheme.colorScheme.error) },
-                    leadingIcon = {
-                        Icon(
-                            McaIcons.Delete,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                    },
-                    onClick = {
-                        menuOpen = false
-                        onDelete()
                     }
                 )
             }

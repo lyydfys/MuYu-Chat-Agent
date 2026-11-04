@@ -33,6 +33,7 @@
   ],
   "ChatPromptDraftFields": [
     "input",
+    "quotedMessage",
     "pendingChatImageActionDraft",
     "pendingChatImageTranslationDraft",
     "statusMessage"

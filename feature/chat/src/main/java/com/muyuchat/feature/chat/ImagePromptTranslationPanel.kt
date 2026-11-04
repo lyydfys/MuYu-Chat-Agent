@@ -215,9 +215,11 @@ private fun rememberImagePromptTranslationController(
 private fun ImagePromptTranslationStage.visibleFor(source: String): ImagePromptTranslationStage =
     when (this) {
         is ImagePromptTranslationStage.Ready ->
-            if (this.source == source) this else ImagePromptTranslationStage.Idle
+            if (imagePromptTranslationVisibleFor(this.source, source)) this
+            else ImagePromptTranslationStage.Idle
         is ImagePromptTranslationStage.Failed ->
-            if (this.source == source) this else ImagePromptTranslationStage.Idle
+            if (imagePromptTranslationVisibleFor(this.source, source)) this
+            else ImagePromptTranslationStage.Idle
         ImagePromptTranslationStage.Idle -> ImagePromptTranslationStage.Idle
         ImagePromptTranslationStage.Translating -> ImagePromptTranslationStage.Translating
     }

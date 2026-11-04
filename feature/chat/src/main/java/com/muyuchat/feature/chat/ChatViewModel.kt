@@ -92,6 +92,10 @@ class ChatViewModel(
 
     fun deleteMessage(messageIndex: Int) = capabilities.conversation.onDeleteMessage(messageIndex)
 
+    /** Applies edited text as a new user turn after retiring that message and everything after it. */
+    fun editAndResend(target: ChatMessageIdentity, editedText: String) =
+        capabilities.conversation.onEditAndResend(target, editedText)
+
     fun exportConversation(format: String) = capabilities.conversation.onExportConversation(format)
 
     fun renameConversation(conversationId: String, title: String) =
@@ -129,6 +133,8 @@ class ChatViewModel(
     // -- generation and input -----------------------------------------------------------------
 
     fun changeInput(text: String) = capabilities.generation.onInputChange(text)
+
+    fun quoteMessage(quote: ChatQuotedMessage?) = capabilities.generation.onQuoteMessage(quote)
 
     fun send() = capabilities.generation.onSend()
 
@@ -379,6 +385,7 @@ class ChatViewModel(
             onUndoContextSummary = ::undoContextSummary,
             onSearchContextSummarySources = ::searchContextSummarySources,
             onMessageIntent = capabilities.conversation.onMessageIntent,
+            onEditAndResend = ::editAndResend,
         ),
         generation = ChatGenerationActions(
             onInputChange = ::changeInput,
@@ -391,6 +398,7 @@ class ChatViewModel(
             onModelBackendChange = ::changeModelBackend,
             onLoadModel = ::loadModel,
             onUploadFile = ::uploadFile,
+            onQuoteMessage = ::quoteMessage,
             releaseGenerationImageGrantsIfCoordinatorIdle = ::releaseGenerationImageGrantsIfCoordinatorIdle,
         ),
         content = ChatContentActions(

@@ -72,7 +72,9 @@ class ChatSessionPersistenceOperationsTest {
     fun theViewModelKeepsOnlyTheMutationDelegate() {
         val vm = sourceFile("MainViewModel.kt")
 
-        assertEquals(1, Regex("""private fun persistConversationMutation\(""").findAll(vm).count())
+        // The chat edit/quote delegates call the same entry point, so it is module-internal rather
+        // than file-private; there must still be exactly one definition.
+        assertEquals(1, Regex("""internal fun persistConversationMutation\(""").findAll(vm).count())
         assertTrue(vm.contains("runPersistConversationMutation("))
     }
 

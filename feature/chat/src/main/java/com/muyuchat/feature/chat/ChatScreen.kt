@@ -75,6 +75,7 @@ fun ChatScreen(
     val onDeleteLastTurn = actions.conversation.onDeleteLastTurn
     val onDeleteMessage = actions.conversation.onDeleteMessage
     val onMessageIntent = actions.conversation.onMessageIntent
+    val onEditAndResend = actions.conversation.onEditAndResend
     val onExportConversation = actions.conversation.onExportConversation
     val onRenameConversation = actions.conversation.onRenameConversation
     val onSelectConversation = actions.conversation.onSelectConversation
@@ -98,6 +99,7 @@ fun ChatScreen(
     val onModelBackendChange = actions.generation.onModelBackendChange
     val onLoadModel = actions.generation.onLoadModel
     val onUploadFile = actions.generation.onUploadFile
+    val onQuoteMessage = actions.generation.onQuoteMessage
     val releaseGenerationImageGrantsIfCoordinatorIdle = actions.generation.releaseGenerationImageGrantsIfCoordinatorIdle
     val onDeleteAssistant = actions.content.onDeleteAssistant
     val onSaveAssistant = actions.content.onSaveAssistant
@@ -438,6 +440,8 @@ fun ChatScreen(
                     onTogglePinMessage = { onTogglePinMessage(it) },
                     onDeleteLastTurn = onDeleteLastTurn,
                     onMessageIntent = onMessageIntent,
+                    onEditAndResend = onEditAndResend,
+                    onQuoteMessage = onQuoteMessage,
                     onBrowserTaskEvent = onBrowserTaskEvent,
                     nestedScrollConnection = scrollNestedScrollConnection,
                     onScrollToBottom = { scrollCoordinator.scrollToBottomNow() },
@@ -511,6 +515,8 @@ fun ChatScreen(
                 onToggleWebSearchForTurn = onToggleWebSearchForTurn,
                 onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
+                quotedMessage = state.quotedMessage,
+                onDismissQuote = { onQuoteMessage(null) },
                 onMeasuredHeight = { bottomChromeHeightPx = it },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )

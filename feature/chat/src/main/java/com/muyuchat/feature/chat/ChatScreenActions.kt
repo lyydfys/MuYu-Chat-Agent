@@ -33,6 +33,8 @@ data class ChatConversationActions(
     val onSearchContextSummarySources: (String) -> List<ContextSummaryEvidenceUiItem> = { emptyList() },
     /** Identity-aware replacement for delayed message actions; legacy callbacks remain above. */
     val onMessageIntent: ((ChatMessageIntent) -> Unit)? = null,
+    /** Rolls back from a user message, applies the edited text and regenerates in one durable step. */
+    val onEditAndResend: (ChatMessageIdentity, String) -> Unit = { _, _ -> },
 )
 
 /** 生成与输入：发送、停止、重试、参数与推理模式、模型后端、附件。 */
@@ -48,6 +50,8 @@ data class ChatGenerationActions(
     val onModelBackendChange: (String, String) -> Unit = { _, _ -> },
     val onLoadModel: (String) -> Unit = {},
     val onUploadFile: (String) -> Unit,
+    /** Sets or clears the one-turn structured quote shown above the composer. */
+    val onQuoteMessage: (ChatQuotedMessage?) -> Unit = {},
     val releaseGenerationImageGrantsIfCoordinatorIdle: ((() -> Unit) -> Boolean),
 )
 

@@ -101,11 +101,18 @@ internal fun MessageBubble(
     generationPersistProgress: PersistProgress?,
     generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
-    onDelete: () -> Unit,
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
     onDeleteLastTurn: () -> Unit,
+    onEdit: () -> Unit,
+    onQuote: () -> Unit,
+    canEditMessage: Boolean,
     canCopyMessage: () -> Boolean,
+    /**
+     * Live world-book/knowledge-base names for the "上下文来源" panel. Defaulted: a caller that
+     * cannot supply names still renders recorded names (or a readable placeholder), never a UUID.
+     */
+    contextTraceNames: ContextTraceLibraryNames = ContextTraceLibraryNames(),
     modifier: Modifier = Modifier
 ) {
     val clipboard = LocalClipboard.current
@@ -135,11 +142,14 @@ internal fun MessageBubble(
             UserMessageBubble(
                 message = message,
                 readOnly = readOnly,
+                canEdit = canEditMessage,
                 onTogglePinned = {
                     haptics.confirm()
                     onTogglePinned()
                 },
                 canTogglePinned = canTogglePinned,
+                onEdit = onEdit,
+                onQuote = onQuote,
                 copied = copiedRecently,
                 onCopy = {
                     if (canCopyMessage()) {
@@ -186,13 +196,13 @@ internal fun MessageBubble(
                 generationPersistProgress = generationPersistProgress,
                 generationStats = generationStats,
                 onRegenerate = onRegenerate,
-                onDelete = onDelete,
                 onTogglePinned = {
                     haptics.confirm()
                     onTogglePinned()
                 },
                 canTogglePinned = canTogglePinned,
                 onDeleteLastTurn = onDeleteLastTurn,
+                onQuote = onQuote,
                 onCopy = {
                     if (canCopyMessage()) {
                         haptics.confirm()
@@ -205,7 +215,8 @@ internal fun MessageBubble(
                         }
                     }
                 },
-                copied = copiedRecently
+                copied = copiedRecently,
+                contextTraceNames = contextTraceNames
             )
         }
     }
@@ -215,8 +226,11 @@ internal fun MessageBubble(
 private fun UserMessageBubble(
     message: ChatMessage,
     readOnly: Boolean,
+    canEdit: Boolean,
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
+    onEdit: () -> Unit,
+    onQuote: () -> Unit,
     copied: Boolean,
     onCopy: () -> Unit
 ) {
@@ -493,6 +507,14 @@ private fun UserMessageBubble(
                     )
                 }
             }
+            }
+            if (!readOnly) {
+                UserMessageActionMenu(
+                    readOnly = readOnly,
+                    canEdit = canEdit,
+                    onEdit = onEdit,
+                    onQuote = onQuote
+                )
             }
         }
     }

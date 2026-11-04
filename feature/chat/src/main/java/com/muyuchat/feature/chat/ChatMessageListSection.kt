@@ -40,8 +40,10 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +67,12 @@ import com.muyuchat.core.designsystem.mcaPressScale
 import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.designsystem.McaIconSize
+
+/** Local editor target: the stable identity plus the text the dialog starts from. */
+private data class ChatMessageEditTarget(
+    val identity: ChatMessageIdentity,
+    val initialText: String
+)
 
 /**
  * Message-list item motion: spring fade for appearing/removed rows, damped spring for placement.
@@ -110,6 +118,8 @@ internal fun ChatMessageListSection(
     onTogglePinMessage: (String) -> Unit,
     onDeleteLastTurn: () -> Unit,
     onMessageIntent: ((ChatMessageIntent) -> Unit)?,
+    onEditAndResend: (ChatMessageIdentity, String) -> Unit = { _, _ -> },
+    onQuoteMessage: (ChatQuotedMessage) -> Unit = {},
     onBrowserTaskEvent: (BrowserTaskEvent) -> Unit,
     nestedScrollConnection: NestedScrollConnection,
     onScrollToBottom: () -> Unit = {},
@@ -140,6 +150,21 @@ internal fun ChatMessageListSection(
             assistant.id == state.selectedAssistantId && assistant.characterCardImported
         }
     }
+    // Live id→name maps for the "上下文来源" panel. Derived once per library change; the panel also
+    // carries the name recorded inside each trace, which is what keeps a deleted book readable.
+    val contextTraceLibraryNames = remember(state.worldBooks, state.knowledgeBases) {
+        ContextTraceLibraryNames(
+            worldBookNames = state.worldBooks.associate { it.id to it.name },
+            knowledgeBaseNames = state.knowledgeBases.associate { it.id to it.name }
+        )
+    }
+    val assistantQuoteLabel = remember(state.assistants, state.selectedAssistantId) {
+        state.assistants.firstOrNull { it.id == state.selectedAssistantId }
+            ?.name
+            ?.takeIf(String::isNotBlank)
+            ?: "助手"
+    }
+    var editTarget by remember { mutableStateOf<ChatMessageEditTarget?>(null) }
     val canScrollBackward by remember(listState) {
         derivedStateOf { listState.canScrollBackward }
     }
@@ -218,6 +243,7 @@ internal fun ChatMessageListSection(
                     readOnly = state.conversationReadOnly,
                     browserSessionId = state.activeConversationId,
                     characterCardHtml = characterCardHtml,
+                    contextTraceNames = contextTraceLibraryNames,
                     onOpenBrowserTask = onOpenBrowserTask,
                     generatedImageRequest = generatedImageRequest,
                     generatedImageJob = generatedImageJob,
@@ -265,7 +291,21 @@ internal fun ChatMessageListSection(
                         null
                     },
                     onRegenerate = { actionDispatcher.regenerate(row.identity) },
-                    onDelete = { actionDispatcher.delete(row.identity) },
+                    onEdit = {
+                        editTarget = ChatMessageEditTarget(
+                            identity = row.identity,
+                            initialText = displayInputWithoutAttachment(message.content)
+                        )
+                    },
+                    onQuote = {
+                        chatQuotedMessageFor(
+                            message = message,
+                            authorLabel = if (message.role == Role.USER) "我" else assistantQuoteLabel
+                        )?.let(onQuoteMessage)
+                    },
+                    canEditMessage = message.role == Role.USER &&
+                        !state.isGenerating &&
+                        !state.conversationReadOnly,
                     onTogglePinned = {
                         if (actionDispatcher.isCurrent(row.identity)) onTogglePinMessage(message.id)
                     },
@@ -396,5 +436,15 @@ internal fun ChatMessageListSection(
                 }
             }
         }
+    }
+    editTarget?.let { target ->
+        ChatMessageEditDialog(
+            initialText = target.initialText,
+            onDismiss = { editTarget = null },
+            onConfirm = { text ->
+                editTarget = null
+                onEditAndResend(target.identity, text)
+            }
+        )
     }
 }

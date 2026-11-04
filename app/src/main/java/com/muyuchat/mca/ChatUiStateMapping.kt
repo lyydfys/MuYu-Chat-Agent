@@ -208,6 +208,7 @@ internal fun buildChatUiState(
         )
     }
     return ChatUiState(
+                    quotedMessage = state.quotedMessage,
                     pendingImageTranslationDraft = state.pendingChatImageTranslationDraft,
                     pendingImageActionDraft = state.pendingChatImageActionDraft,
                     browserTask = state.browserTask,

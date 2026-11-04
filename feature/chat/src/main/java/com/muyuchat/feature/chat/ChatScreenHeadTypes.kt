@@ -51,6 +51,8 @@ data class ChatUiState(
     val activeConversationId: String? = null,
     val conversationReadOnly: Boolean = false,
     val input: String = "",
+    /** Request-scoped quote shown above the composer; cleared when the send is accepted. */
+    val quotedMessage: ChatQuotedMessage? = null,
     val isGenerating: Boolean = false,
     val generationPhase: GenerationPhase? = null,
     val generationTokenProgress: TokenProgress? = null,

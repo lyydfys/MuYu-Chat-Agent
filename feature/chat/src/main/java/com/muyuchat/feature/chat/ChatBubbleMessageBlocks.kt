@@ -134,12 +134,14 @@ internal fun AssistantMessageBlock(
     generationPersistProgress: PersistProgress?,
     generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
-    onDelete: () -> Unit,
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
     onDeleteLastTurn: () -> Unit,
+    onQuote: () -> Unit,
     onCopy: () -> Unit,
-    copied: Boolean = false
+    copied: Boolean = false,
+    /** Live library names for the trace panel; the trace's own recorded names win over these. */
+    contextTraceNames: ContextTraceLibraryNames = ContextTraceLibraryNames()
 ) {
     val richTextIdentity = ChatMessageIdentity(browserSessionId, message.id)
     val streamedContent = rememberSmoothedStreamingText(
@@ -319,8 +321,8 @@ internal fun AssistantMessageBlock(
                         readOnly = readOnly,
                         canRegenerate = canRegenerate,
                         onRegenerate = onRegenerate,
-                        onDelete = onDelete,
                         onDeleteLastTurn = onDeleteLastTurn,
+                        onQuote = onQuote,
                         onCopy = onCopy,
                         copied = copied,
                         pinned = message.pinned,
@@ -343,12 +345,29 @@ internal fun AssistantMessageBlock(
                                 contentDescription = null,
                             )
                         }
+                        McaIconButton(
+                            contentDescription = "引用回复",
+                            onClick = onQuote,
+                            hapticsEnabled = false,
+                            size = 48.dp,
+                            glyphSize = McaIconSize.Xs,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ) {
+                            Icon(
+                                McaIcons.ChatBubbleOutline,
+                                contentDescription = null,
+                            )
+                        }
                     }
                 }
             }
         }
     }
     if (showContextTrace && contextTrace != null) {
-        ContextAssemblyTraceDialog(contextTrace, onDismiss = { showContextTrace = false })
+        ContextAssemblyTraceDialog(
+            contextTrace,
+            onDismiss = { showContextTrace = false },
+            names = contextTraceNames
+        )
     }
 }

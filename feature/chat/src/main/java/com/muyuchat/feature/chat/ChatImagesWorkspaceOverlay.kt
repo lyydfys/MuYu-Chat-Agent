@@ -141,6 +141,8 @@ internal fun ChatImagesWorkspaceOverlay(
     var pendingUltraFixSubmission by remember {
         mutableStateOf<Pair<String, ImageGenerationUiOptions>?>(null)
     }
+    // 本次工作台提交的结算身份：成功才清空提示词，失败保留原文并清理失效输入。
+    var pendingImagePromptJob by remember { mutableStateOf<PendingImagePromptJob?>(null) }
     var imageGenerationStartSignal by remember { mutableStateOf(0L) }
     var generationImageEditorRequest by remember {
         mutableStateOf<GenerationImageEditorRequest?>(null)
@@ -349,6 +351,7 @@ internal fun ChatImagesWorkspaceOverlay(
         pendingGenerationImageRoleVar = ImagesWorkspaceBoundVar({ pendingGenerationImageRole }, { pendingGenerationImageRole = it }),
         pendingUltraFixSubmissionVar = ImagesWorkspaceBoundVar({ pendingUltraFixSubmission }, { pendingUltraFixSubmission = it }),
         imageGenerationStartSignalVar = ImagesWorkspaceBoundVar({ imageGenerationStartSignal }, { imageGenerationStartSignal = it }),
+        pendingImagePromptJobVar = ImagesWorkspaceBoundVar({ pendingImagePromptJob }, { pendingImagePromptJob = it }),
         generationImageEditorRequestVar = ImagesWorkspaceBoundVar({ generationImageEditorRequest }, { generationImageEditorRequest = it }),
     )
     ImagesWorkspaceEffectsSection(bindings)
@@ -413,7 +416,7 @@ internal fun ChatImagesWorkspaceOverlay(
                         McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 pendingUltraFixSubmission = null
-                                val admitted = onGenerateImagePrompt(prompt, options)
+                                val admitted = bindings.submitTrackedImagePrompt(prompt, options)
                                 if (admitted) {
                                     imageGenerationStartSignal++
                                 } else {

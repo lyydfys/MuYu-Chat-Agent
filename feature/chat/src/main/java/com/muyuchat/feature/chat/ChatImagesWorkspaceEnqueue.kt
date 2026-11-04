@@ -39,6 +39,23 @@ internal fun imagesWorkspaceEnqueueImagePrompt(
             imageValidationError = "请先选择当前模式需要的图片输入"
             return
         }
+        // 提交前体检：输入图可能已被删除/权限失效/损坏。必须在这里给出可操作原因并清掉失效引用，
+        // 不能等 worker 打开文件时才以 `image_assets/... open failed: ENOENT` 收尾。
+        val staleInputs = staleGenerationInputRoles(
+            references = mapOf(
+                ImageInputRole.INPUT to imageInputUri,
+                ImageInputRole.MASK to imageMaskUri,
+                ImageInputRole.CONTROL to imageControlUri,
+            ),
+            reasonOf = { reference -> preflightGenerationImageReference(context, reference) },
+        )
+        if (staleInputs.isNotEmpty()) {
+            clearFailedGenerationInputRoles(this, staleInputs)
+            val message = staleGenerationInputWarning(staleInputs).orEmpty()
+            imageValidationError = message
+            notify(message)
+            return
+        }
         val strengthValue = imageStrengthText.toDoubleOrNull()
         if (imageTaskMode in setOf(
                 ImageGenerationUiTaskMode.IMG2IMG,
@@ -314,7 +331,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(
         if (ultraFixOptions != null) {
             pendingUltraFixSubmission = cleanPrompt to generationOptions
         } else {
-            val admitted = onGenerateImagePrompt(cleanPrompt, generationOptions)
+            val admitted = submitTrackedImagePrompt(cleanPrompt, generationOptions)
             if (admitted) {
                 imageGenerationStartSignal++
             } else {
@@ -324,5 +341,29 @@ internal fun imagesWorkspaceEnqueueImagePrompt(
             }
         }
         imagePrompt = cleanPrompt
+    }
+}
+
+/**
+ * 清掉体检/失败后确认不可用的输入引用，并复位尺寸探针，避免下一次提交继续引用失效文件。
+ *
+ * 只清角色，不动提示词、模型与参数；警告文案由调用方决定（体检用「请重新选择」，失败结算用
+ * 「已清除失效的…」）。
+ */
+internal fun clearFailedGenerationInputRoles(
+    bindings: ImagesWorkspaceOverlayBindings,
+    roles: List<ImageInputRole>,
+) {
+    with(bindings) {
+        if (ImageInputRole.INPUT in roles) {
+            imageInputUri = null
+            imageInputDimensionsUri = null
+            imageInputSourceWidth = 0
+            imageInputSourceHeight = 0
+            imageInputDimensionsProbing = false
+            imageInputDimensionsProbeFailed = false
+        }
+        if (ImageInputRole.MASK in roles) imageMaskUri = null
+        if (ImageInputRole.CONTROL in roles) imageControlUri = null
     }
 }

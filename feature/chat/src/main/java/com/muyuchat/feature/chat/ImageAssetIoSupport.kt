@@ -51,12 +51,11 @@ internal fun loadImageBitmap(
     val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     decode(boundsOptions)
     if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return@runCatching null
-    var sampleSize = 1
-    while (maxOf(boundsOptions.outWidth, boundsOptions.outHeight) / sampleSize > bound &&
-        sampleSize <= (1 shl 29)
-    ) {
-        sampleSize *= 2
-    }
+    val sampleSize = imageSampleSizeFor(
+        width = boundsOptions.outWidth,
+        height = boundsOptions.outHeight,
+        maxDimensionPx = bound,
+    )
     decode(BitmapFactory.Options().apply { inSampleSize = sampleSize })
 }.getOrNull()
 

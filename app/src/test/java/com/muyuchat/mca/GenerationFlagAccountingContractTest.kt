@@ -121,6 +121,14 @@ import org.junit.Test
  * The submission failure guard added one reset in `ChatWorkflowCoordinator.kt` (0 -> 1): a throw
  * raised before the provider call is reported instead of escaping the launched coroutine. The
  * start site is unchanged (1).
+ *
+ * ## Re-derivation recorded (edit-and-resend)
+ *
+ * `ConversationEditOperations.kt` owns exactly one optimistic start (the edited turn is applied
+ * before its Room commit, matching regeneration) and one reset for the post-commit path where the
+ * generation reservation cannot be activated. Its persistence-failure path deliberately does not
+ * write the flag here: `runPersistConversationMutation` restores it through the recorded
+ * `ChatSessionPersistenceOperations` reset, so the accounting does not double count.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -164,6 +172,13 @@ class GenerationFlagAccountingContractTest {
     private val chatExecutionFieldTransitions: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ChatExecutionFieldTransitions.kt")
     }
+    /**
+     * P5 edit-and-resend: one optimistic start (the edit turn) and one failure reset when the
+     * generation cannot be launched after a durable edit commit.
+     */
+    private val conversationEdit: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/ConversationEditOperations.kt")
+    }
 
     /**
      * Measured baseline across the files that own the flag's transitions.
@@ -189,6 +204,8 @@ class GenerationFlagAccountingContractTest {
     private val expectedFalseInRuntimeFieldTransitions = 2
     private val expectedTrueInChatExecutionFieldTransitions = 1
     private val expectedFalseInChatExecutionFieldTransitions = 2
+    private val expectedTrueInConversationEdit = 1
+    private val expectedFalseInConversationEdit = 1
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -306,6 +323,10 @@ class GenerationFlagAccountingContractTest {
             assignments(chatExecutionFieldTransitions).count { it.second == "true" })
         assertEquals("ChatExecutionFieldTransitions resets changed", expectedFalseInChatExecutionFieldTransitions,
             assignments(chatExecutionFieldTransitions).count { it.second == "false" })
+        assertEquals("ConversationEditOperations starts changed", expectedTrueInConversationEdit,
+            assignments(conversationEdit).count { it.second == "true" })
+        assertEquals("ConversationEditOperations resets changed", expectedFalseInConversationEdit,
+            assignments(conversationEdit).count { it.second == "false" })
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
@@ -394,6 +415,17 @@ class GenerationFlagAccountingContractTest {
             setOf("sendPreparedMessageAsync"),
             workflowOwners
         )
+        val editLines = conversationEdit.lines()
+        fun editOwnerOf(index: Int): String {
+            for (cursor in index downTo 0) {
+                Regex("""^\s*(?:internal |private |public )?(?:suspend )?fun (\w+)\(""")
+                    .find(editLines[cursor])?.let { return it.groupValues[1] }
+            }
+            return "?"
+        }
+        val editOwners = assignments(conversationEdit).filter { it.second == "true" }
+            .map { editOwnerOf(it.first) }.toSet()
+        assertEquals(setOf("editAndResendMessageFor"), editOwners)
     }
 
     @Test
@@ -409,6 +441,7 @@ class GenerationFlagAccountingContractTest {
         assertEquals("ConversationReplayOperations", 0, exceptionSafeResets(conversationReplay))
         assertEquals("RuntimeFieldTransitions", 0, exceptionSafeResets(runtimeFieldTransitions))
         assertEquals("ChatExecutionFieldTransitions", 0, exceptionSafeResets(chatExecutionFieldTransitions))
+        assertEquals("ConversationEditOperations", 0, exceptionSafeResets(conversationEdit))
     }
 
     @Test
@@ -417,6 +450,7 @@ class GenerationFlagAccountingContractTest {
             mainViewModel, transitions, publisher, stopOperations, chatSessionPersistence,
             runtimeLifecycle, assistantImageContinuation, chatWorkflow, conversationReplay,
             runtimeFieldTransitions, chatExecutionFieldTransitions,
+            conversationEdit,
         )
         val root = sourcePath("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
             .parentFile

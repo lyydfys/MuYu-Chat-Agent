@@ -10,7 +10,6 @@ import com.muyuchat.core.designsystem.rememberMcaFeedbackState
 import android.content.ClipData
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -50,9 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
@@ -122,7 +119,7 @@ internal fun ImageAssetPreviewOverlay(
     val imageLoadState = rememberChatImageLoadState(
         context = context,
         uriString = image.uriString,
-        maxDimensionPx = 1280,
+        maxDimensionPx = 2048,
         revisionKey = imageLoadRevision,
         taskIdentity = image.id
     )
@@ -375,16 +372,18 @@ internal fun ImageAssetPreviewOverlay(
             }
         }
         when (imageLoadState) {
-            is ChatImageLoadState.Ready -> Image(
-                bitmap = imageLoadState.bitmap.asImageBitmap(),
+            is ChatImageLoadState.Ready -> ZoomablePreviewImage(
+                imageId = image.id,
+                bitmap = imageLoadState.bitmap,
                 contentDescription = image.name,
-                contentScale = ContentScale.Fit,
+                onDismissTap = dismissWithMotion,
                 modifier = Modifier
-                    .testTag("image.preview.bitmap.${image.id}")
+                    .testTag("image.preview.zoom.${image.id}")
                     .align(Alignment.Center)
                     .fillMaxWidth()
                     .fillMaxHeight(0.82f)
-                    .padding(horizontal = 12.dp, vertical = 76.dp)
+                    .padding(horizontal = 12.dp, vertical = 76.dp),
+                bitmapTestTag = "image.preview.bitmap.${image.id}",
             )
             ChatImageLoadState.Loading -> Column(
                 modifier = Modifier.align(Alignment.Center),
@@ -433,6 +432,15 @@ internal fun ImageAssetPreviewOverlay(
                         color = Color.White.copy(alpha = 0.72f),
                         fontSize = 12.sp
                     )
+                    if (imageLoadState is ChatImageLoadState.Ready) {
+                        // 手势发现性：缩放/平移只由手势触发，给一行安静的操作提示，
+                        // 不新增按钮或另一套查看器样式。
+                        Text(
+                            "双指缩放 · 双击放大/还原 · 单击关闭",
+                            color = Color.White.copy(alpha = 0.58f),
+                            fontSize = 11.sp
+                        )
+                    }
                     if (image.prompt.isNotBlank()) {
                         Text(
                             image.prompt,

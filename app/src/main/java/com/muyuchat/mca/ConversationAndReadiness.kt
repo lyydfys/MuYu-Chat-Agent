@@ -80,7 +80,9 @@ internal data class AttachmentImportResult(
 
 internal data class PreparedChatInput(
     val text: String,
-    val imageAttachments: List<ChatImageAttachment>
+    val imageAttachments: List<ChatImageAttachment>,
+    /** One-turn structured quote; folded into the request copy only, never into stored text. */
+    val quotedMessage: com.muyuchat.feature.chat.ChatQuotedMessage? = null
 )
 
 internal const val EMPTY_ASSISTANT_COMPLETION_MESSAGE =

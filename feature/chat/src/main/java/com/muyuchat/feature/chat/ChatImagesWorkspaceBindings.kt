@@ -131,11 +131,29 @@ internal class ImagesWorkspaceOverlayBindings(
     pendingGenerationImageRoleVar: ImagesWorkspaceBoundVar<String>,
     pendingUltraFixSubmissionVar: ImagesWorkspaceBoundVar<Pair<String, ImageGenerationUiOptions>?>,
     imageGenerationStartSignalVar: ImagesWorkspaceBoundVar<Long>,
+    pendingImagePromptJobVar: ImagesWorkspaceBoundVar<PendingImagePromptJob?>,
     generationImageEditorRequestVar: ImagesWorkspaceBoundVar<GenerationImageEditorRequest?>,
 ) {
 
     val enqueueImagePrompt: (String, (String) -> Unit) -> Unit = { prompt, notify ->
         imagesWorkspaceEnqueueImagePrompt(this, prompt, notify)
+    }
+
+    /**
+     * 提交并记录本次提示词任务：成功后按「提示词 + 提交时刻」等待结算（成功清空/失败保留）。
+     * UI 闭包里的 state 可能是上一帧，所以这里不捕获 jobId；生成开始信号仍由调用点按
+     * `if (admitted)` 推进，保持原有点击语义。
+     */
+    fun submitTrackedImagePrompt(prompt: String, options: ImageGenerationUiOptions): Boolean {
+        val submittedAtMillis = System.currentTimeMillis()
+        val admitted = onGenerateImagePrompt(prompt, options)
+        if (admitted) {
+            pendingImagePromptJob = PendingImagePromptJob(
+                prompt = prompt,
+                submittedAtMillis = submittedAtMillis,
+            )
+        }
+        return admitted
     }
 
     var imagePrompt by imagePromptVar
@@ -189,5 +207,6 @@ internal class ImagesWorkspaceOverlayBindings(
     var pendingGenerationImageRole by pendingGenerationImageRoleVar
     var pendingUltraFixSubmission by pendingUltraFixSubmissionVar
     var imageGenerationStartSignal by imageGenerationStartSignalVar
+    var pendingImagePromptJob by pendingImagePromptJobVar
     var generationImageEditorRequest by generationImageEditorRequestVar
 }

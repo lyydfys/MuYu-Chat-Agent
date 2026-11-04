@@ -31,6 +31,7 @@ import com.muyuchat.feature.agent.AgentCandidateProgress
 data class ChatPromptDraftFields(
     override val snapshot: MainUiState,
     val input: String = snapshot.input,
+    val quotedMessage: com.muyuchat.feature.chat.ChatQuotedMessage? = snapshot.quotedMessage,
     val pendingChatImageActionDraft: com.muyuchat.feature.chat.ChatImageActionDraftUi? = snapshot.pendingChatImageActionDraft,
     val pendingChatImageTranslationDraft: com.muyuchat.feature.chat.ChatImageTranslationDraftUi? = snapshot.pendingChatImageTranslationDraft,
     val statusMessage: String? = snapshot.statusMessage,
@@ -40,6 +41,7 @@ fun MainUiState.toChatPromptDraftFields(): ChatPromptDraftFields = ChatPromptDra
 
 fun ChatPromptDraftFields.mergeInto(current: MainUiState): MainUiState = current.copy(
     input = input,
+    quotedMessage = quotedMessage,
     pendingChatImageActionDraft = pendingChatImageActionDraft,
     pendingChatImageTranslationDraft = pendingChatImageTranslationDraft,
     statusMessage = statusMessage,

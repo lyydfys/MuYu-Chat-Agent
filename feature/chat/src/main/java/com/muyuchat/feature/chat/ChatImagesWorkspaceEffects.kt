@@ -488,5 +488,51 @@ internal fun ImagesWorkspaceEffectsSection(bindings: ImagesWorkspaceOverlayBindi
             imageNegativePrompt = reconciled.additionalPrompt
         }
     }
+    // 提交结算：成功才清空提示词（与聊天发送后清空一致）；失败/取消保留原文以便重试。
+    // 失败时再体检一次当前输入，清掉已失效的引用并给出「请重新选择」提示，避免同一条
+    // ENOENT 引用让重试永远失败、逼用户新开聊天。
+    LaunchedEffect(state.imageJobs, pendingImagePromptJob) {
+        val pending = pendingImagePromptJob ?: return@LaunchedEffect
+        val job = state.imageJobs.firstOrNull { candidate ->
+            candidate.prompt == pending.prompt &&
+                candidate.startedAtMillis >= pending.submittedAtMillis
+        } ?: return@LaunchedEffect
+        if (!job.terminal) return@LaunchedEffect
+        val producedCount = job.imageAssetIds.size
+            .coerceAtLeast(if (job.imageAssetId != null) 1 else 0)
+        val clearPrompt = shouldClearImagePromptAfterJob(
+            terminal = job.terminal,
+            failed = job.failed,
+            imageAssetCount = producedCount,
+        )
+        if (clearPrompt) {
+            imagePrompt = imagePromptAfterJobSettlement(
+                currentPrompt = imagePrompt,
+                submittedPrompt = pending.prompt,
+                clearPrompt = true,
+            )
+        }
+        if (job.failed) {
+            // 先取快照再进 IO：不给后台线程读 Compose 状态的机会，也避免期间用户换图造成错配。
+            val inputReference = imageInputUri
+            val maskReference = imageMaskUri
+            val controlReference = imageControlUri
+            val staleRoles = withContext(Dispatchers.IO) {
+                staleGenerationInputRoles(
+                    references = mapOf(
+                        ImageInputRole.INPUT to inputReference,
+                        ImageInputRole.MASK to maskReference,
+                        ImageInputRole.CONTROL to controlReference,
+                    ),
+                    reasonOf = { reference -> preflightGenerationImageReference(context, reference) },
+                )
+            }
+            if (staleRoles.isNotEmpty()) {
+                clearFailedGenerationInputRoles(bindings, staleRoles)
+                imageInputRestoreWarning = staleGenerationInputWarning(staleRoles)
+            }
+        }
+        pendingImagePromptJob = null
+    }
     }
 }

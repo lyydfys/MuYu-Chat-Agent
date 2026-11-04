@@ -163,6 +163,9 @@ internal fun ChatInputBar(
     onToggleWebSearchForTurn: () -> Unit,
     onSelectWebSearchResearchMode: (String) -> Unit,
     onOpenWebSearchSettings: () -> Unit,
+    /** One-turn quote shown above the input; null hides the bar. */
+    quotedMessage: ChatQuotedMessage? = null,
+    onDismissQuote: () -> Unit = {},
     onMeasuredHeight: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -198,10 +201,12 @@ internal fun ChatInputBar(
     val attachmentForExit = remember {
         mutableStateOf(if (attachmentPresent) input else null)
     }
+    val quoteForExit = remember { mutableStateOf(quotedMessage) }
     SideEffect {
         if (composerStatus != null) composerStatusForExit.value = composerStatus
         if (composerWebSearchStatus != null) webSearchStatusForExit.value = composerWebSearchStatus
         if (attachmentPresent) attachmentForExit.value = input
+        if (quotedMessage != null) quoteForExit.value = quotedMessage
     }
     if (showAutoImageApprovalConfirmation) {
         AlertDialog(
@@ -374,6 +379,19 @@ internal fun ChatInputBar(
                             tint = inputPlaceholderColor
                         )
                     }
+                }
+            }
+            AnimatedVisibility(
+                visible = quotedMessage != null,
+                enter = composerRowEnter,
+                exit = composerRowExit
+            ) {
+                quoteForExit.value?.let { quoted ->
+                    ComposerQuoteBar(
+                        quotedMessage = quoted,
+                        onDismiss = onDismissQuote,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp)
+                    )
                 }
             }
             AnimatedVisibility(
