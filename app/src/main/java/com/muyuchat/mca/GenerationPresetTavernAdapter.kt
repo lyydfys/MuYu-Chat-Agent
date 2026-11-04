@@ -108,12 +108,13 @@ internal object SillyTavernPresetAdapter {
     /**
      * Import ceiling for a Tavern preset's output length.
      *
-     * The declared value is **kept**: a preset authored for a cloud model legitimately asks for 30k-60k
-     * output. The budget is applied per bound model instead (see [PresetOutputBudget]): local models
-     * are clamped to the phone ceiling, cloud models keep the requested value. This constant only
-     * stops nonsense above the sampler ceiling.
+     * The importer does not invent a ceiling: whatever the author wrote is stored as-is, and the
+     * budget is applied per bound model instead (see [PresetOutputBudget]). A preset authored for a
+     * cloud model legitimately asks for tens of thousands of output tokens, and silently rewriting
+     * that number here would hide the author's intent. The bound model — not the importer — is the
+     * only thing that knows what it can honour.
      */
-    const val MAX_PREDICT_TAVERN: Int = MAX_PREDICT
+    const val MAX_PREDICT_TAVERN: Int = Int.MAX_VALUE
 
     /** Storage cap for the flattened prompt bundle; a longer one is truncated with an ellipsis. */
     const val MAX_PROMPT_APPENDIX_CHARS: Int = 32_000
@@ -303,11 +304,14 @@ internal object SillyTavernPresetAdapter {
             // A Tavern preset routinely asks for 30k-60k output tokens because a web model streams a
             // whole chapter; a phone-side preset at that size overruns every context budget on the
             // first request, so the import ceiling is lower than the MCA sampler ceiling.
-            val value = raw.toInt().coerceIn(MIN_PREDICT, MAX_PREDICT_TAVERN)
+            // Keep the declared value. Only a non-positive number is replaced (SillyTavern uses 0 to
+            // mean "let the server decide"), because MCA has no zero-output request.
+            val declared = raw.coerceAtLeast(0.0).toInt()
+            val value = if (declared <= 0) params.nPredict else declared
             params = params.copy(nPredict = value)
             mapped += key
-            if (value.toDouble() != raw) {
-                clamped += clamp(key, raw, value, "$MIN_PREDICT-${MAX_PREDICT_TAVERN}")
+            if (declared <= 0 && value != declared) {
+                clamped += clamp(key, raw, value, "大于 0")
             }
         }
         number("seed")?.let { (key, raw) ->

@@ -23,17 +23,22 @@ internal object PresetOutputBudget {
     /** Local ceiling: matches the sampler ceiling the generation dialog exposes. */
     const val LOCAL_MAX_OUTPUT_TOKENS: Int = 8_192
 
-    /** Cloud ceiling: above any current provider's per-response cap, so it only stops nonsense. */
-    const val CLOUD_MAX_OUTPUT_TOKENS: Int = 65_536
-
-    /** Clamps [params] to what [isLocal] models can honour. Pure; returns the same object when unchanged. */
+    /**
+     * Clamps [params] to what [isLocal] models can honour.
+     *
+     * A **cloud** binding is left exactly as the preset author wrote it: providers differ wildly
+     * (a few thousand vs tens of thousands of output tokens) and each one enforces its own ceiling,
+     * so silently rewriting the number here would second-guess the preset and hide a real mistake
+     * behind a value the user never chose. Only local models get a ceiling, because a phone context
+     * window cannot honour a web-scale budget at all.
+     */
     fun apply(params: GenerationParams, isLocal: Boolean): GenerationParams {
-        val ceiling = if (isLocal) LOCAL_MAX_OUTPUT_TOKENS else CLOUD_MAX_OUTPUT_TOKENS
-        if (params.nPredict <= ceiling) return params
-        return params.copy(nPredict = ceiling)
+        if (!isLocal) return params
+        if (params.nPredict <= LOCAL_MAX_OUTPUT_TOKENS) return params
+        return params.copy(nPredict = LOCAL_MAX_OUTPUT_TOKENS)
     }
 
     /** `true` when the preset asked for more output than this model can honour. */
     fun wasClamped(params: GenerationParams, isLocal: Boolean): Boolean =
-        params.nPredict > (if (isLocal) LOCAL_MAX_OUTPUT_TOKENS else CLOUD_MAX_OUTPUT_TOKENS)
+        isLocal && params.nPredict > LOCAL_MAX_OUTPUT_TOKENS
 }

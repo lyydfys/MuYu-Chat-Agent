@@ -133,12 +133,13 @@ class GenerationPresetTavernAdapterTest {
         assertEquals(2f, mapping.params.temperature)
         assertEquals(1f, mapping.params.topP)
         assertEquals(SillyTavernPresetAdapter.MAX_TOP_K, mapping.params.topK)
-        assertEquals(SillyTavernPresetAdapter.MIN_PREDICT, mapping.params.nPredict)
+        // The importer no longer invents an output floor either: 2 is the author's value.
+        assertEquals(2, mapping.params.nPredict)
         assertEquals(2f, mapping.params.presencePenalty)
         assertEquals(2f, mapping.params.repeatPenalty)
         assertEquals(0f, mapping.params.minP)
 
-        assertEquals(7, mapping.clamped.size)
+        assertEquals(6, mapping.clamped.size)
         val temperatureClamp = mapping.clamped.first { it.key == "temperature" }
         assertEquals("3.5", temperatureClamp.requested)
         assertEquals("2.0", temperatureClamp.applied)

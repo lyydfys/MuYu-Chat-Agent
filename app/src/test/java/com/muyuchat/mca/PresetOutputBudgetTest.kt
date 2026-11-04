@@ -59,12 +59,38 @@ class PresetOutputBudgetTest {
     }
 
     @Test
-    fun `cloud values above the ceiling are still stopped`() {
+    fun `a cloud binding keeps even a very large declared value untouched`() {
         val params = GenerationParams(nPredict = 200_000)
 
         val applied = PresetOutputBudget.apply(params, isLocal = false)
 
-        assertEquals(PresetOutputBudget.CLOUD_MAX_OUTPUT_TOKENS, applied.nPredict)
-        assertTrue(PresetOutputBudget.wasClamped(params, isLocal = false))
+        assertEquals(200_000, applied.nPredict)
+        assertFalse(PresetOutputBudget.wasClamped(params, isLocal = false))
+    }
+
+    @Test
+    fun `an importer never invents an output ceiling`() {
+        val json = org.json.JSONObject()
+            .put("temperature", 1.0)
+            .put("openai_max_tokens", 200_000)
+
+        val mapping = (SillyTavernPresetAdapter.adapt(json.toString())
+            as GenerationPresetParseResult.Tavern).mapping
+
+        assertEquals(200_000, mapping.params.nPredict)
+    }
+
+    @Test
+    fun `a zero in the preset means let the server decide and falls back to the mca default`() {
+        val defaults = GenerationParams(nPredict = 1_024)
+        val json = org.json.JSONObject()
+            .put("temperature", 1.0)
+            .put("openai_max_tokens", 0)
+
+        val mapping = (SillyTavernPresetAdapter.adapt(json.toString(), defaults)
+            as GenerationPresetParseResult.Tavern).mapping
+
+        assertEquals(1_024, mapping.params.nPredict)
+        assertTrue(mapping.clamped.any { it.key == "openai_max_tokens" })
     }
 }
