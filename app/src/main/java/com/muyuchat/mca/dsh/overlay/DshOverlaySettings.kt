@@ -1,12 +1,9 @@
 package com.muyuchat.mca.dsh.overlay
 
-import com.muyuchat.core.designsystem.McaMascot
-import com.muyuchat.core.dsh.contract.DshOverlayAppearance
-import com.muyuchat.core.dsh.contract.MascotId
 import org.json.JSONObject
 
 /**
- * Where the floating mark sits, expressed as fractions of the available travel instead of pixels.
+ * Where the floating DSH ball sits, expressed as fractions of the available travel instead of pixels.
  *
  * Fractions are the only rotation-safe representation: the window is re-measured with the new screen
  * size after a rotation or a display-size change, and the same fraction then lands inside the new
@@ -31,28 +28,49 @@ data class DshOverlayPosition(
 /**
  * Everything the app-outside display owner persists.
  *
- * [DshOverlayAppearance] is the contract type the workspace panel edits; [enabled], [streamingEnabled]
- * and [position] are app-owned facts the contract deliberately does not carry (a contract type is
- * shared by the renderer and the picker, while "is it on" and "do I want live text" are app lifecycle
- * decisions). A missing or broken document decodes to these defaults, which never throws and never
- * blocks the window from opening.
+ * Deliberately small: the floating window is **the DSH whale ball**, so there is no mascot, no custom
+ * image and no per-window opacity any more. What is left is the set of choices a user can actually
+ * make about that window — on/off, how loud the reply bubble is, whether live text is echoed, whether
+ * the ball may be dragged — plus the two machine-owned facts needed to restore it (size and position).
+ *
+ * A missing or corrupted document decodes to these defaults, which never throws and never blocks the
+ * window from opening.
  */
 data class DshOverlaySettings(
     val enabled: Boolean = false,
-    val appearance: DshOverlayAppearance = DshOverlayAppearance(),
-    val position: DshOverlayPosition = DshOverlayPosition(),
+    /** Reply-bubble lines; 0 disables the finished bubble entirely. */
+    val bubbleLines: Int = DEFAULT_BUBBLE_LINES,
+    /** Whether a finished DSH reply raises a bubble at all. */
+    val notifyReplies: Boolean = true,
+    /** Whether the ball may be dragged by the user. */
+    val draggable: Boolean = true,
     /**
      * Live "AI output on screen": show assistant text while it streams, plus a tool label and a
-     * progress arc. On by default because it is the point of the app-outside window; off restores the
-     * finished-bubble-only behaviour exactly.
+     * progress ring. On by default; off restores the finished-bubble-only behaviour exactly.
      */
-    val streamingEnabled: Boolean = DEFAULT_STREAMING_ENABLED
+    val streamingEnabled: Boolean = DEFAULT_STREAMING_ENABLED,
+    /**
+     * Diameter of the DSH ball. Persisted and clamped to [MIN_MARK_SIZE_DP]..[MAX_MARK_SIZE_DP] so the
+     * window can be tuned without a UI control; the settings panel does not expose it.
+     */
+    val markSizeDp: Int = DEFAULT_MARK_SIZE_DP,
+    val position: DshOverlayPosition = DshOverlayPosition()
 ) {
-    fun normalized(): DshOverlaySettings =
-        copy(appearance = appearance.normalized(), position = position.normalized())
+    fun normalized(): DshOverlaySettings = copy(
+        bubbleLines = bubbleLines.coerceIn(0, MAX_BUBBLE_LINES),
+        markSizeDp = markSizeDp.coerceIn(MIN_MARK_SIZE_DP, MAX_MARK_SIZE_DP),
+        position = position.normalized()
+    )
 
     companion object {
+        const val DEFAULT_BUBBLE_LINES = 3
+        const val MAX_BUBBLE_LINES = 5
         const val DEFAULT_STREAMING_ENABLED = true
+
+        /** Matches the in-app DSH floating ball, so the system window reads as the same control. */
+        const val DEFAULT_MARK_SIZE_DP = 48
+        const val MIN_MARK_SIZE_DP = 44
+        const val MAX_MARK_SIZE_DP = 64
     }
 }
 
@@ -60,22 +78,20 @@ data class DshOverlaySettings(
  * JSON codec for [DshOverlaySettings].
  *
  * The contract module may not import a JSON library (architecture Rule 15), so the format is owned
- * here. Every decode is total: unknown fields are ignored, out-of-range numbers are clamped by
- * [DshOverlaySettings.normalized], and any parse failure yields the defaults.
+ * here. Every decode is total: unknown fields are ignored — a document written by the previous
+ * mascot-era version still decodes and simply loses its unused keys — out-of-range numbers are clamped
+ * by [DshOverlaySettings.normalized], and any parse failure yields the defaults.
  */
 internal object DshOverlaySettingsCodec {
-    const val VERSION = 1
+    const val VERSION = 2
 
     private const val KEY_VERSION = "version"
     private const val KEY_ENABLED = "enabled"
-    private const val KEY_MASCOT = "mascot"
-    private const val KEY_IMAGE_PATH = "imagePath"
-    private const val KEY_OPACITY = "opacity"
-    private const val KEY_MARK_SIZE = "markSizeDp"
     private const val KEY_BUBBLE_LINES = "bubbleLines"
     private const val KEY_NOTIFY_REPLIES = "notifyReplies"
     private const val KEY_DRAGGABLE = "draggable"
     private const val KEY_STREAMING = "streaming"
+    private const val KEY_MARK_SIZE = "markSizeDp"
     private const val KEY_X = "x"
     private const val KEY_Y = "y"
 
@@ -84,14 +100,11 @@ internal object DshOverlaySettingsCodec {
         return JSONObject()
             .put(KEY_VERSION, VERSION)
             .put(KEY_ENABLED, normalized.enabled)
-            .put(KEY_MASCOT, normalized.appearance.mascotId)
-            .put(KEY_IMAGE_PATH, normalized.appearance.customImagePath ?: JSONObject.NULL)
-            .put(KEY_OPACITY, normalized.appearance.opacity.toDouble())
-            .put(KEY_MARK_SIZE, normalized.appearance.markSizeDp)
-            .put(KEY_BUBBLE_LINES, normalized.appearance.bubbleLines)
-            .put(KEY_NOTIFY_REPLIES, normalized.appearance.notifyReplies)
-            .put(KEY_DRAGGABLE, normalized.appearance.draggable)
+            .put(KEY_BUBBLE_LINES, normalized.bubbleLines)
+            .put(KEY_NOTIFY_REPLIES, normalized.notifyReplies)
+            .put(KEY_DRAGGABLE, normalized.draggable)
             .put(KEY_STREAMING, normalized.streamingEnabled)
+            .put(KEY_MARK_SIZE, normalized.markSizeDp)
             .put(KEY_X, normalized.position.xFraction.toDouble())
             .put(KEY_Y, normalized.position.yFraction.toDouble())
             .toString()
@@ -100,66 +113,24 @@ internal object DshOverlaySettingsCodec {
     fun decode(raw: String?): DshOverlaySettings {
         if (raw.isNullOrBlank()) return DshOverlaySettings()
         val root = runCatching { JSONObject(raw) }.getOrNull() ?: return DshOverlaySettings()
-        val defaults = DshOverlayAppearance()
         return runCatching {
             DshOverlaySettings(
                 enabled = root.optBoolean(KEY_ENABLED, false),
-                appearance = DshOverlayAppearance(
-                    mascotId = root.optString(KEY_MASCOT, defaults.mascotId),
-                    customImagePath = root.customImagePath(),
-                    opacity = root.optDouble(KEY_OPACITY, defaults.opacity.toDouble())
-                        .toFloat()
-                        .takeIf { it.isFinite() }
-                        ?: defaults.opacity,
-                    markSizeDp = root.optInt(KEY_MARK_SIZE, defaults.markSizeDp),
-                    bubbleLines = root.optInt(KEY_BUBBLE_LINES, defaults.bubbleLines),
-                    notifyReplies = root.optBoolean(KEY_NOTIFY_REPLIES, defaults.notifyReplies),
-                    draggable = root.optBoolean(KEY_DRAGGABLE, defaults.draggable)
+                bubbleLines = root.optInt(KEY_BUBBLE_LINES, DshOverlaySettings.DEFAULT_BUBBLE_LINES),
+                notifyReplies = root.optBoolean(KEY_NOTIFY_REPLIES, true),
+                draggable = root.optBoolean(KEY_DRAGGABLE, true),
+                streamingEnabled = root.optBoolean(
+                    KEY_STREAMING,
+                    DshOverlaySettings.DEFAULT_STREAMING_ENABLED
                 ),
+                markSizeDp = root.optInt(KEY_MARK_SIZE, DshOverlaySettings.DEFAULT_MARK_SIZE_DP),
                 position = DshOverlayPosition(
                     xFraction = root.optDouble(KEY_X, DshOverlayPosition.DEFAULT_X_FRACTION.toDouble())
                         .toFloat(),
                     yFraction = root.optDouble(KEY_Y, DshOverlayPosition.DEFAULT_Y_FRACTION.toDouble())
                         .toFloat()
-                ),
-                streamingEnabled = root.optBoolean(
-                    KEY_STREAMING,
-                    DshOverlaySettings.DEFAULT_STREAMING_ENABLED
                 )
             ).normalized()
         }.getOrElse { DshOverlaySettings() }
     }
-
-    /**
-     * `optString` renders a JSON null as the literal "null", which is not a path. A stored empty or
-     * placeholder value therefore decodes to "no custom image".
-     */
-    private fun JSONObject.customImagePath(): String? {
-        if (isNull(KEY_IMAGE_PATH)) return null
-        return optString(KEY_IMAGE_PATH, "")
-            .trim()
-            .takeIf { it.isNotEmpty() && it != "null" }
-    }
-}
-
-/** The design-system mark a stored contract id paints; unknown ids fall back to the whale. */
-internal fun MascotId.toMcaMascot(): McaMascot = when (this) {
-    MascotId.WHALE -> McaMascot.WHALE
-    MascotId.WHALE_GIRL_ART -> McaMascot.WHALE_GIRL_ART
-    MascotId.WHALE_GIRL_Q -> McaMascot.WHALE_GIRL_Q
-    MascotId.WHALE_GIRL_MATURE -> McaMascot.WHALE_GIRL_MATURE
-    MascotId.FATTY_FISH -> McaMascot.FATTY_FISH
-    MascotId.CAT -> McaMascot.CAT
-    MascotId.CUSTOM -> McaMascot.CUSTOM
-}
-
-/** Inverse of [toMcaMascot], used when the picker writes a new appearance. */
-internal fun McaMascot.toMascotId(): MascotId = when (this) {
-    McaMascot.WHALE -> MascotId.WHALE
-    McaMascot.WHALE_GIRL_ART -> MascotId.WHALE_GIRL_ART
-    McaMascot.WHALE_GIRL_Q -> MascotId.WHALE_GIRL_Q
-    McaMascot.WHALE_GIRL_MATURE -> MascotId.WHALE_GIRL_MATURE
-    McaMascot.FATTY_FISH -> MascotId.FATTY_FISH
-    McaMascot.CAT -> MascotId.CAT
-    McaMascot.CUSTOM -> MascotId.CUSTOM
 }

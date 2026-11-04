@@ -12,15 +12,8 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import com.muyuchat.core.designsystem.McaMascotMood
 import com.muyuchat.core.dsh.contract.DshOverlayReplyPreview
 import kotlin.math.roundToInt
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** Events the window service reports to its process-local owner; all arrive on the main thread. */
 internal interface DshOverlayWindowHost {
@@ -43,21 +36,23 @@ internal object DshOverlayWindowBus {
 }
 
 /**
- * Owner of exactly one `TYPE_APPLICATION_OVERLAY` window: the mascot mark, its reply bubble and the
- * compact status panel. Tap opens DSH, long press toggles the panel, drag moves the mark and persists
- * the position as a fraction of the screen, so rotation restores it inside the new bounds.
+ * Owner of exactly one `TYPE_APPLICATION_OVERLAY` window: **the DSH whale ball**, its reply bubble,
+ * the two-row action panel and the inline settings sheet.
+ *
+ * The ball is the same control as the in-app `DshFloatingBall` (white disc + whale glyph) and only
+ * breathes; tap opens the action panel (返回 DSH / 停止后台运行), long press opens the settings sheet,
+ * drag moves it and persists the position as a fraction of the screen.
  *
  * The window is intentionally not focusable and not touch-modal: it never steals input from the app
- * below and never pulls MCA to the front by itself. Reply bubbles are pushed by
- * [DshOverlayHost] after its throttle gate accepted a turn boundary; the service only renders.
+ * below and never pulls MCA to the front by itself. Reply bubbles are pushed by [DshOverlayHost] after
+ * its throttle gate accepted a turn boundary; the service only renders.
  *
- * Release: [removeWindow] is idempotent and runs on hide, rejection and [onDestroy]; the attached
- * state is reported only after `addView` succeeded.
+ * Release: [removeWindow] is idempotent and runs on hide, rejection and [onDestroy]; the attached state
+ * is reported only after `addView` succeeded.
  */
-class DshOverlayService : Service() {
+class DshOverlayService : Service(), DshOverlayWindowActions {
 
     private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ui = DshOverlayUiState()
 
     private var windowManager: WindowManager? = null
@@ -69,6 +64,7 @@ class DshOverlayService : Service() {
     private var settings: DshOverlaySettings = DshOverlaySettings()
     private var repliedReset: Runnable? = null
     private var bubbleHide: Runnable? = null
+    private var noticeHide: Runnable? = null
 
     private var density = 1f
     private var markPx = 0
@@ -127,7 +123,6 @@ class DshOverlayService : Service() {
     override fun onDestroy() {
         cancelScheduled()
         removeWindow()
-        scope.cancel()
         if (instance === this) instance = null
         DshOverlayWindowBus.host?.onServiceStopped()
         super.onDestroy()
@@ -142,7 +137,7 @@ class DshOverlayService : Service() {
     /** Panel visibility, decided by the controller after it reduced a long-press event. */
     fun setPanelExpanded(expanded: Boolean) {
         onMain {
-            ui.panelVisible = expanded
+            ui.panel = if (expanded) DshOverlayPanel.ACTIONS else DshOverlayPanel.NONE
             updateWindowPosition()
         }
     }
@@ -157,7 +152,6 @@ class DshOverlayService : Service() {
                 measure()
                 clampMarkPosition()
                 updateWindowPosition()
-                reloadCustomMark()
             }
         }
     }
@@ -170,8 +164,8 @@ class DshOverlayService : Service() {
             ui.streamLabel = null
             ui.streamActive = false
             ui.bubble = preview.text
-            ui.bubbleLines = settings.appearance.bubbleLines.coerceIn(1, MAX_BUBBLE_LINES)
-            ui.mood = McaMascotMood.REPLIED
+            ui.bubbleLines = settings.bubbleLines.coerceIn(1, MAX_BUBBLE_LINES)
+            ui.mood = DshOverlayBallMood.REPLIED
             scheduleRepliedReset()
             scheduleBubbleHide()
             updateWindowPosition()
@@ -182,8 +176,8 @@ class DshOverlayService : Service() {
      * Renders the live stream state ("AI output on screen"); safe from any thread.
      *
      * Only [DshOverlayStream.Streaming] and [DshOverlayStream.ToolRunning] produce content. A finished
-     * turn clears the live text here and lets [showReply] own the bubble, so there is exactly one
-     * bubble on screen and the existing 2 s / 30 s / 6.5 s rules keep applying to it.
+     * turn clears the live text here and lets [showReply] own the bubble, so there is exactly one bubble
+     * on screen and the existing throttle/de-dupe/hide rules keep applying to it.
      */
     fun applyStream(state: DshOverlayStream) {
         onMain {
@@ -194,7 +188,7 @@ class DshOverlayService : Service() {
                     ui.streamActive = true
                     ui.streamText = if (bubbleAllowed()) state.text else null
                     ui.streamLabel = null
-                    if (ui.mood != McaMascotMood.REPLIED) ui.mood = McaMascotMood.WORKING
+                    if (ui.mood != DshOverlayBallMood.REPLIED) ui.mood = DshOverlayBallMood.WORKING
                 }
 
                 is DshOverlayStream.ToolRunning -> {
@@ -203,7 +197,7 @@ class DshOverlayService : Service() {
                     ui.streamActive = true
                     ui.streamText = null
                     ui.streamLabel = if (bubbleAllowed()) state.label else null
-                    if (ui.mood != McaMascotMood.REPLIED) ui.mood = McaMascotMood.WORKING
+                    if (ui.mood != DshOverlayBallMood.REPLIED) ui.mood = DshOverlayBallMood.WORKING
                 }
 
                 is DshOverlayStream.Finished, DshOverlayStream.Idle -> clearStream()
@@ -212,35 +206,84 @@ class DshOverlayService : Service() {
         }
     }
 
-    /** Drops the live text but keeps the mark's working mood; the observer settles the mood. */
-    private fun clearStream() {
-        ui.streamActive = false
-        ui.streamText = null
-        ui.streamLabel = null
-    }
-
-    private fun cancelBubbleHide() {
-        bubbleHide?.let { mainHandler.removeCallbacks(it) }
-        bubbleHide = null
-    }
-
-    /** Bubbles are hidden by the user's own switches; the progress arc still shows the work. */
-    private fun bubbleAllowed(): Boolean =
-        settings.appearance.notifyReplies &&
-            settings.appearance.bubbleLines > 0 &&
-            settings.streamingEnabled
-
     /** Working mood while a DSH turn streams; the one-shot replied cue is never overwritten. */
     fun setWorking(isWorking: Boolean) {
         onMain {
             working = isWorking
-            if (ui.mood != McaMascotMood.REPLIED) {
-                ui.mood = if (isWorking) McaMascotMood.WORKING else McaMascotMood.IDLE
+            if (ui.mood != DshOverlayBallMood.REPLIED) {
+                ui.mood = if (isWorking) DshOverlayBallMood.WORKING else DshOverlayBallMood.IDLE
             }
         }
     }
 
+    // ------------------------------------------------------------------ window actions
+
+    /** "返回 DSH": reuse the one EXTRA_OPEN_WORKSPACE launch path; report a failure visibly. */
+    override fun returnToDsh() {
+        if (DshOverlayIntents.openWorkspace(this)) return
+        onMain {
+            ui.panel = DshOverlayPanel.NONE
+            ui.notice = "无法打开 DSH，请从通知或桌面打开"
+            scheduleNoticeHide()
+            updateWindowPosition()
+        }
+    }
+
+    /** "停止后台运行": window removed, keep-alive service stopped, switch cleared. */
+    override fun stopBackground() {
+        DshOverlayHost.of(this).stopBackgroundFromUser()
+    }
+
+    /** Applies one inline-settings edit; the host persists it and re-applies it here. */
+    override fun updateSettings(transform: (DshOverlaySettings) -> DshOverlaySettings) {
+        val next = transform(settings).normalized()
+        settings = next
+        applySettingsToUi(next)
+        updateWindowPosition()
+        DshOverlayHost.of(this).applyWindowSettings(next)
+    }
+
+    /** Tap: toggle the two-row action panel. */
+    fun toggleActionPanel() {
+        onMain {
+            ui.panel = if (ui.panel == DshOverlayPanel.ACTIONS) {
+                DshOverlayPanel.NONE
+            } else {
+                DshOverlayPanel.ACTIONS
+            }
+            onPanelOpened()
+        }
+    }
+
+    /** Long press: open the inline settings sheet. */
+    fun openSettingsPanel() {
+        onMain {
+            ui.panel = if (ui.panel == DshOverlayPanel.SETTINGS) {
+                DshOverlayPanel.NONE
+            } else {
+                DshOverlayPanel.SETTINGS
+            }
+            onPanelOpened()
+        }
+    }
+
+    fun closePanel() {
+        onMain {
+            ui.panel = DshOverlayPanel.NONE
+            updateWindowPosition()
+        }
+    }
+
     // ------------------------------------------------------------------ window lifecycle
+
+    private fun onPanelOpened() {
+        // A panel and a bubble compete for the same space above the ball; the panel wins.
+        ui.bubble = null
+        ui.streamText = null
+        ui.streamLabel = null
+        cancelBubbleHide()
+        updateWindowPosition()
+    }
 
     private fun showWindow() {
         if (!Settings.canDrawOverlays(this)) {
@@ -262,9 +305,10 @@ class DshOverlayService : Service() {
         val view = host.createView {
             DshOverlayWindowContent(
                 state = ui,
-                onTap = { DshOverlayIntents.openWorkspace(this) },
-                onLongPress = { DshOverlayWindowBus.host?.onMarkTapped() },
-                onBubbleTap = { DshOverlayIntents.openWorkspace(this) },
+                actions = this,
+                onBallTap = { toggleActionPanel() },
+                onBallLongPress = { openSettingsPanel() },
+                onClosePanel = { closePanel() },
                 onDrag = ::dragBy,
                 onDragEnd = ::persistPosition
             )
@@ -278,9 +322,7 @@ class DshOverlayService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            alpha = settings.appearance.opacity
-        }
+        )
         layout = params
         updateWindowPosition(force = true)
         try {
@@ -289,7 +331,6 @@ class DshOverlayService : Service() {
             composeHost = host
             attached = true
             host.attached()
-            reloadCustomMark()
             DshOverlayWindowBus.host?.onWindowAttached()
         } catch (_: SecurityException) {
             host.release()
@@ -341,28 +382,26 @@ class DshOverlayService : Service() {
     private fun bubbleBlockHeightPx(): Int =
         (((ui.bubbleLines.coerceIn(1, MAX_BUBBLE_LINES) * 20) + 32) * density).roundToInt()
 
-    /** True while the mark carries any bubble content: a finished reply or the live stream text. */
+    /** True while the ball carries any bubble content: a finished reply or the live stream text. */
     private fun hasContentBubble(): Boolean =
         ui.bubble != null || ui.streamText != null || ui.streamLabel != null
 
-    private fun panelBlockHeightPx(): Int = ((2 * 18 + 16) * density).roundToInt()
-
     /**
-     * Places the window so the mark stays exactly where the user left it while the bubble/panel grows
-     * away from the nearest screen edge; the anchor switch happens at the screen middle.
+     * Places the window so the ball stays exactly where the user left it while bubbles grow away from
+     * the nearest screen edge; a panel always grows downwards, so it never moves the ball.
      */
     private fun updateWindowPosition(force: Boolean = false) {
         val params = layout ?: return
         clampMarkPosition()
         val rightAnchored = markLeftPx + markPx / 2f >= screenWidthPx / 2f
         ui.alignEnd = rightAnchored
-        val growthAbove = when {
-            ui.panelVisible -> panelBlockHeightPx()
-            hasContentBubble() -> bubbleBlockHeightPx()
-            else -> 0
+        val growthAbove = if (ui.panel == DshOverlayPanel.NONE && hasContentBubble()) {
+            bubbleBlockHeightPx()
+        } else {
+            0
         }
         val bubbleBelow = growthAbove > 0 && markTopPx - growthAbove - edgePx < 0
-        ui.bubbleBelow = bubbleBelow
+        ui.bubbleBelow = bubbleBelow || growthAbove == 0
         val gravity = (if (rightAnchored) Gravity.END else Gravity.START) or Gravity.TOP
         val x = if (rightAnchored) {
             (screenWidthPx - (markLeftPx + markPx)).roundToInt().coerceAtLeast(edgePx)
@@ -377,7 +416,6 @@ class DshOverlayService : Service() {
         params.gravity = gravity
         params.x = x
         params.y = y
-        params.alpha = settings.appearance.opacity
         val view = rootView
         if (view != null && (force || attached)) {
             runCatching { windowManager?.updateViewLayout(view, params) }
@@ -390,7 +428,7 @@ class DshOverlayService : Service() {
     }
 
     private fun dragBy(dx: Float, dy: Float) {
-        if (!attached || !settings.appearance.draggable) return
+        if (!attached || !settings.draggable) return
         if (!dx.isFinite() || !dy.isFinite()) return
         markLeftPx = DshOverlayGeometry.fractionAfterDrag(
             currentFraction = DshOverlayGeometry.fractionForOffset(
@@ -427,14 +465,17 @@ class DshOverlayService : Service() {
     // ------------------------------------------------------------------ appearance
 
     private fun applySettingsToUi(next: DshOverlaySettings) {
-        val appearance = next.appearance
-        ui.mascot = com.muyuchat.core.dsh.contract.MascotId.fromId(appearance.mascotId).toMcaMascot()
-        ui.markSizeDp = appearance.markSizeDp
-        ui.bubbleLines = appearance.bubbleLines.coerceIn(0, MAX_BUBBLE_LINES)
-        ui.draggable = appearance.draggable
-        if (appearance.bubbleLines == 0 || !appearance.notifyReplies) ui.bubble = null
-        // Turning live text off (or hiding bubbles) must drop the text already on screen; the
-        // progress arc keeps showing that DSH is still working.
+        ui.markSizeDp = next.markSizeDp.coerceIn(
+            DshOverlaySettings.MIN_MARK_SIZE_DP,
+            DshOverlaySettings.MAX_MARK_SIZE_DP
+        )
+        ui.bubbleLines = next.bubbleLines.coerceIn(0, MAX_BUBBLE_LINES)
+        ui.draggable = next.draggable
+        ui.notifyReplies = next.notifyReplies
+        ui.streamingEnabled = next.streamingEnabled
+        if (next.bubbleLines == 0 || !next.notifyReplies) ui.bubble = null
+        // Turning live text off (or hiding bubbles) must drop the text already on screen; the progress
+        // ring keeps showing that DSH is still working.
         if (!next.streamingEnabled || !bubbleAllowed()) {
             ui.streamText = null
             ui.streamLabel = null
@@ -442,20 +483,19 @@ class DshOverlayService : Service() {
         if (!next.streamingEnabled) ui.streamActive = false
     }
 
-    /** Decodes the user's image off the main thread; a failed decode keeps the vector fallback. */
-    private fun reloadCustomMark() {
-        val path = settings.appearance.customImagePath
-            ?.takeIf { settings.appearance.mascotId.equals(CUSTOM_MASCOT_ID, ignoreCase = true) }
-        if (path == null) {
-            ui.customMark = null
-            return
-        }
-        scope.launch {
-            val bitmap = DshOverlayCustomImage.load(path)
-            withContext(Dispatchers.Main) {
-                ui.customMark = bitmap
-            }
-        }
+    /** Bubbles are hidden by the user's own switches; the progress ring still shows the work. */
+    private fun bubbleAllowed(): Boolean =
+        settings.notifyReplies && settings.bubbleLines > 0 && settings.streamingEnabled
+
+    private fun clearStream() {
+        ui.streamActive = false
+        ui.streamText = null
+        ui.streamLabel = null
+    }
+
+    private fun cancelBubbleHide() {
+        bubbleHide?.let { mainHandler.removeCallbacks(it) }
+        bubbleHide = null
     }
 
     private fun applyStatusTexts() {
@@ -467,7 +507,7 @@ class DshOverlayService : Service() {
         repliedReset?.let { mainHandler.removeCallbacks(it) }
         val runnable = Runnable {
             repliedReset = null
-            ui.mood = if (working) McaMascotMood.WORKING else McaMascotMood.IDLE
+            ui.mood = if (working) DshOverlayBallMood.WORKING else DshOverlayBallMood.IDLE
         }
         repliedReset = runnable
         mainHandler.postDelayed(runnable, REPLIED_CUE_MILLIS)
@@ -484,11 +524,24 @@ class DshOverlayService : Service() {
         mainHandler.postDelayed(runnable, BUBBLE_VISIBLE_MILLIS)
     }
 
+    private fun scheduleNoticeHide() {
+        noticeHide?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            noticeHide = null
+            ui.notice = null
+            updateWindowPosition()
+        }
+        noticeHide = runnable
+        mainHandler.postDelayed(runnable, NOTICE_VISIBLE_MILLIS)
+    }
+
     private fun cancelScheduled() {
         repliedReset?.let { mainHandler.removeCallbacks(it) }
         bubbleHide?.let { mainHandler.removeCallbacks(it) }
+        noticeHide?.let { mainHandler.removeCallbacks(it) }
         repliedReset = null
         bubbleHide = null
+        noticeHide = null
     }
 
     private fun onMain(block: () -> Unit) {
@@ -498,14 +551,14 @@ class DshOverlayService : Service() {
     companion object {
         const val ACTION_SHOW = "com.muyuchat.mca.dsh.overlay.action.SHOW"
 
-        /** How long the one-shot "replied" bounce lasts before the mark falls back to idle/working. */
+        /** How long the one-shot "replied" bounce lasts before the ball falls back to idle/working. */
         const val REPLIED_CUE_MILLIS = 800L
 
         /** How long a reply bubble stays before it hides itself. */
         const val BUBBLE_VISIBLE_MILLIS = 6_500L
 
-        private const val MAX_BUBBLE_LINES = 5
-        private const val CUSTOM_MASCOT_ID = "custom"
+        private const val NOTICE_VISIBLE_MILLIS = 4_000L
+        private const val MAX_BUBBLE_LINES = DshOverlaySettings.MAX_BUBBLE_LINES
 
         private const val EXTRA_PHASE = "overlay.phase"
         private const val EXTRA_GENERATION = "overlay.generation"

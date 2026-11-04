@@ -1,19 +1,16 @@
 package com.muyuchat.mca.dsh.overlay
 
-import com.muyuchat.core.designsystem.McaMascot
-import com.muyuchat.core.dsh.contract.DshOverlayAppearance
-import com.muyuchat.core.dsh.contract.MascotId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Persistence of the app-outside display preferences.
  *
- * The window must start from defaults on a corrupted document and must never store a value outside the
- * contract's bounds, so these are the two contracts every decode/encode path is checked against.
+ * After the mascot feature was removed the document holds only the DSH-ball switches plus the
+ * machine-owned position; these cases pin the defaults, the clamps and — importantly — that a document
+ * written by the previous mascot-era version still decodes instead of resetting the user's choices.
  */
 class DshOverlaySettingsCodecTest {
 
@@ -21,17 +18,12 @@ class DshOverlaySettingsCodecTest {
     fun roundTripsEveryPersistedField() {
         val original = DshOverlaySettings(
             enabled = true,
-            appearance = DshOverlayAppearance(
-                mascotId = MascotId.FATTY_FISH.id,
-                customImagePath = "/data/user/0/com.muyuchat.mca/files/dsh-overlay/mascot-abc.png",
-                opacity = 0.6f,
-                markSizeDp = 72,
-                bubbleLines = 4,
-                notifyReplies = false,
-                draggable = false
-            ),
-            position = DshOverlayPosition(xFraction = 0.25f, yFraction = 0.8f),
-            streamingEnabled = false
+            bubbleLines = 4,
+            notifyReplies = false,
+            draggable = false,
+            streamingEnabled = false,
+            markSizeDp = 52,
+            position = DshOverlayPosition(xFraction = 0.25f, yFraction = 0.8f)
         )
 
         val decoded = DshOverlaySettingsCodec.decode(DshOverlaySettingsCodec.encode(original))
@@ -51,68 +43,68 @@ class DshOverlaySettingsCodecTest {
     }
 
     @Test
-    fun outOfRangeValuesAreClampedToTheContractBounds() {
+    fun theDefaultsMatchTheDocumentedBallAndBubbleBehaviour() {
+        val defaults = DshOverlaySettings()
+
+        assertFalse("an unconfigured window never opens itself", defaults.enabled)
+        assertTrue(defaults.notifyReplies)
+        assertTrue(defaults.draggable)
+        assertTrue(defaults.streamingEnabled)
+        assertEquals(DshOverlaySettings.DEFAULT_MARK_SIZE_DP, defaults.markSizeDp)
+        assertEquals(48, defaults.markSizeDp)
+        assertEquals(DshOverlaySettings.DEFAULT_BUBBLE_LINES, defaults.bubbleLines)
+    }
+
+    @Test
+    fun outOfRangeValuesAreClampedToTheDocumentedBounds() {
         val raw = """
-            {"version":1,"enabled":true,"mascot":"unknown-creature","imagePath":null,
-             "opacity":4.5,"markSizeDp":900,"bubbleLines":99,"notifyReplies":true,
-             "draggable":true,"x":-3.0,"y":7.5}
+            {"version":2,"enabled":true,"bubbleLines":99,"notifyReplies":true,
+             "draggable":true,"x":-3.0,"y":7.5,"markSizeDp":900}
         """.trimIndent()
 
         val decoded = DshOverlaySettingsCodec.decode(raw)
 
         assertTrue(decoded.enabled)
-        // Unknown mascot ids fall back to the whale instead of producing an unpaintable mark.
-        assertEquals(MascotId.WHALE.id, decoded.appearance.mascotId)
-        assertNull(decoded.appearance.customImagePath)
-        assertEquals(1f, decoded.appearance.opacity, 0.0001f)
-        assertEquals(DshOverlayAppearance.MAX_MARK_SIZE_DP, decoded.appearance.markSizeDp)
-        assertEquals(DshOverlayAppearance.MAX_BUBBLE_LINES, decoded.appearance.bubbleLines)
+        assertEquals(DshOverlaySettings.MAX_BUBBLE_LINES, decoded.bubbleLines)
+        assertEquals(DshOverlaySettings.MAX_MARK_SIZE_DP, decoded.markSizeDp)
         assertEquals(0f, decoded.position.xFraction, 0.0001f)
         assertEquals(1f, decoded.position.yFraction, 0.0001f)
     }
 
     @Test
     fun tooSmallValuesAreClampedUp() {
-        val raw = """{"opacity":0.01,"markSizeDp":4,"bubbleLines":-2}"""
+        val raw = """{"bubbleLines":-2,"markSizeDp":4}"""
 
         val decoded = DshOverlaySettingsCodec.decode(raw)
 
-        assertEquals(DshOverlayAppearance.MIN_OPACITY, decoded.appearance.opacity, 0.0001f)
-        assertEquals(DshOverlayAppearance.MIN_MARK_SIZE_DP, decoded.appearance.markSizeDp)
-        assertEquals(0, decoded.appearance.bubbleLines)
+        assertEquals(0, decoded.bubbleLines)
+        assertEquals(DshOverlaySettings.MIN_MARK_SIZE_DP, decoded.markSizeDp)
     }
 
     @Test
-    fun notANumberOpacityDecodesToTheDefaultInsteadOfPoisoningTheWindow() {
-        val decoded = DshOverlaySettingsCodec.decode("""{"opacity":"NaN"}""")
-
-        assertEquals(DshOverlayAppearance().opacity, decoded.appearance.opacity, 0.0001f)
-    }
-
-    @Test
-    fun aJsonNullImagePathIsNotTheStringNull() {
-        val decoded = DshOverlaySettingsCodec.decode("""{"imagePath":null}""")
-
-        assertNull(decoded.appearance.customImagePath)
-    }
-
-    @Test
-    fun disabledDocumentKeepsTheUserOffAndPositionAtTheStoredFraction() {
-        val raw = """{"enabled":false,"x":0.0,"y":0.0}"""
+    fun aMascotEraDocumentStillDecodesAndKeepsTheLiveSwitches() {
+        // Written by the previous version: mascot/image/opacity keys exist and must simply be ignored.
+        val raw = """
+            {"version":1,"enabled":true,"mascot":"whale_girl_mature",
+             "imagePath":"/data/user/0/com.muyuchat.mca/files/dsh-overlay/mascot-abc.png",
+             "opacity":0.5,"markSizeDp":72,"bubbleLines":2,"notifyReplies":false,
+             "draggable":false,"x":0.2,"y":0.3}
+        """.trimIndent()
 
         val decoded = DshOverlaySettingsCodec.decode(raw)
 
-        assertFalse(decoded.enabled)
-        assertEquals(0f, decoded.position.xFraction, 0.0001f)
-        assertEquals(0f, decoded.position.yFraction, 0.0001f)
+        assertTrue(decoded.enabled)
+        assertEquals(2, decoded.bubbleLines)
+        assertFalse(decoded.notifyReplies)
+        assertFalse(decoded.draggable)
+        assertTrue("streaming defaults on for an upgraded document", decoded.streamingEnabled)
+        assertEquals(0.2f, decoded.position.xFraction, 0.0001f)
+        assertEquals(0.3f, decoded.position.yFraction, 0.0001f)
     }
 
     @Test
     fun theStreamingSwitchDefaultsOnAndSurvivesARoundTrip() {
-        assertEquals(
-            DshOverlaySettings.DEFAULT_STREAMING_ENABLED,
-            DshOverlaySettingsCodec.decode(null).streamingEnabled
-        )
+        assertTrue(DshOverlaySettingsCodec.decode(null).streamingEnabled)
         assertTrue(DshOverlaySettingsCodec.decode("""{"enabled":true}""").streamingEnabled)
         assertFalse(
             DshOverlaySettingsCodec.decode("""{"enabled":true,"streaming":false}""").streamingEnabled
@@ -127,11 +119,17 @@ class DshOverlaySettingsCodecTest {
     }
 
     @Test
-    fun mascotIdsMapOntoDesignSystemMarksInBothDirections() {
-        MascotId.entries.forEach { id ->
-            assertEquals(id, id.toMcaMascot().toMascotId())
-        }
-        assertEquals(McaMascot.WHALE, MascotId.fromId("WHALE").toMcaMascot())
-        assertEquals(McaMascot.CUSTOM, MascotId.fromId("custom").toMcaMascot())
+    fun aNonNumericPositionFallsBackToTheDefaultInsteadOfPoisoningTheWindow() {
+        val decoded = DshOverlaySettingsCodec.decode("""{"x":"NaN","y":0.5}""")
+
+        // org.json rejects the non-numeric string, so the field keeps its default (right edge) rather
+        // than ever handing a NaN to the window.
+        assertEquals(
+            DshOverlayPosition.DEFAULT_X_FRACTION,
+            decoded.position.xFraction,
+            0.0001f
+        )
+        assertEquals(0.5f, decoded.position.yFraction, 0.0001f)
+        assertTrue(decoded.position.xFraction.isFinite())
     }
 }

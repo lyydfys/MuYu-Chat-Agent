@@ -1,31 +1,36 @@
 package com.muyuchat.core.dsh.contract
 
 /**
- * How the app-outside DSH window looks and behaves.
+ * How the app-outside DSH window behaves.
  *
- * The overlay is the one surface that is visible over *other* apps, so its appearance is a user
- * preference rather than a design decision: someone who keeps it on all day needs it small and
- * quiet, while someone who only wants reply notifications wants it larger and louder. The model
- * lives in the contract module so the workspace UI (picker) and the overlay owner (renderer) agree
- * on one shape without either importing the other.
+ * The overlay is the one surface that is visible over *other* apps, so its behaviour is a user
+ * preference rather than a design decision: someone who keeps it on all day needs it quiet, while
+ * someone who only wants reply notifications wants the bubble louder. The model lives in the contract
+ * module so the workspace UI (picker) and the overlay owner (renderer) agree on one shape without
+ * either importing the other.
+ *
+ * The window is the DSH whale ball again (the same control as the in-app floating ball), so the
+ * mascot-era fields ([mascotId], [customImagePath], [markSizeDp], [opacity]) are **retired**
+ * (已停用，仅为已存配置兼容): they are kept so previously stored documents still decode, and every
+ * renderer ignores them. The three live choices are [bubbleLines], [notifyReplies] and [draggable].
  *
  * This file deliberately carries no serialization: the contract module stays platform- and
  * json-lib-free (architecture Rule 15), and the overlay owner owns the storage format.
  */
 data class DshOverlayAppearance(
-    /** One of [MascotId]; unknown stored values fall back to [MascotId.WHALE]. */
+    /** 已停用（仅为已存配置兼容）：悬浮窗固定为 DSH 鲸鱼圆球，不再按此渲染。 */
     val mascotId: String = MascotId.WHALE.id,
-    /** Absolute path of a user-picked image, only meaningful for [MascotId.CUSTOM]. */
+    /** 已停用（仅为已存配置兼容）：悬浮窗不再显示用户自选图片。 */
     val customImagePath: String? = null,
-    /** [MIN_OPACITY]..1 window alpha; below this the mark becomes hard to see on a bright wallpaper. */
+    /** 已停用（仅为已存配置兼容）：窗口不透明度由应用自身决定，此值被忽略。 */
     val opacity: Float = 1f,
-    /** Mark size in dp; the overlay clamps this so it can never cover the status bar. */
+    /** 已停用（仅为已存配置兼容）：圆球尺寸由应用自身决定，此值被忽略。 */
     val markSizeDp: Int = DEFAULT_MARK_SIZE_DP,
     /** How many reply-bubble lines are shown; 0 disables the bubble entirely. */
     val bubbleLines: Int = 3,
     /** Whether an incoming DSH reply raises a bubble at all. */
     val notifyReplies: Boolean = true,
-    /** Whether the mark may be dragged by the user. */
+    /** Whether the ball may be dragged by the user. */
     val draggable: Boolean = true
 ) {
 
@@ -46,7 +51,9 @@ data class DshOverlayAppearance(
     }
 }
 
-/** Stable ids for the marks the design system can paint. Unknown ids decode to [WHALE]. */
+/**
+ * 已停用（仅为已存配置兼容）：形象 id 保留在契约里只为让旧配置文档仍能解码，窗口固定为 DSH 鲸鱼圆球。
+ */
 enum class MascotId(val id: String) {
     WHALE("whale"),
     WHALE_GIRL_ART("whale_girl_art"),

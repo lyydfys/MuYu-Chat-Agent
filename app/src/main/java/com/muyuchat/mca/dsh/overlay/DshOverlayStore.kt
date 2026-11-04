@@ -34,10 +34,17 @@ internal class DshOverlayStore(context: Context) : DshOverlayAppearanceStore {
         }
     }
 
-    override fun load(): DshOverlayAppearance = loadSettings().appearance
+    override fun load(): DshOverlayAppearance = loadSettings().toOverlayAppearance()
 
     override fun save(appearance: DshOverlayAppearance) {
-        saveSettings(loadSettings().copy(appearance = appearance))
+        val normalized = appearance.normalized()
+        saveSettings(
+            loadSettings().copy(
+                bubbleLines = normalized.bubbleLines,
+                notifyReplies = normalized.notifyReplies,
+                draggable = normalized.draggable
+            )
+        )
     }
 
     private companion object {
@@ -45,3 +52,15 @@ internal class DshOverlayStore(context: Context) : DshOverlayAppearanceStore {
         const val KEY_SETTINGS = "settings_json"
     }
 }
+
+/**
+ * Projects the app-owned settings onto the contract type the in-app panel edits.
+ *
+ * Only the three bubble switches are meaningful now; the contract's retired mascot/image/size/opacity
+ * fields stay at their defaults, which is what old documents already decode to.
+ */
+internal fun DshOverlaySettings.toOverlayAppearance(): DshOverlayAppearance = DshOverlayAppearance(
+    bubbleLines = bubbleLines,
+    notifyReplies = notifyReplies,
+    draggable = draggable
+)

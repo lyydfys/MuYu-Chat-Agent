@@ -4,20 +4,16 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -26,7 +22,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,28 +33,21 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
-import com.muyuchat.core.designsystem.McaChip
-import com.muyuchat.core.designsystem.McaIcons
-import com.muyuchat.core.designsystem.McaMascot
-import com.muyuchat.core.designsystem.McaMascotMark
 import com.muyuchat.core.designsystem.McaShape
-import com.muyuchat.core.designsystem.McaSlider
 import com.muyuchat.core.designsystem.McaSwitch
 import com.muyuchat.core.dsh.contract.DshOverlayAppearance
-import com.muyuchat.core.dsh.contract.MascotId
-import kotlin.math.roundToInt
-import kotlinx.coroutines.launch
 
 /**
  * The app-outside display settings surface.
  *
- * Opened from the DSH floating ball, so it is a dialog over the official page instead of a new
- * navigation destination: the official DSH Web UI keeps owning its own settings pages, and this panel
- * only edits the one thing MCA adds — the always-on mascot window.
+ * Opened from the in-app DSH floating ball, so it is a dialog over the official page instead of a new
+ * navigation destination. It edits only the window MCA adds — the DSH whale ball — and therefore keeps
+ * just the switches that still mean something after the mascot feature was removed: on/off, reply
+ * bubbles, live streaming, dragging, and stopping the background keep-alive.
  *
  * Every control writes through [DshOverlayUiPort]; the panel keeps no durable state of its own, so a
- * refused change (missing permission, failed image copy) is reported back and re-read from the port.
- * Sliders commit on release instead of on every frame, which keeps the preference write count low.
+ * refused change (missing overlay permission) is reported back and re-read from the port. The same
+ * switches are also reachable from the window itself (long press on the ball).
  */
 @Composable
 fun DshOverlayPanel(
@@ -69,7 +57,6 @@ fun DshOverlayPanel(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     var snapshot by remember { mutableStateOf(port.snapshot()) }
     var appearance by remember { mutableStateOf(snapshot.appearance) }
 
@@ -93,20 +80,11 @@ fun DshOverlayPanel(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                port.importCustomImage(uri)?.let(onNotice)
-                refresh()
-            }
-        }
-    }
-
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = modifier
                 .fillMaxWidth()
-                .heightIn(max = 660.dp),
+                .heightIn(max = 620.dp),
             shape = McaShape.Sheet,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp
@@ -129,8 +107,7 @@ fun DshOverlayPanel(
                 ) {
                     ToggleRow(
                         title = "在其他应用上层显示 DSH",
-                        description = "开启后小鲸鱼会常驻系统悬浮窗；DSH 网关与会话在后台保持运行，" +
-                            "回到 DSH 也不会重新启动。",
+                        description = "开启后 DSH 在后台持续运行，回到 DSH 不会重启。",
                         checked = snapshot.enabled,
                         onCheckedChange = { enabled ->
                             port.setEnabled(enabled)?.let(onNotice)
@@ -157,120 +134,32 @@ fun DshOverlayPanel(
                         }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    Text(
-                        text = "悬浮窗形象",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
+                    ToggleRow(
+                        title = "回复时弹出气泡",
+                        description = "DSH 一轮回答结束后，在悬浮球旁显示开头几句；关闭后只用动效表示正在生成。",
+                        checked = appearance.notifyReplies,
+                        onCheckedChange = { commit(appearance.copy(notifyReplies = it)) }
                     )
-                    MascotPreview(appearance = appearance, customImageMissing = snapshot.customImageMissing)
-                    // Two rows on purpose: six choices in one row clip at 320 dp, and the picker is
-                    // the one place where a clipped label would hide a whole character.
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MascotChoice(
-                                label = "小鲸鱼",
-                                selected = selectedId(appearance) == MascotId.WHALE,
-                                onClick = { commit(appearance.copy(mascotId = MascotId.WHALE.id)) }
-                            )
-                            MascotChoice(
-                                label = "鲸鱼娘原图",
-                                selected = selectedId(appearance) == MascotId.WHALE_GIRL_ART,
-                                onClick = {
-                                    commit(appearance.copy(mascotId = MascotId.WHALE_GIRL_ART.id))
-                                }
-                            )
-                            MascotChoice(
-                                label = "鲸鱼娘 Q",
-                                selected = selectedId(appearance) == MascotId.WHALE_GIRL_Q,
-                                onClick = {
-                                    commit(appearance.copy(mascotId = MascotId.WHALE_GIRL_Q.id))
-                                }
-                            )
-                            MascotChoice(
-                                label = "鲸鱼娘 成熟",
-                                selected = selectedId(appearance) == MascotId.WHALE_GIRL_MATURE,
-                                onClick = {
-                                    commit(
-                                        appearance.copy(mascotId = MascotId.WHALE_GIRL_MATURE.id)
-                                    )
-                                }
-                            )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MascotChoice(
-                                label = "小肥鱼",
-                                selected = selectedId(appearance) == MascotId.FATTY_FISH,
-                                onClick = { commit(appearance.copy(mascotId = MascotId.FATTY_FISH.id)) }
-                            )
-                            MascotChoice(
-                                label = "小猫",
-                                selected = selectedId(appearance) == MascotId.CAT,
-                                onClick = { commit(appearance.copy(mascotId = MascotId.CAT.id)) }
-                            )
-                            MascotChoice(
-                                label = "自定义",
-                                selected = selectedId(appearance) == MascotId.CUSTOM,
-                                onClick = { commit(appearance.copy(mascotId = MascotId.CUSTOM.id)) }
-                            )
-                        }
-                    }
-                    if (selectedId(appearance) == MascotId.CUSTOM) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = when {
-                                    snapshot.customImageMissing -> "所选图片不可用，将显示小鲸鱼"
-                                    appearance.customImagePath != null -> "已使用自定义图片"
-                                    else -> "还没有选择图片"
-                                },
-                                modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            McaButton(style = McaButtonStyle.Text, onClick = {
-                                imagePicker.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            }) {
-                                Text(if (appearance.customImagePath == null) "选择图片" else "更换图片")
-                            }
-                        }
-                    }
-                    LabeledSlider(
-                        label = "尺寸 ${appearance.markSizeDp} dp",
-                        value = appearance.markSizeDp.toFloat(),
-                        valueRange = DshOverlayAppearance.MIN_MARK_SIZE_DP.toFloat()..
-                            DshOverlayAppearance.MAX_MARK_SIZE_DP.toFloat(),
-                        steps = DshOverlayAppearance.MAX_MARK_SIZE_DP - DshOverlayAppearance.MIN_MARK_SIZE_DP - 1,
-                        onValueChange = {
-                            appearance = appearance.copy(markSizeDp = it.roundToInt()).normalized()
-                        },
-                        onValueChangeFinished = { commit(appearance) }
-                    )
-                    LabeledSlider(
-                        label = "不透明度 ${(appearance.opacity * 100).roundToInt()}%",
-                        value = appearance.opacity,
-                        valueRange = DshOverlayAppearance.MIN_OPACITY..1f,
-                        steps = 12,
-                        onValueChange = { appearance = appearance.copy(opacity = it).normalized() },
-                        onValueChangeFinished = { commit(appearance) }
-                    )
-                    LabeledSlider(
-                        label = if (appearance.bubbleLines == 0) {
-                            "回复气泡：关闭"
+                    StepRow(
+                        title = "回复气泡行数",
+                        value = if (appearance.bubbleLines == 0) {
+                            "关闭"
                         } else {
-                            "回复气泡最多 ${appearance.bubbleLines} 行"
+                            "${appearance.bubbleLines} 行"
                         },
-                        value = appearance.bubbleLines.toFloat(),
-                        valueRange = 0f..DshOverlayAppearance.MAX_BUBBLE_LINES.toFloat(),
-                        steps = DshOverlayAppearance.MAX_BUBBLE_LINES - 1,
-                        onValueChange = {
-                            appearance = appearance.copy(bubbleLines = it.roundToInt()).normalized()
+                        canDecrease = appearance.bubbleLines > 0,
+                        canIncrease = appearance.bubbleLines < DshOverlayAppearance.MAX_BUBBLE_LINES,
+                        onDecrease = {
+                            commit(appearance.copy(bubbleLines = appearance.bubbleLines - 1))
                         },
-                        onValueChangeFinished = { commit(appearance) }
+                        onIncrease = {
+                            commit(appearance.copy(bubbleLines = appearance.bubbleLines + 1))
+                        }
                     )
                     ToggleRow(
                         title = "流式上屏",
-                        description = "DSH 生成时把正在写的内容实时显示在悬浮窗旁（最多三行）；关闭后只在回答结束时弹一次气泡。",
+                        description = "DSH 生成时把正在写的内容实时显示在悬浮球旁（最多三行）；" +
+                            "关闭后只在回答结束时弹一次气泡。",
                         checked = snapshot.streamingEnabled,
                         onCheckedChange = { enabled ->
                             port.setStreamingEnabled(enabled)?.let(onNotice)
@@ -278,14 +167,8 @@ fun DshOverlayPanel(
                         }
                     )
                     ToggleRow(
-                        title = "回复时弹出气泡",
-                        description = "DSH 一轮回答结束后，在小鲸鱼旁显示开头几句；关闭后仍会用动效表示正在生成。",
-                        checked = appearance.notifyReplies,
-                        onCheckedChange = { commit(appearance.copy(notifyReplies = it)) }
-                    )
-                    ToggleRow(
                         title = "允许拖动",
-                        description = "关闭后小鲸鱼固定在当前位置，避免误触移动。长按仍可查看运行状态。",
+                        description = "关闭后悬浮球固定在当前位置，避免误触移动。",
                         checked = appearance.draggable,
                         onCheckedChange = { commit(appearance.copy(draggable = it)) }
                     )
@@ -299,30 +182,6 @@ fun DshOverlayPanel(
             }
         }
     }
-}
-
-@Composable
-private fun MascotPreview(appearance: DshOverlayAppearance, customImageMissing: Boolean) {
-    val mascot = mascotOf(appearance)
-    if (mascot == McaMascot.CUSTOM && customImageMissing) {
-        McaMascotMark(mascot = McaMascot.WHALE, size = 64.dp, modifier = Modifier.padding(4.dp))
-    } else if (mascot == McaMascot.CUSTOM) {
-        // The bitmap itself is painted by the overlay owner; the picker only states which mode is
-        // active, so no second image decoder is introduced in the feature module.
-        Icon(
-            imageVector = McaIcons.Image,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(12.dp).size(40.dp)
-        )
-    } else {
-        McaMascotMark(mascot = mascot, size = 64.dp, modifier = Modifier.padding(4.dp))
-    }
-}
-
-@Composable
-private fun MascotChoice(label: String, selected: Boolean, onClick: () -> Unit) {
-    McaChip(selected = selected, onClick = onClick, label = { Text(label) })
 }
 
 @Composable
@@ -350,6 +209,50 @@ private fun ToggleRow(
     }
 }
 
+/** A discrete value row with − / + controls; used for the bubble line count. */
+@Composable
+private fun StepRow(
+    title: String,
+    value: String,
+    canDecrease: Boolean,
+    canIncrease: Boolean,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        StepButton(label = "－", enabled = canDecrease, onClick = onDecrease)
+        Text(
+            text = value,
+            modifier = Modifier.padding(horizontal = 10.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        StepButton(label = "＋", enabled = canIncrease, onClick = onIncrease)
+    }
+}
+
+@Composable
+private fun StepButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Text(
+        text = label,
+        modifier = Modifier
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        style = MaterialTheme.typography.titleMedium,
+        color = if (enabled) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        }
+    )
+}
+
 @Composable
 private fun PermissionCard(onOpenSettings: () -> Unit) {
     Surface(
@@ -374,49 +277,10 @@ private fun PermissionCard(onOpenSettings: () -> Unit) {
     }
 }
 
-@Composable
-private fun LabeledSlider(
-    label: String,
-    value: Float,
-    valueRange: ClosedFloatingPointRange<Float>,
-    steps: Int,
-    onValueChange: (Float) -> Unit,
-    onValueChangeFinished: () -> Unit
-) {
-    Column {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        McaSlider(
-            value = value,
-            onValueChange = onValueChange,
-            valueRange = valueRange,
-            steps = steps.coerceAtLeast(0),
-            onValueChangeFinished = onValueChangeFinished,
-            modifier = Modifier.fillMaxWidth()
-        )
-    }
-}
-
-private fun selectedId(appearance: DshOverlayAppearance): MascotId =
-    MascotId.fromId(appearance.mascotId)
-
-private fun mascotOf(appearance: DshOverlayAppearance): McaMascot = when (selectedId(appearance)) {
-    MascotId.WHALE -> McaMascot.WHALE
-    MascotId.WHALE_GIRL_ART -> McaMascot.WHALE_GIRL_ART
-    MascotId.WHALE_GIRL_Q -> McaMascot.WHALE_GIRL_Q
-    MascotId.WHALE_GIRL_MATURE -> McaMascot.WHALE_GIRL_MATURE
-    MascotId.FATTY_FISH -> McaMascot.FATTY_FISH
-    MascotId.CAT -> McaMascot.CAT
-    MascotId.CUSTOM -> McaMascot.CUSTOM
-}
-
 /**
- * Opens the system "display over other apps" screen for this package. Both the per-app deep link and
- * the list fallback are attempted; a device without either leaves the panel's explanation in place
- * rather than pretending the grant was requested.
+ * Opens the system "display over other apps" screen for this package. Both the per-app deep link and the
+ * list fallback are attempted; a device without either leaves the panel's explanation in place rather
+ * than pretending the grant was requested.
  */
 internal fun openOverlaySettings(context: Context, onFailure: (String) -> Unit = {}) {
     val appIntent = Intent(

@@ -1,16 +1,12 @@
 package com.muyuchat.mca.dsh.overlay
 
 import android.content.Context
-import android.net.Uri
 import android.provider.Settings
 import com.muyuchat.api.dsh.gateway.DshGatewayBackend
 import com.muyuchat.core.dsh.contract.DshOverlayAppearance
 import com.muyuchat.core.dsh.contract.DshOverlayReplyPreview
-import com.muyuchat.core.dsh.contract.MascotId
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiPort
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiSnapshot
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 /**
  * Typed seams the app composition lends to the overlay.
@@ -27,16 +23,17 @@ internal class DshOverlayRuntimeHooks(val ensureStarted: () -> Unit = {}) {
 }
 
 /**
- * Process-level owner of the app-outside display: one window controller, one appearance store, one
- * reply gate, and the bridge to the keep-alive service.
+ * Process-level owner of the app-outside display: one window controller, one settings store, one reply
+ * gate, one stream presenter, and the bridge to the keep-alive service.
  *
- * It is the single writer of the overlay preference document, and the only place that decides whether
- * a user action may turn the window on. The `:dsh` runtime is never restarted here — [ensureStarted]
- * is the injected call into the existing runtime client, so the gateway port, the host process and the
+ * It is the single writer of the overlay preference document, and the only place that decides whether a
+ * user action may turn the window on. The `:dsh` runtime is never restarted here — [ensureStarted] is
+ * the injected call into the existing runtime client, so the gateway port, the host process and the
  * capability bridge keep their single owner.
  *
- * The capability bridge (`/overlay`) and the workspace panel share [controller]: the controller holds
- * the one process-level window-bus slot, so a second instance would steal the first one's callbacks.
+ * The capability bridge (`/overlay`) and the in-app settings panel share [controller]: the controller
+ * holds the one process-level window-bus slot, so a second instance would steal the first one's
+ * callbacks.
  */
 internal class DshOverlayHost private constructor(private val appContext: Context) : DshOverlayUiPort {
 
@@ -47,15 +44,15 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
      * Cached "may the window show live text right now" fact.
      *
      * The observer asks this on every delta, so it must not decode the preference document per chunk.
-     * It is recomputed on every write the host performs (enable/disable, appearance save, image import,
-     * restore), which are the only places the answer can change.
+     * It is recomputed on every write the host performs (enable/disable, settings save, restore), which
+     * are the only places the answer can change.
      */
     @Volatile
     private var streamingAllowed: Boolean = false
 
     /**
-     * One presenter per process: it owns the streaming state machine between the gateway and the
-     * window. The window is looked up on each push because the service may be attached or not.
+     * One presenter per process: it owns the streaming state machine between the gateway and the window.
+     * The window is looked up on each push because the service may be attached or not.
      */
     private val streamPresenter = DshOverlayStreamPresenter(
         onState = { state -> DshOverlayService.instance?.applyStream(state) },
@@ -89,9 +86,9 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
     /**
      * One-time binding of the app composition (runtime hook install + window re-attach).
      *
-     * Called from the ViewModel's overlay port getter, which may be read more than once: the install
-     * and the re-attach run exactly once per process, so a second read cannot restart the host or
-     * re-show a window the user just hid.
+     * Called from the ViewModel's overlay port getter, which may be read more than once: the install and
+     * the re-attach run exactly once per process, so a second read cannot restart the host or re-show a
+     * window the user just hid.
      */
     internal fun bindRuntime(hooks: DshOverlayRuntimeHooks): DshOverlayHost {
         val shouldRestore = synchronized(this) {
@@ -148,38 +145,53 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
     /** Reply boundary accepted by the transport; the gate decides whether it becomes a bubble. */
     private fun onReply(preview: DshOverlayReplyPreview) {
         val settings = store.loadSettings()
+        lastGatewayReplyAtMillis = System.currentTimeMillis()
         if (!settings.enabled) return
-        val decision = gate.decide(preview, settings.appearance, System.currentTimeMillis())
+        val decision = gate.decide(preview, settings.toOverlayAppearance(), System.currentTimeMillis())
         if (decision != DshOverlayBubbleDecision.SHOW) return
         DshOverlayService.instance?.showReply(preview)
+    }
+
+    /**
+     * A reply observed somewhere other than the MCA gateway: the DSH page's own DOM, which is the
+     * only signal available when the user is signed in with an official account that talks to
+     * upstream directly.
+     *
+     * It reuses [onReply] so throttle, de-duplication and auto-hide are identical; the text simply
+     * arrives as page text and is clipped to the preview budget by [DshOverlayReplyPreview.of].
+     */
+    internal fun publishAccountReply(text: String) {
+        val preview = DshOverlayReplyPreview.of(
+            sessionId = null,
+            reply = text,
+            atEpochMs = System.currentTimeMillis()
+        ) ?: return
+        onReply(preview)
+    }
+
+    /** Wall clock of the last gateway reply, used to suppress a duplicate DOM observation. */
+    @Volatile
+    internal var lastGatewayReplyAtMillis: Long? = null
+        private set
+
+    /** Persists an edit made inside the system window's own settings sheet. */
+    internal fun applyWindowSettings(settings: DshOverlaySettings) {
+        store.saveSettings(settings)
+        refreshStreamingAllowed()
+        DshOverlayService.instance?.applySettings(settings)
     }
 
     // ------------------------------------------------------------------ DshOverlayUiPort
 
     override fun snapshot(): DshOverlayUiSnapshot {
         val settings = store.loadSettings()
-        val appearance = settings.appearance
-        val customPath = appearance.customImagePath
         return DshOverlayUiSnapshot(
             enabled = settings.enabled,
             permissionGranted = canDrawOverlays(appContext),
             backgroundRunning = DshBackgroundService.isRunning,
-            appearance = appearance,
-            // A metadata check only (no content read): the panel explains a missing file instead of
-            // silently showing the vector fallback.
-            customImageMissing = customPath != null && !DshOverlayCustomImage.exists(customPath),
+            appearance = settings.toOverlayAppearance(),
             streamingEnabled = settings.streamingEnabled
         )
-    }
-
-    override fun setStreamingEnabled(enabled: Boolean): String? {
-        val settings = store.loadSettings()
-        store.saveSettings(settings.copy(streamingEnabled = enabled))
-        // Recompute the cached gate so the very next delta already obeys the new choice, and drop
-        // any half-written text so a disabled overlay cannot keep showing a stale in-progress line.
-        refreshStreamingAllowed()
-        if (!enabled) DshOverlayService.instance?.applyStream(DshOverlayStream.Idle)
-        return null
     }
 
     override fun setEnabled(enabled: Boolean): String? {
@@ -213,27 +225,30 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
         return null
     }
 
+    /**
+     * Persists the bubble-related part of the in-app appearance editor.
+     *
+     * The contract type still carries mascot/size/opacity fields for stored-config compatibility; they
+     * are no longer rendered (the window is the DSH whale ball) and are deliberately not written back as
+     * new choices.
+     */
     override fun saveAppearance(appearance: DshOverlayAppearance): String? {
-        val settings = store.loadSettings().copy(appearance = appearance)
+        val settings = store.loadSettings().copy(
+            bubbleLines = appearance.normalized().bubbleLines,
+            notifyReplies = appearance.notifyReplies,
+            draggable = appearance.draggable
+        )
         store.saveSettings(settings)
         refreshStreamingAllowed()
-        DshOverlayService.instance?.applySettings(store.loadSettings())
+        DshOverlayService.instance?.applySettings(settings)
         return null
     }
 
-    override suspend fun importCustomImage(uri: Uri): String? {
-        val path = withContext(Dispatchers.IO) { DshOverlayCustomImage.import(appContext, uri) }
-            ?: return "这张图片无法读取，请换一张 JPG/PNG 图片"
-        val settings = store.loadSettings()
-        val next = settings.copy(
-            appearance = settings.appearance.copy(
-                mascotId = MascotId.CUSTOM.id,
-                customImagePath = path
-            )
-        )
-        store.saveSettings(next)
+    override fun setStreamingEnabled(enabled: Boolean): String? {
+        val settings = store.loadSettings().copy(streamingEnabled = enabled)
+        store.saveSettings(settings)
         refreshStreamingAllowed()
-        DshOverlayService.instance?.applySettings(next)
+        DshOverlayService.instance?.applySettings(settings)
         return null
     }
 
