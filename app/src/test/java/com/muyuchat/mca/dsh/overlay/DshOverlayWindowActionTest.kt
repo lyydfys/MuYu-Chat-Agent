@@ -84,6 +84,17 @@ class DshOverlayWindowActionTest {
     }
 
     @Test
+    fun theCommandApprovalSwitchIsAPureToggle() {
+        val actions = RecordingActions(base = DshOverlaySettings(commandApprovalEnabled = true))
+
+        DshOverlayActionId.TOGGLE_COMMAND_APPROVAL.perform(actions)
+        assertFalse(actions.settings.commandApprovalEnabled)
+
+        DshOverlayActionId.TOGGLE_COMMAND_APPROVAL.perform(actions)
+        assertTrue(actions.settings.commandApprovalEnabled)
+    }
+
+    @Test
     fun theBubbleLineRowCyclesForwardAndWrapsAtZero() {
         val actions = RecordingActions(base = DshOverlaySettings(bubbleLines = 3))
 

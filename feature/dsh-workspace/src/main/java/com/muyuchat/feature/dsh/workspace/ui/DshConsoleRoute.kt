@@ -86,6 +86,9 @@ fun DshConsoleRoute(
                 // It adds no destination and does not reorder the existing sections.
                 DshDeviceAccessSection()
                 DshPictureInPictureSection()
+                // Additive container block (proot + user-supplied rootfs): read-only verdict plus
+                // the one fixed probe. It adds no destination and no layout change.
+                DshContainerSection()
             }
         )
         SnackbarHost(

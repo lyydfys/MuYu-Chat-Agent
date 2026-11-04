@@ -22,6 +22,7 @@ class DshOverlaySettingsCodecTest {
             notifyReplies = false,
             draggable = false,
             streamingEnabled = false,
+            commandApprovalEnabled = false,
             markSizeDp = 52,
             position = DshOverlayPosition(xFraction = 0.25f, yFraction = 0.8f)
         )
@@ -29,6 +30,24 @@ class DshOverlaySettingsCodecTest {
         val decoded = DshOverlaySettingsCodec.decode(DshOverlaySettingsCodec.encode(original))
 
         assertEquals(original, decoded)
+    }
+
+    @Test
+    fun theCommandApprovalSwitchDefaultsOnAndSurvivesARoundTrip() {
+        assertTrue(DshOverlaySettingsCodec.decode(null).commandApprovalEnabled)
+        assertTrue(DshOverlaySettingsCodec.decode("""{"enabled":true}""").commandApprovalEnabled)
+        assertFalse(
+            DshOverlaySettingsCodec.decode(
+                """{"enabled":true,"commandApproval":false}"""
+            ).commandApprovalEnabled
+        )
+        assertFalse(
+            DshOverlaySettingsCodec.decode(
+                DshOverlaySettingsCodec.encode(
+                    DshOverlaySettings(enabled = true, commandApprovalEnabled = false)
+                )
+            ).commandApprovalEnabled
+        )
     }
 
     @Test

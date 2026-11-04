@@ -74,26 +74,17 @@ class DshDeviceChannelHost internal constructor(
     /**
      * The agent-facing command path.
      *
-     * Order: [DshDeviceCommandPolicy] → canonical re-rendering → [DshAdbChannel.exec] (which gates
-     * again and enforces its own timeout) → byte ceiling for the caller's limit. A rejected command
-     * returns `policy_blocked` without touching the transport.
+     * Policy, the one-shot floating-window approval and canonical re-rendering all happen inside
+     * [DshAdbChannel.exec]; this entry point only applies the caller's byte ceiling. Gating exactly once
+     * matters: a second gate after an approval would either ask the user twice or refuse the very command
+     * they just allowed.
      */
     suspend fun adbShell(
         command: String,
         timeoutMs: Long = DSH_DEVICE_COMMAND_TIMEOUT_MS,
         outputLimitBytes: Int = DSH_DEVICE_OUTPUT_LIMIT_BYTES
     ): DshDeviceCommandResult {
-        val decision = DshDeviceCommandPolicy.evaluate(command)
-        if (decision is DshDeviceCommandDecision.Rejected) {
-            return DshDeviceCommandResult.policyBlocked(
-                policyDetail = "${decision.rejection.code}: ${decision.rule}"
-            )
-        }
-        val allowed = decision as DshDeviceCommandDecision.Allowed
-        val raw = adb.exec(
-            command = DshDeviceCommandPolicy.renderSafe(allowed.segments),
-            timeoutMs = timeoutMs
-        )
+        val raw = adb.exec(command = command, timeoutMs = timeoutMs)
         return dshBoundDeviceResult(raw, outputLimitBytes)
     }
 

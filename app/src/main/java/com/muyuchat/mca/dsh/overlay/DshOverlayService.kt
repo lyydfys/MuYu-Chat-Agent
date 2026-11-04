@@ -13,6 +13,9 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import com.muyuchat.core.dsh.contract.DshOverlayReplyPreview
+import com.muyuchat.feature.dsh.workspace.device.DshCommandApproval
+import com.muyuchat.feature.dsh.workspace.device.DshCommandApprovalDecision
+import com.muyuchat.feature.dsh.workspace.device.DshCommandApprovalRequest
 import kotlin.math.roundToInt
 
 /** Events the window service reports to its process-local owner; all arrive on the main thread. */
@@ -59,6 +62,9 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
     private var rootView: View? = null
     private var composeHost: DshOverlayComposeHost? = null
     private var layout: WindowManager.LayoutParams? = null
+
+    /** Read by the approval gate from a channel coroutine: volatile so it never answers stale. */
+    @Volatile
     private var attached = false
     private var status: DshOverlayStatus = DshOverlayStatus.unavailable()
     private var settings: DshOverlaySettings = DshOverlaySettings()
@@ -216,6 +222,70 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         }
     }
 
+    // ------------------------------------------------------------------ command approval
+
+    /**
+     * Shows the "DSH 想执行一条命令" card; called from the feature-side approval gate.
+     *
+     * Returns false when no window is attached: the gate then denies, so a prompt nobody can see never
+     * turns into a permission.
+     */
+    fun showApproval(request: DshCommandApprovalRequest): Boolean {
+        if (!attached) return false
+        onMain {
+            ui.approval = DshOverlayApprovalUi(
+                id = request.id,
+                commandMasked = request.commandMasked,
+                deadlineMillis = request.deadlineMillis,
+                timeoutMillis = request.timeoutMillis
+            )
+            ui.panel = DshOverlayPanel.NONE
+            ui.bubble = null
+            clearStream()
+            cancelBubbleHide()
+            updateWindowPosition()
+        }
+        return true
+    }
+
+    /** Removes the card for [id] (answer, timeout or cancellation); a newer card is left alone. */
+    fun dismissApproval(id: Long) {
+        onMain {
+            if (ui.approval?.id != id) return@onMain
+            ui.approval = null
+            updateWindowPosition()
+        }
+    }
+
+    /** Removes whatever card is on screen, e.g. when the user switches approval off. */
+    fun dismissAnyApproval() {
+        onMain {
+            if (ui.approval == null) return@onMain
+            ui.approval = null
+            updateWindowPosition()
+        }
+    }
+
+    /**
+     * "允许一次" / "拒绝" pressed.
+     *
+     * The card is removed first so a second tap cannot answer twice (the queue is idempotent anyway), and
+     * the decision is delivered to the feature-side gate, which resumes the waiting channel.
+     */
+    private fun decideApproval(allowOnce: Boolean) {
+        val current = ui.approval ?: return
+        ui.approval = null
+        updateWindowPosition()
+        DshCommandApproval.decide(
+            current.id,
+            if (allowOnce) {
+                DshCommandApprovalDecision.ALLOW_ONCE
+            } else {
+                DshCommandApprovalDecision.DENY
+            }
+        )
+    }
+
     // ------------------------------------------------------------------ window actions
 
     /** "返回 DSH": reuse the one EXTRA_OPEN_WORKSPACE launch path; report a failure visibly. */
@@ -309,6 +379,7 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
                 onBallTap = { toggleActionPanel() },
                 onBallLongPress = { openSettingsPanel() },
                 onClosePanel = { closePanel() },
+                onApprovalDecision = ::decideApproval,
                 onDrag = ::dragBy,
                 onDragEnd = ::persistPosition
             )
@@ -386,6 +457,9 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
     private fun hasContentBubble(): Boolean =
         ui.bubble != null || ui.streamText != null || ui.streamLabel != null
 
+    /** The approval card is taller than a bubble (title + command + hint + buttons + countdown). */
+    private fun approvalBlockHeightPx(): Int = (176 * density).roundToInt()
+
     /**
      * Places the window so the ball stays exactly where the user left it while bubbles grow away from
      * the nearest screen edge; a panel always grows downwards, so it never moves the ball.
@@ -395,10 +469,11 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         clampMarkPosition()
         val rightAnchored = markLeftPx + markPx / 2f >= screenWidthPx / 2f
         ui.alignEnd = rightAnchored
-        val growthAbove = if (ui.panel == DshOverlayPanel.NONE && hasContentBubble()) {
-            bubbleBlockHeightPx()
-        } else {
-            0
+        val growthAbove = when {
+            ui.panel != DshOverlayPanel.NONE -> 0
+            ui.approval != null -> approvalBlockHeightPx()
+            hasContentBubble() -> bubbleBlockHeightPx()
+            else -> 0
         }
         val bubbleBelow = growthAbove > 0 && markTopPx - growthAbove - edgePx < 0
         ui.bubbleBelow = bubbleBelow || growthAbove == 0
@@ -473,6 +548,10 @@ class DshOverlayService : Service(), DshOverlayWindowActions {
         ui.draggable = next.draggable
         ui.notifyReplies = next.notifyReplies
         ui.streamingEnabled = next.streamingEnabled
+        ui.commandApprovalEnabled = next.commandApprovalEnabled
+        // Switching approval off must also clear a card that is already waiting: it can no longer be
+        // answered, and the waiting channel has to be told DENY rather than left hanging.
+        if (!next.commandApprovalEnabled) decideApproval(allowOnce = false)
         if (next.bubbleLines == 0 || !next.notifyReplies) ui.bubble = null
         // Turning live text off (or hiding bubbles) must drop the text already on screen; the progress
         // ring keeps showing that DSH is still working.

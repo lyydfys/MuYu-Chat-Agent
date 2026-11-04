@@ -12,18 +12,25 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -46,6 +53,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
@@ -65,6 +73,20 @@ internal enum class DshOverlayBallMood {
 internal enum class DshOverlayPanel { NONE, ACTIONS, SETTINGS }
 
 /**
+ * The one pending command-approval card, as the window renders it.
+ *
+ * [commandMasked] is produced by the feature-side masking rule, so the full command never enters this
+ * file. [deadlineMillis] drives the countdown bar; the gate also enforces the same deadline, so a card
+ * that lingers after it expired cannot authorise anything.
+ */
+internal data class DshOverlayApprovalUi(
+    val id: Long,
+    val commandMasked: String,
+    val deadlineMillis: Long,
+    val timeoutMillis: Long
+)
+
+/**
  * Every intent the overlay window can emit.
  *
  * Kept as an enum with a pure [perform] mapper so the two-row action panel and the inline settings sheet
@@ -76,7 +98,8 @@ internal enum class DshOverlayActionId {
     TOGGLE_NOTIFY_REPLIES,
     CYCLE_BUBBLE_LINES,
     TOGGLE_STREAMING,
-    TOGGLE_DRAGGABLE
+    TOGGLE_DRAGGABLE,
+    TOGGLE_COMMAND_APPROVAL
 }
 
 /** The only side effects the window is allowed to ask for; implemented by the service. */
@@ -104,6 +127,9 @@ internal fun DshOverlayActionId.perform(actions: DshOverlayWindowActions) {
 
         DshOverlayActionId.TOGGLE_DRAGGABLE ->
             actions.updateSettings { it.copy(draggable = !it.draggable) }
+
+        DshOverlayActionId.TOGGLE_COMMAND_APPROVAL ->
+            actions.updateSettings { it.copy(commandApprovalEnabled = !it.commandApprovalEnabled) }
     }
 }
 
@@ -131,6 +157,9 @@ internal class DshOverlayUiState {
     var notifyReplies by mutableStateOf(true)
     var streamingEnabled by mutableStateOf(true)
 
+    /** Mirror of the "命令需要确认" preference, shown in the inline settings sheet. */
+    var commandApprovalEnabled by mutableStateOf(DshOverlaySettings.DEFAULT_COMMAND_APPROVAL_ENABLED)
+
     /** A turn is running right now (text or tool); drives the progress ring, not the bubble. */
     var streamActive by mutableStateOf(false)
 
@@ -152,6 +181,14 @@ internal class DshOverlayUiState {
 
     /** Which panel the ball currently shows. */
     var panel by mutableStateOf(DshOverlayPanel.NONE)
+
+    /**
+     * A dangerous command waiting for a decision, if any.
+     *
+     * Priority above every other content slot: while this is set the ball shows the approval card and no
+     * bubble/tool/stream text, so the user can never answer a different question than the one on screen.
+     */
+    var approval by mutableStateOf<DshOverlayApprovalUi?>(null)
 
     /**
      * Which way the window grows. The ball is anchored to the window edge that faces the screen edge it
@@ -181,12 +218,13 @@ internal fun DshOverlayWindowContent(
     onBallTap: () -> Unit,
     onBallLongPress: () -> Unit,
     onClosePanel: () -> Unit,
+    onApprovalDecision: (Boolean) -> Unit,
     onDrag: (Float, Float) -> Unit,
     onDragEnd: () -> Unit
 ) {
     OverlayTheme {
         val alignment = if (state.alignEnd) Alignment.End else Alignment.Start
-        val nowMs = rememberStreamClock(state.streamActive)
+        val nowMs = rememberStreamClock(state.streamActive || state.approval != null)
         val working = state.mood == DshOverlayBallMood.WORKING
         val breathPeriod = if (working) BREATH_WORKING_PERIOD_MILLIS else BREATH_IDLE_PERIOD_MILLIS
         val transition = rememberInfiniteTransition(label = "dsh-overlay-ball")
@@ -220,7 +258,7 @@ internal fun DshOverlayWindowContent(
             ""
         }
         Column(horizontalAlignment = alignment) {
-            if (!state.bubbleBelow) BubbleArea(state, toolDots)
+            if (!state.bubbleBelow) ContentSlot(state, toolDots, nowMs, onApprovalDecision)
             Ball(
                 state = state,
                 breath = breath,
@@ -231,7 +269,7 @@ internal fun DshOverlayWindowContent(
                 onDrag = onDrag,
                 onDragEnd = onDragEnd
             )
-            if (state.bubbleBelow) BubbleArea(state, toolDots)
+            if (state.bubbleBelow) ContentSlot(state, toolDots, nowMs, onApprovalDecision)
             state.notice?.let { notice ->
                 InfoSurface(text = notice, modifier = Modifier.padding(vertical = 6.dp))
             }
@@ -250,6 +288,98 @@ internal fun DshOverlayWindowContent(
                 )
 
                 DshOverlayPanel.NONE -> Unit
+            }
+        }
+    }
+}
+
+/**
+ * The content slot above/below the ball, with the approval card at the very top of the priority list:
+ * approval > tool label > live text > finished reply.
+ */
+@Composable
+private fun ContentSlot(
+    state: DshOverlayUiState,
+    toolDots: String,
+    nowMs: Long,
+    onApprovalDecision: (Boolean) -> Unit
+) {
+    val approval = state.approval
+    if (approval != null) {
+        ApprovalCard(
+            approval = approval,
+            nowMs = nowMs,
+            onApprovalDecision = onApprovalDecision,
+            modifier = Modifier.padding(vertical = 6.dp)
+        )
+    } else {
+        BubbleArea(state, toolDots)
+    }
+}
+
+/**
+ * "DSH 想执行一条命令": the masked command, the one-shot warning, a 30 s countdown and two buttons.
+ *
+ * The card is deliberately the only thing this slot can show while it exists: a reply bubble appearing
+ * underneath an approval question would invite a tap on the wrong control.
+ */
+@Composable
+private fun ApprovalCard(
+    approval: DshOverlayApprovalUi,
+    nowMs: Long,
+    onApprovalDecision: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val timeoutMs = approval.timeoutMillis.coerceAtLeast(1L)
+    val remaining = ((approval.deadlineMillis - nowMs).toFloat() / timeoutMs).coerceIn(0f, 1f)
+    Surface(
+        modifier = modifier.widthIn(min = 216.dp, max = 300.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 12.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "DSH 想执行一条命令",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = approval.commandMasked,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = APPROVAL_COMMAND_MAX_LINES,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            )
+            Text(
+                text = "只允许一次，执行后需要再次确认",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            LinearProgressIndicator(
+                progress = { remaining },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = { onApprovalDecision(false) }) { Text("拒绝") }
+                Button(onClick = { onApprovalDecision(true) }) { Text("允许一次") }
             }
         }
     }
@@ -473,3 +603,6 @@ private const val STREAM_BUBBLE_TAIL_CHARS = 160
 
 /** Live text wraps at most this many lines, whatever the finished-bubble setting is. */
 private const val STREAM_BUBBLE_MAX_LINES = 3
+
+/** The masked command is short by construction; the card never grows into a wall of text. */
+private const val APPROVAL_COMMAND_MAX_LINES = 3

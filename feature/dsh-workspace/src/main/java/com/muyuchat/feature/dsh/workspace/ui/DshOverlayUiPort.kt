@@ -27,6 +27,12 @@ data class DshOverlayUiSnapshot(
      */
     val streamingEnabled: Boolean = true,
     /**
+     * Whether a dangerous device command must be confirmed on the floating window first (default on).
+     *
+     * Off does not authorise those commands: it restores the strict "refuse immediately" behaviour.
+     */
+    val commandApprovalEnabled: Boolean = true,
+    /**
      * Whether the account-path reply probe is injected into the DSH page (default on).
      *
      * The probe only observes rendered text; turning it off removes the injected bridge entirely, so
@@ -70,4 +76,12 @@ interface DshOverlayUiPort {
      * preference yet still compiles and behaves exactly as before.
      */
     fun setAccountReplyProbeEnabled(enabled: Boolean): String? = null
+
+    /**
+     * Turns the dangerous-command confirmation on or off; persists immediately.
+     *
+     * Off does **not** allow those commands: the device policy then refuses them outright, exactly as
+     * before this feature existed. Defaulted so an older app implementation keeps compiling.
+     */
+    fun setCommandApprovalEnabled(enabled: Boolean): String? = null
 }

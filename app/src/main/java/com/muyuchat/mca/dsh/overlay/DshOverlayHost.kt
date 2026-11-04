@@ -5,6 +5,9 @@ import android.provider.Settings
 import com.muyuchat.api.dsh.gateway.DshGatewayBackend
 import com.muyuchat.core.dsh.contract.DshOverlayAppearance
 import com.muyuchat.core.dsh.contract.DshOverlayReplyPreview
+import com.muyuchat.feature.dsh.workspace.device.DshCommandApproval
+import com.muyuchat.feature.dsh.workspace.device.DshCommandApprovalPresenter
+import com.muyuchat.feature.dsh.workspace.device.DshCommandApprovalRequest
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiPort
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiSnapshot
 
@@ -59,8 +62,31 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
         streamingEnabled = { streamingAllowed }
     )
 
+    /**
+     * The window half of the dangerous-command approval: feature-side channels ask
+     * [com.muyuchat.feature.dsh.workspace.device.DshCommandApproval] and this presenter renders the card.
+     *
+     * [present] returns the service's own answer, so "no window attached" is a refused card (and the
+     * gate then denies) instead of a prompt nobody can see.
+     */
+    private val approvalPresenter = object : DshCommandApprovalPresenter {
+        override fun present(request: DshCommandApprovalRequest): Boolean =
+            DshOverlayService.instance?.showApproval(request) ?: false
+
+        override fun dismiss(id: Long) {
+            DshOverlayService.instance?.dismissApproval(id)
+        }
+    }
+
     init {
         refreshStreamingAllowed()
+        // Wired here (one process, one host) so the device channels can ask the same window that shows
+        // reply bubbles. The default feature-side state is "no presenter, disabled" = strict refusal.
+        DshCommandApproval.installPresenter(approvalPresenter)
+        DshCommandApproval.setEnabledProvider {
+            val settings = store.loadSettings()
+            settings.enabled && settings.commandApprovalEnabled
+        }
     }
 
     /** Live status provider of the DSH runtime, installed by the capability assembly when it exists. */
@@ -190,7 +216,8 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
             permissionGranted = canDrawOverlays(appContext),
             backgroundRunning = DshBackgroundService.isRunning,
             appearance = settings.toOverlayAppearance(),
-            streamingEnabled = settings.streamingEnabled
+            streamingEnabled = settings.streamingEnabled,
+            commandApprovalEnabled = settings.commandApprovalEnabled
         )
     }
 
@@ -249,6 +276,22 @@ internal class DshOverlayHost private constructor(private val appContext: Contex
         store.saveSettings(settings)
         refreshStreamingAllowed()
         DshOverlayService.instance?.applySettings(settings)
+        return null
+    }
+
+    /**
+     * "命令需要确认" switch.
+     *
+     * Off does not authorise dangerous commands: the feature-side gate sees a disabled provider and
+     * denies every request immediately, which is the previous strict `policy_blocked` behaviour.
+     */
+    override fun setCommandApprovalEnabled(enabled: Boolean): String? {
+        val settings = store.loadSettings().copy(commandApprovalEnabled = enabled)
+        store.saveSettings(settings)
+        if (!enabled) {
+            // A card already on screen must not stay answerable after the switch went off.
+            DshOverlayService.instance?.dismissAnyApproval()
+        }
         return null
     }
 

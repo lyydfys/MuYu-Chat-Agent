@@ -124,6 +124,11 @@ internal fun SettingsSheet(
                 value = if (state.draggable) "开" else "关",
                 onClick = { DshOverlayActionId.TOGGLE_DRAGGABLE.perform(actions) }
             )
+            SettingsRow(
+                label = "命令需要确认",
+                value = if (state.commandApprovalEnabled) "开" else "关",
+                onClick = { DshOverlayActionId.TOGGLE_COMMAND_APPROVAL.perform(actions) }
+            )
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
             SettingsRow(
                 label = "停止后台运行",

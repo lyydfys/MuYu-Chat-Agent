@@ -102,12 +102,20 @@ class DshRootChannel internal constructor(
         timeoutMs: Long
     ): DshDeviceCommandResult {
         val decision = DshDeviceCommandPolicy.evaluate(command)
-        if (decision is DshDeviceCommandDecision.Rejected) {
-            return DshDeviceCommandResult.policyBlocked(
-                policyDetail = "${decision.rejection.code}: ${decision.rule}"
-            )
+        val segments = when (decision) {
+            is DshDeviceCommandDecision.Allowed -> decision.segments
+            is DshDeviceCommandDecision.Rejected -> {
+                // One explicit user authorisation on the floating window can override the refusal for
+                // this single command. The rendered, quote-safe string is what actually runs.
+                dshApprovedSegmentsFor(
+                    command = command,
+                    rejection = decision.rejection,
+                    kind = DshCommandApprovalKind.ROOT
+                ) ?: return DshDeviceCommandResult.policyBlocked(
+                    policyDetail = "${decision.rejection.code}: ${decision.rule}"
+                )
+            }
         }
-        val allowed = decision as DshDeviceCommandDecision.Allowed
         if (cachedStatus != DshDeviceChannelStatus.READY) {
             val probed = probe()
             if (probed.status != DshDeviceChannelStatus.READY) {
@@ -115,7 +123,7 @@ class DshRootChannel internal constructor(
             }
         }
         return runTrusted(
-            script = DshDeviceCommandPolicy.renderSafe(allowed.segments),
+            script = DshDeviceCommandPolicy.renderSafe(segments),
             timeoutMs = timeoutMs
         )
     }

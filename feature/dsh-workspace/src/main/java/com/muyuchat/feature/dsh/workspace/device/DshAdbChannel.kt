@@ -178,12 +178,21 @@ class DshAdbChannel internal constructor(
         timeoutMs: Long
     ): DshDeviceCommandResult {
         val decision = DshDeviceCommandPolicy.evaluate(command)
-        if (decision is DshDeviceCommandDecision.Rejected) {
-            return DshDeviceCommandResult.policyBlocked(
-                policyDetail = "${decision.rejection.code}: ${decision.rule}"
-            )
+        val segments = when (decision) {
+            is DshDeviceCommandDecision.Allowed -> decision.segments
+            is DshDeviceCommandDecision.Rejected -> {
+                // A dangerous command may be authorised once on the floating window. Without a window
+                // (or with the switch off) the gate denies immediately, keeping the old strict path.
+                val approved = dshApprovedSegmentsFor(
+                    command = command,
+                    rejection = decision.rejection,
+                    kind = DshCommandApprovalKind.ADB
+                ) ?: return DshDeviceCommandResult.policyBlocked(
+                    policyDetail = "${decision.rejection.code}: ${decision.rule}"
+                )
+                approved
+            }
         }
-        val allowed = decision as DshDeviceCommandDecision.Allowed
         val active = transport ?: return notIntegratedResult()
         if (active.state() != DshAdbTransportState.CONNECTED) {
             return notReadyResult(active.lastFailure())
@@ -191,7 +200,7 @@ class DshAdbChannel internal constructor(
         val effectiveTimeout = if (timeoutMs > 0) timeoutMs else DSH_DEVICE_COMMAND_TIMEOUT_MS
         val shellResult = try {
             withTimeout(effectiveTimeout) {
-                active.shell(DshDeviceCommandPolicy.renderSafe(allowed.segments))
+                active.shell(DshDeviceCommandPolicy.renderSafe(segments))
             }
         } catch (timeout: TimeoutCancellationException) {
             // Only this scope's own timeout is converted; an outer cancellation keeps propagating.

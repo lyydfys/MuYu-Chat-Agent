@@ -172,6 +172,16 @@ fun DshOverlayPanel(
                         checked = appearance.draggable,
                         onCheckedChange = { commit(appearance.copy(draggable = it)) }
                     )
+                    ToggleRow(
+                        title = "命令需要确认",
+                        description = "危险命令会先在悬浮球上弹出确认卡，点「允许一次」才执行（30 秒不选即拒绝）。" +
+                            "关闭后这些命令直接拒绝，不会放行。",
+                        checked = snapshot.commandApprovalEnabled,
+                        onCheckedChange = { enabled ->
+                            port.setCommandApprovalEnabled(enabled)?.let(onNotice)
+                            refresh()
+                        }
+                    )
                     Text(
                         text = "提示：官方 DeepSeek 账号直连的对话不经过 MCA 网关，因此不会弹出回复气泡；" +
                             "本机模型与云模型网关的对话会弹出。",

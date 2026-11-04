@@ -50,6 +50,13 @@ data class DshOverlaySettings(
      */
     val streamingEnabled: Boolean = DEFAULT_STREAMING_ENABLED,
     /**
+     * Whether a dangerous device command must be confirmed on the floating window before it runs.
+     *
+     * Off does **not** allow those commands: it restores the previous strict behaviour, where the
+     * command policy refuses them outright with `policy_blocked`.
+     */
+    val commandApprovalEnabled: Boolean = DEFAULT_COMMAND_APPROVAL_ENABLED,
+    /**
      * Diameter of the DSH ball. Persisted and clamped to [MIN_MARK_SIZE_DP]..[MAX_MARK_SIZE_DP] so the
      * window can be tuned without a UI control; the settings panel does not expose it.
      */
@@ -66,6 +73,9 @@ data class DshOverlaySettings(
         const val DEFAULT_BUBBLE_LINES = 3
         const val MAX_BUBBLE_LINES = 5
         const val DEFAULT_STREAMING_ENABLED = true
+
+        /** Ask on the floating window by default; the panel can switch it off back to a hard refusal. */
+        const val DEFAULT_COMMAND_APPROVAL_ENABLED = true
 
         /** Matches the in-app DSH floating ball, so the system window reads as the same control. */
         const val DEFAULT_MARK_SIZE_DP = 48
@@ -91,6 +101,7 @@ internal object DshOverlaySettingsCodec {
     private const val KEY_NOTIFY_REPLIES = "notifyReplies"
     private const val KEY_DRAGGABLE = "draggable"
     private const val KEY_STREAMING = "streaming"
+    private const val KEY_COMMAND_APPROVAL = "commandApproval"
     private const val KEY_MARK_SIZE = "markSizeDp"
     private const val KEY_X = "x"
     private const val KEY_Y = "y"
@@ -104,6 +115,7 @@ internal object DshOverlaySettingsCodec {
             .put(KEY_NOTIFY_REPLIES, normalized.notifyReplies)
             .put(KEY_DRAGGABLE, normalized.draggable)
             .put(KEY_STREAMING, normalized.streamingEnabled)
+            .put(KEY_COMMAND_APPROVAL, normalized.commandApprovalEnabled)
             .put(KEY_MARK_SIZE, normalized.markSizeDp)
             .put(KEY_X, normalized.position.xFraction.toDouble())
             .put(KEY_Y, normalized.position.yFraction.toDouble())
@@ -122,6 +134,10 @@ internal object DshOverlaySettingsCodec {
                 streamingEnabled = root.optBoolean(
                     KEY_STREAMING,
                     DshOverlaySettings.DEFAULT_STREAMING_ENABLED
+                ),
+                commandApprovalEnabled = root.optBoolean(
+                    KEY_COMMAND_APPROVAL,
+                    DshOverlaySettings.DEFAULT_COMMAND_APPROVAL_ENABLED
                 ),
                 markSizeDp = root.optInt(KEY_MARK_SIZE, DshOverlaySettings.DEFAULT_MARK_SIZE_DP),
                 position = DshOverlayPosition(
