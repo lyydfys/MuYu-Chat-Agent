@@ -551,7 +551,7 @@ private fun McaApp(
                     onAccountReply = { text ->
                         DshOverlayHost.of(overlayContext).publishAccountReply(text)
                     },
-                    accountReplyProbeEnabled = viewModel.dshOverlayPort.snapshot().accountReplyProbeEnabled,
+                    accountReplyProbeEnabled = true,
                     lastGatewayReplyAtMillis = { DshOverlayHost.of(overlayContext).lastGatewayReplyAtMillis },
                     modifier = pageModifier,
                     onExit = closePage

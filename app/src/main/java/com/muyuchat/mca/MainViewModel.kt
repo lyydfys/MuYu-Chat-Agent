@@ -620,8 +620,9 @@ class MainViewModel @JvmOverloads internal constructor(
         localApiServerCoordinator.claimLocalApiProcessOwnership()
         // Bind the App-outside display port at startup, not only when the DSH tab composes: a user
         // who enabled the window must get it back after an update/relaunch without visiting DSH
-        // again. The port installs its runtime hooks and restores the window exactly once.
-        runCatching { dshOverlayPort }
+        // again. It runs on IO because building the host reads preferences and asks the platform
+        // about the overlay grant; doing that inline blocked the very startup this restores.
+        viewModelScope.launch(Dispatchers.IO) { runCatching { dshOverlayPort } }
         LocalApiRuntime.claimOwner(localApiRuntimeOwner) {
             localApiServerCoordinator.retireLocalApiListener(stopForegroundService = false, forceServerStop = false)
         }
