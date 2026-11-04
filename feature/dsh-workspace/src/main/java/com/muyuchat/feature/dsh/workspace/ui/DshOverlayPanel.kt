@@ -173,6 +173,13 @@ fun DshOverlayPanel(
                                 onClick = { commit(appearance.copy(mascotId = MascotId.WHALE.id)) }
                             )
                             MascotChoice(
+                                label = "鲸鱼娘原图",
+                                selected = selectedId(appearance) == MascotId.WHALE_GIRL_ART,
+                                onClick = {
+                                    commit(appearance.copy(mascotId = MascotId.WHALE_GIRL_ART.id))
+                                }
+                            )
+                            MascotChoice(
                                 label = "鲸鱼娘 Q",
                                 selected = selectedId(appearance) == MascotId.WHALE_GIRL_Q,
                                 onClick = {
@@ -398,6 +405,7 @@ private fun selectedId(appearance: DshOverlayAppearance): MascotId =
 
 private fun mascotOf(appearance: DshOverlayAppearance): McaMascot = when (selectedId(appearance)) {
     MascotId.WHALE -> McaMascot.WHALE
+    MascotId.WHALE_GIRL_ART -> McaMascot.WHALE_GIRL_ART
     MascotId.WHALE_GIRL_Q -> McaMascot.WHALE_GIRL_Q
     MascotId.WHALE_GIRL_MATURE -> McaMascot.WHALE_GIRL_MATURE
     MascotId.FATTY_FISH -> McaMascot.FATTY_FISH

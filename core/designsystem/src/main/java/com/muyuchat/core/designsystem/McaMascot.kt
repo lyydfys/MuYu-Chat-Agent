@@ -7,8 +7,11 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -18,6 +21,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -26,6 +30,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -44,6 +51,7 @@ import androidx.compose.ui.unit.dp
  */
 enum class McaMascot(val label: String, val description: String) {
     WHALE("小鲸鱼", "圆形徽章里的小鲸鱼，和 DSH 页面的悬浮球一致"),
+    WHALE_GIRL_ART("鲸鱼娘（原图）", "官方鲸鱼娘立绘，圆形徽章内 1:1 显示"),
     WHALE_GIRL_Q("鲸鱼娘 · Q 版", "蓝发鲸鱼娘，Q 版比例，女仆头饰与鲸鱼耳鳍"),
     WHALE_GIRL_MATURE("鲸鱼娘 · 成熟版", "同一位鲸鱼娘，成熟比例，长发与围裙上的小鲸鱼"),
     FATTY_FISH("小肥鱼", "圆滚滚的胖鱼，会吐泡泡"),
@@ -84,6 +92,10 @@ fun McaMascotMark(
     if (mascot == McaMascot.CUSTOM) {
         // The overlay owner supplies the bitmap; the design system only owns vector marks.
         McaPlaceholderMark(modifier = modifier.size(size), tint = tint)
+        return
+    }
+    if (mascot == McaMascot.WHALE_GIRL_ART) {
+        McaBundledArtMark(modifier = modifier.size(size), size = size, mood = mood)
         return
     }
     val transition = rememberInfiniteTransition(label = "mca-mascot")
@@ -146,6 +158,7 @@ private fun DrawScope.paintMascot(
 ) {
     when (mascot) {
         McaMascot.WHALE -> drawWhale(tint, accent)
+        McaMascot.WHALE_GIRL_ART -> Unit
         McaMascot.WHALE_GIRL_Q -> drawWhaleGirl(tint, accent, chibi = true, eyesClosed = eyesClosed)
         McaMascot.WHALE_GIRL_MATURE ->
             drawWhaleGirl(tint, accent, chibi = false, eyesClosed = eyesClosed)
@@ -164,6 +177,62 @@ private fun McaPlaceholderMark(modifier: Modifier, tint: Color) {
             color = tint.copy(alpha = 0.55f),
             radius = radius * 0.5f,
             style = Stroke(width = radius / 11f)
+        )
+    }
+}
+
+/**
+ * The bundled whale-girl artwork inside the same round badge.
+ *
+ * Two crops ship together: the full figure for the normal badge and a head close-up used below
+ * 52 dp, where a whole-body drawing would be an unreadable smudge. The disc is always light — the
+ * artwork was produced on white and its apron/headband are white too, so a themed dark disc would
+ * show a white rectangle behind the character.
+ */
+@Composable
+private fun McaBundledArtMark(modifier: Modifier, size: Dp, mood: McaMascotMood) {
+    val transition = rememberInfiniteTransition(label = "mca-mascot-art")
+    val breath by transition.animateFloat(
+        initialValue = 0.99f,
+        targetValue = if (mood == McaMascotMood.IDLE) 1.01f else 1.04f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(
+                durationMillis = if (mood == McaMascotMood.IDLE) 4_000 else 1_100,
+                easing = LinearEasing
+            ),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "mca-mascot-art-breath"
+    )
+    val head = size <= 52.dp
+    val painter = painterResource(
+        if (head) {
+            com.muyuchat.core.designsystem.R.drawable.mca_mascot_whale_girl_head
+        } else {
+            com.muyuchat.core.designsystem.R.drawable.mca_mascot_whale_girl_art
+        }
+    )
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val radius = this.size.minDimension / 2f
+            drawCircle(color = Color(0xFF2F6FD0).copy(alpha = 0.10f), radius = radius)
+            drawCircle(color = Color.White, radius = radius * 0.92f)
+            drawCircle(
+                color = Color(0xFF2F6FD0).copy(alpha = 0.18f),
+                radius = radius * 0.92f,
+                style = Stroke(width = radius * 0.045f)
+            )
+        }
+        Image(
+            painter = painter,
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxSize(0.86f)
+                .graphicsLayer {
+                    scaleX = breath
+                    scaleY = breath
+                },
+            contentScale = if (head) ContentScale.Crop else ContentScale.Fit
         )
     }
 }
