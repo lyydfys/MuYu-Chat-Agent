@@ -50,6 +50,8 @@ import com.muyuchat.feature.dsh.workspace.DshWebHostCallbacks
 import java.util.Collections
 import java.util.WeakHashMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.widget.FrameLayout
@@ -89,6 +91,16 @@ internal fun DshWebViewHost(
     accountAuthMatcher: DshAccountAuthUrlMatcher,
     accountPopupHoldMillis: Long,
     accountLogin: DshAccountLoginPort? = null,
+    /**
+     * Account-path reply probe sink.
+     *
+     * Non-null enables the read-only DOM observer (also gated by [accountReplyProbeEnabled]); the
+     * feature calls it with a finished burst of new page text so the app can raise the same overlay
+     * bubble it raises for the MCA-gateway path. Null keeps the observer completely off.
+     */
+    onAccountReply: ((String) -> Unit)? = null,
+    /** User-facing switch for the probe; false means the page is never observed or injected. */
+    accountReplyProbeEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -117,6 +129,49 @@ internal fun DshWebViewHost(
     val scope = rememberCoroutineScope()
     var pendingSave by remember { mutableStateOf<DshSaveFileRequest?>(null) }
     val webViewHolder = remember { mutableStateOf<WebView?>(null) }
+
+    // Account-path reply probe: the page is only observed when the caller wired a sink and the switch
+    // is on. The gate owns every policy decision; the injected script only batches new text.
+    val latestOnAccountReply = rememberUpdatedState(onAccountReply)
+    val accountReplyGate = remember { DshReplyDomGate() }
+    val accountReplySilenceJob = remember { mutableStateOf<Job?>(null) }
+    val accountReplyActive = accountReplyProbeEnabled && onAccountReply != null
+
+    fun clearAccountReplySilence() {
+        accountReplySilenceJob.value?.cancel()
+        accountReplySilenceJob.value = null
+    }
+
+    fun handleAccountReplyProbe(text: String, control: String) {
+        if (!accountReplyActive) return
+        val sink = latestOnAccountReply.value ?: return
+        val parsed = dshParseReplyProbeControl(control)
+        val decision = accountReplyGate.observe(
+            DshReplyDomTick(
+                text = text,
+                nowMillis = System.currentTimeMillis(),
+                inputFocused = parsed.inputFocused,
+                pageReset = parsed.pageReset
+            )
+        )
+        if (decision is DshReplyDomDecision.Report) {
+            clearAccountReplySilence()
+            runCatching { sink(decision.text) }
+            return
+        }
+        if (text.isEmpty()) return
+        // Schedule exactly one silence resolution per growth burst; a later growth replaces it.
+        clearAccountReplySilence()
+        accountReplySilenceJob.value = scope.launch {
+            delay(DshReplyDomLimits.SILENCE_MILLIS)
+            val settled = accountReplyGate.observe(
+                DshReplyDomTick(nowMillis = System.currentTimeMillis())
+            )
+            if (settled is DshReplyDomDecision.Report) {
+                runCatching { sink(settled.text) }
+            }
+        }
+    }
 
     fun reportFirstFrameIfVisible(visible: Boolean) {
         if (visible) latestOnFirstFrameRendered.value(latestEpoch.value)
@@ -150,6 +205,9 @@ internal fun DshWebViewHost(
                 firstFrameGate.reset()
                 firstFrameGate.onPageStarted()
                 latestCallbacks.value.onPageStarted()
+                // A new document cannot carry the previous burst: drop the reply-probe accumulator.
+                clearAccountReplySilence()
+                accountReplyGate.reset()
                 // The WebView can report a real innerHeight while resolving viewport units
                 // against a zero-height initial containing block; see DshPageLayoutShim.
                 DshPageLayoutShim.apply(webViewHolder.value)
@@ -183,6 +241,11 @@ internal fun DshWebViewHost(
                     DshPageLayoutShim.apply(webViewHolder.value)
                     diagnostics.installErrorCapture(webViewHolder.value)
                     diagnostics.logProbe(webViewHolder.value)
+                    // Release-visible account-path reply probe: independent of the debug flag above.
+                    if (accountReplyActive) {
+                        accountReplyGate.reset()
+                        DshReplyDomObserver.inject(webViewHolder.value)
+                    }
                 }
             }
 
@@ -251,6 +314,11 @@ internal fun DshWebViewHost(
         // not part of this WebView; release it so a disposed host never leaks it.
         chromeClientHolder.value?.releaseRetainedAccountPopup()
         if (view == null || !disposedViews.add(view)) return
+        clearAccountReplySilence()
+        accountReplyGate.reset()
+        // Remove the reply-probe bridge before the view is destroyed: a live interface on a destroyed
+        // WebView is both a leak and a callback into post-destroy UI state.
+        DshReplyDomObserver.detach(view)
         controller.detach(view)
         runCatching { view.stopLoading() }
         runCatching { view.loadUrl("about:blank") }
@@ -352,6 +420,14 @@ internal fun DshWebViewHost(
             ).also { view ->
                 webViewHolder.value = view
                 controller.attach(view)
+                if (accountReplyActive) {
+                    // One bridge, two string parameters, no other capability. The callback arrives on
+                    // the WebView bridge thread, so hop to the view thread before touching gate state.
+                    DshReplyDomObserver.install(view) { text, control ->
+                        view.post { handleAccountReplyProbe(text, control) }
+                        Unit
+                    }
+                }
             }
         },
         update = { view -> view.setBackgroundColor(backgroundColor) },

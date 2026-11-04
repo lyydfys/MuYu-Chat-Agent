@@ -2,11 +2,15 @@
 
 package com.muyuchat.mca
 
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.util.Rational
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -38,11 +42,14 @@ import com.muyuchat.core.dsh.contract.console.DshScreenCaptureConsentCodes
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
+import com.muyuchat.mca.dsh.overlay.DshOverlayHost
 import com.muyuchat.mca.dsh.overlay.DshOverlayIntents
 import com.muyuchat.feature.agent.*
 import com.muyuchat.feature.agent.workspace.AgentWorkspaceRoute
 import com.muyuchat.feature.chat.*
 import com.muyuchat.feature.dsh.workspace.DshWorkspaceRoute
+import com.muyuchat.feature.dsh.workspace.ui.DshPipHost
+import com.muyuchat.feature.dsh.workspace.ui.DshPipPort
 import com.muyuchat.feature.video.workspace.VideoWorkspaceRoute
 import com.muyuchat.feature.modelhub.*
 import com.muyuchat.feature.settings.*
@@ -76,8 +83,36 @@ class MainActivity : ComponentActivity() {
     private var pendingWorldBookOwner: ContentImportOwner? = null
     private var pendingModelImportTextOnly: Boolean = false
 
+    /**
+     * Shrinks the DSH page into a system picture-in-picture window.
+     *
+     * Published through [DshPipHost] instead of a route parameter: the workspace module has no
+     * Activity, and threading a new argument through the whole route tree would collide with slices
+     * in flight. The console row only renders inside the DSH workspace, so the page that gets
+     * shrunk is always the DSH one.
+     */
+    private val pictureInPicturePort = object : DshPipPort {
+        override fun isAvailable(): Boolean =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+        override fun enterShrunken(): String? {
+            if (!isAvailable()) return "当前系统不支持画中画"
+            if (isInPictureInPictureMode) return null
+            return runCatching {
+                val params = PictureInPictureParams.Builder()
+                    .setAspectRatio(Rational(3, 4))
+                    .build()
+                if (enterPictureInPictureMode(params)) null else "系统拒绝了画中画请求"
+            }.getOrElse { error ->
+                "画中画启动失败：${error.javaClass.simpleName}"
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DshPipHost.port = pictureInPicturePort
         TtfdProbe.install(window.decorView)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         onBackPressedDispatcher.addCallback(
@@ -252,6 +287,13 @@ class MainActivity : ComponentActivity() {
         outState.putString("pending_knowledge_document_owner", pendingKnowledgeDocumentOwner?.toJsonString())
         outState.putBoolean("pending_model_import_text_only", pendingModelImportTextOnly)
         super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        // Drop the port only while this instance still owns it: a configuration change can create
+        // the replacement Activity before the old one is destroyed.
+        if (DshPipHost.port === pictureInPicturePort) DshPipHost.port = null
+        super.onDestroy()
     }
 
     private fun persistModelImportAccess(uris: List<android.net.Uri>): Boolean {
@@ -490,6 +532,8 @@ private fun McaApp(
                 onDismissStart = { if (appMenuOpen) appMenuOpen = true },
                 onDismiss = { onTab(AppTab.CHAT) }
             ) { pageModifier, closePage ->
+                // The overlay host is a process singleton keyed by application context.
+                val overlayContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
                 DshWorkspaceRoute(
                     client = viewModel.dshRuntimeClient,
                     firstFrameReporter = viewModel.dshFirstFrameReporter,
@@ -500,6 +544,15 @@ private fun McaApp(
                     accountLogin = viewModel.dshAccountLoginPort,
                     modelSwitch = viewModel.dshModelSwitch,
                     overlayPort = viewModel.dshOverlayPort,
+                    // Account-direct conversations never pass through the MCA gateway, so the page
+                    // text observer is the only signal that a reply finished. The gateway path keeps
+                    // priority: a DOM hit within one second of a gateway reply is dropped by the
+                    // de-duplicator inside the route.
+                    onAccountReply = { text ->
+                        DshOverlayHost.of(overlayContext).publishAccountReply(text)
+                    },
+                    accountReplyProbeEnabled = viewModel.dshOverlayPort.snapshot().accountReplyProbeEnabled,
+                    lastGatewayReplyAtMillis = { DshOverlayHost.of(overlayContext).lastGatewayReplyAtMillis },
                     modifier = pageModifier,
                     onExit = closePage
                 )

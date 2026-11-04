@@ -42,6 +42,7 @@ import com.muyuchat.feature.dsh.workspace.ui.DshOverlayPanel
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiPort
 import com.muyuchat.feature.dsh.workspace.ui.DshWorkspaceActions
 import com.muyuchat.feature.dsh.workspace.ui.DshWorkspaceScreen
+import com.muyuchat.feature.dsh.workspace.web.DshAccountReplyDeduper
 import com.muyuchat.feature.dsh.workspace.web.DshWebStorage
 import com.muyuchat.feature.dsh.workspace.web.DshWebViewController
 import com.muyuchat.feature.dsh.workspace.web.DshWebViewHost
@@ -95,7 +96,25 @@ fun DshWorkspaceRoute(
      * and the notices; the window service, the background keep-alive and the persistence stay in the
      * app module. Null keeps the ball without the two overlay entries.
      */
-    overlayPort: DshOverlayUiPort? = null
+    overlayPort: DshOverlayUiPort? = null,
+    /**
+     * Account-path reply sink.
+     *
+     * Non-null turns on the read-only DOM observer in the page (subject to
+     * [accountReplyProbeEnabled]) so a reply that the official account path renders directly — the MCA
+     * gateway never sees it — can raise the same overlay bubble. The app wires this to the same
+     * `onReply` entry it already uses for the gateway path; null keeps the probe completely off.
+     */
+    onAccountReply: ((String) -> Unit)? = null,
+    /** Persisted user switch for [onAccountReply]; false means no injection at all. */
+    accountReplyProbeEnabled: Boolean = true,
+    /**
+     * Timestamp of the last MCA-gateway reply, supplied by the app.
+     *
+     * A DOM report within [DshReplyDomLimits.GATEWAY_DEDUP_MILLIS] of that moment is dropped, so the two
+     * paths share one bubble instead of racing.
+     */
+    lastGatewayReplyAtMillis: (() -> Long?)? = null
 ) {
     val context = LocalContext.current
     val applicationContext = context.applicationContext
@@ -114,6 +133,8 @@ fun DshWorkspaceRoute(
     val popupCoordinator = remember { DshPopupCoordinator() }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    // Shared with the account-path reply probe: one bubble per reply, never a gateway+DOM double.
+    val accountReplyDeduper = remember { DshAccountReplyDeduper() }
     val latestOnExit = rememberUpdatedState(onExit)
     val latestOnOpenExternal = rememberUpdatedState(onOpenExternal)
     val latestExternalBrowserPort = rememberUpdatedState(externalBrowserPort)
@@ -286,6 +307,21 @@ fun DshWorkspaceRoute(
                         accountAuthMatcher = latestAccountAuthMatcher.value,
                         accountPopupHoldMillis = accountPopupHoldMillis,
                         accountLogin = latestAccountLogin.value,
+                        // Account-path replies pass the same dedup rule as the gateway path: a DOM
+                        // report within one second of a gateway reply is dropped.
+                        onAccountReply = onAccountReply?.let { sink ->
+                            { text: String ->
+                                if (accountReplyDeduper.accept(
+                                        text,
+                                        lastGatewayReplyAtMillis?.invoke()
+                                    )
+                                ) {
+                                    sink(text)
+                                }
+                                Unit
+                            }
+                        },
+                        accountReplyProbeEnabled = accountReplyProbeEnabled,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
