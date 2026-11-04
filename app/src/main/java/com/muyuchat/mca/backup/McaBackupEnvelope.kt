@@ -36,18 +36,33 @@ internal object McaBackupFormat {
  * of them is not a partial backup, it is an incompatible one, because a restore that silently keeps
  * a table from the old library is worse than refusing it.
  */
-internal enum class McaBackupTable(val wireId: String, val label: String) {
+internal enum class McaBackupTable(
+    val wireId: String,
+    val label: String,
+    /**
+     * Concrete SQLite table inside `mca.db`; null when this family is not stored in the database.
+     *
+     * `world_books` is a JSON file store and `settings` lives in the settings map, so neither can be
+     * restored by writing rows — the manifest and the UI say so instead of pretending otherwise.
+     */
+    val databaseTable: String? = wireId,
+    /** True only for families this backup can actually write back into `mca.db`. */
+    val restorable: Boolean = databaseTable != null
+) {
     CHAT_SESSIONS("chat_sessions", "对话"),
     CHAT_MESSAGES("chat_messages", "消息"),
     ASSISTANTS("assistants", "助手"),
-    WORLD_BOOKS("world_books", "世界书"),
+    WORLD_BOOKS("world_books", "世界书（文件存储，不在本备份范围）", databaseTable = null),
     KNOWLEDGE_BASES("knowledge_bases", "知识库"),
     KNOWLEDGE_DOCUMENTS("knowledge_documents", "知识库文档"),
-    SETTINGS("settings", "设置项");
+    SETTINGS("settings", "设置项", databaseTable = null);
 
     companion object {
         /** Every manifest must name exactly these families, once each. */
         val REQUIRED: List<McaBackupTable> = entries.toList()
+
+        /** Families a restore can write; the rest are reported as out of scope. */
+        val RESTORABLE: List<McaBackupTable> = entries.filter { it.restorable }
 
         fun fromWireId(raw: String): McaBackupTable? = entries.firstOrNull { it.wireId == raw }
     }
@@ -72,7 +87,12 @@ internal data class McaBackupEnvelope(
     val createdAtMillis: Long,
     val appVersionName: String,
     val tables: List<McaBackupTableCount>,
-    val settings: Map<String, String>
+    val settings: Map<String, String>,
+    /**
+     * Row payload. Empty means "manifest only" — the shape every backup written before the row
+     * export existed has, which still verifies but cannot be restored.
+     */
+    val payload: List<McaBackupTableRows> = emptyList()
 ) {
     /** Total rows the manifest accounts for; used by the UI and by the verifier's summary. */
     val totalRows: Int get() = tables.sumOf { it.rows }
@@ -102,6 +122,8 @@ internal data class McaBackupEnvelope(
             .put("appVersion", appVersionName)
             .put("tables", tableArray)
             .put("settings", settingsJson)
+            // Omitted entirely for a manifest-only backup, so old readers keep seeing the old shape.
+            .apply { if (payload.isNotEmpty()) put("payload", McaBackupRows.encode(payload)) }
             .toString(2)
     }
 }
@@ -183,13 +205,25 @@ internal fun decodeMcaBackupEnvelope(raw: String): McaBackupDecodeResult {
             else -> value.toString()
         }
     }
+    // Absent for manifest-only backups (and for every file written before row export existed).
+    // A payload that is present but structurally broken is a corrupt file, not an old one.
+    val payload = when {
+        !root.has("payload") -> emptyList()
+        root.isNull("payload") -> emptyList()
+        else -> McaBackupRows.decode(root.optJSONArray("payload"))
+            ?: return McaBackupDecodeResult.Malformed(
+                McaBackupRejection.PAYLOAD_MISSING,
+                "备份中的行数据无法解析"
+            )
+    }
     return McaBackupDecodeResult.Decoded(
         McaBackupEnvelope(
             version = version,
             createdAtMillis = createdAt,
             appVersionName = appVersion,
             tables = tables,
-            settings = settings
+            settings = settings,
+            payload = payload
         )
     )
 }
@@ -203,10 +237,13 @@ internal enum class McaBackupRejection(val message: String) {
     TABLE_UNKNOWN("备份包含未知的数据表"),
     TABLE_DUPLICATE("备份重复声明了数据表"),
     ROW_COUNT_INVALID("备份的行数不合法"),
+    ROW_COUNT_MISMATCH("备份的清单与行数据不一致"),
     TIMESTAMP_INVALID("备份的时间戳不合法"),
     SENSITIVE_SETTING("备份包含敏感设置项"),
     SETTING_LIMIT_EXCEEDED("备份的设置项过多"),
-    ENVELOPE_INCOMPATIBLE("备份与当前版本不兼容")
+    ENVELOPE_INCOMPATIBLE("备份与当前版本不兼容"),
+    PAYLOAD_MISSING("备份包没有可恢复的行数据"),
+    CELL_TOO_LARGE("备份包含过大的单元格")
 }
 
 /**

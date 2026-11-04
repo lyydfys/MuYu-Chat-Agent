@@ -181,6 +181,22 @@ class KnowledgeBaseStore(context: Context) {
             }
             topCandidates
         }
+        // Read the names once, on the same IO dispatcher, so a trace can keep naming the base and
+        // the document after they are deleted. Empty maps are safe: the source keeps null names and
+        // the panel falls back to its readable placeholder.
+        val sourceNames = runBlocking(Dispatchers.IO) {
+            val bases = runCatching {
+                database.chatSessionDao().knowledgeBaseRecords().associate { it.id to it.name }
+            }.getOrDefault(emptyMap())
+            val documents = runCatching {
+                boundedKnowledgeBaseIds
+                    .flatMap { baseId -> database.chatSessionDao().knowledgeDocumentRecords(baseId) }
+                    .associate { it.id to it.title }
+            }.getOrDefault(emptyMap())
+            bases to documents
+        }
+        val baseNames = sourceNames.first
+        val documentNames = sourceNames.second
         var used = 0
         val selected = mutableListOf<KnowledgeChunkRecord>()
         val skipped = mutableListOf<String>()
@@ -206,13 +222,17 @@ class KnowledgeBaseStore(context: Context) {
             estimatedTokens = used,
             skippedChunkIds = skipped,
             selectedSources = ranked.filter { it.chunk.id in selectedIds }
-                .map { candidate -> candidate.toSource("lexical_match") },
+                .map { candidate -> candidate.toSource("lexical_match", baseNames, documentNames) },
             skippedSources = ranked.filter { it.chunk.id in skippedIds }
-                .map { candidate -> candidate.toSource("budget_or_limit") }
+                .map { candidate -> candidate.toSource("budget_or_limit", baseNames, documentNames) }
         )
     }
 
-    private fun KnowledgeLexicalRetriever.RankedChunk.toSource(reason: String): KnowledgeSource =
+    private fun KnowledgeLexicalRetriever.RankedChunk.toSource(
+        reason: String,
+        baseNames: Map<String, String>,
+        documentNames: Map<String, String>
+    ): KnowledgeSource =
         KnowledgeSource(
             knowledgeBaseId = chunk.knowledgeBaseId,
             documentId = chunk.documentId,
@@ -220,7 +240,9 @@ class KnowledgeBaseStore(context: Context) {
             excerpt = chunk.content,
             lexicalScore = score,
             estimatedTokens = chunk.estimatedTokens.coerceAtLeast(1),
-            reason = reason
+            reason = reason,
+            baseName = baseNames[chunk.knowledgeBaseId]?.takeIf { it.isNotBlank() },
+            documentName = documentNames[chunk.documentId]?.takeIf { it.isNotBlank() }
         )
 
     fun markEmbeddingModel(knowledgeBaseId: String, fingerprint: String?) {

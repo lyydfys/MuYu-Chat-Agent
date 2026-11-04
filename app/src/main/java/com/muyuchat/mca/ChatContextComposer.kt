@@ -59,11 +59,16 @@ data class ContextAssemblyTrace(
     private fun knowledgeJson(sources: List<KnowledgeSource>, budget: TraceStorageBudget): JSONArray = JSONArray().apply {
         sources.take(64).forEach { source ->
             if (source.knowledgeBaseId.length <= 512 && source.documentId.length <= 512 && source.chunkId.length <= 512) {
-                budget.append(this, source.excerpt, JSONObject()
+                val json = JSONObject()
                     .put("knowledgeBaseId", source.knowledgeBaseId).put("documentId", source.documentId)
                     .put("chunkId", source.chunkId)
                     .put("lexicalScore", source.lexicalScore).put("estimatedTokens", source.estimatedTokens)
-                    .put("reason", source.reason.take(256)))
+                    .put("reason", source.reason.take(256))
+                // Persisted like the world-book name: the panel names the base and the document, and
+                // keeps naming them after either was deleted. Omitted (never JSON null) when unknown.
+                boundedTraceName(source.baseName)?.let { json.put("knowledgeBaseName", it) }
+                boundedTraceName(source.documentName)?.let { json.put("documentName", it) }
+                budget.append(this, source.excerpt, json)
             }
         }
     }

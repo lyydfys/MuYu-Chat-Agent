@@ -125,10 +125,123 @@ class ContextTraceOwnerLabelTest {
         assertEquals("entry-1", withoutName?.selectedWorldBooks?.single()?.sourceId)
     }
 
+    @Test
+    fun `a knowledge base uses its recorded name and the document title in the detail`() {
+        val source = knowledgeSource(
+            ownerId = "kh-1",
+            documentId = "doc-1234567890",
+            chunkId = "chunk-abcdef123456",
+            baseName = "项目资料库",
+            documentName = "部署说明.md"
+        )
+
+        val label = contextTraceOwnerLabel(source, isKnowledge = true, names = liveNames())
+
+        assertEquals("项目资料库", label.title)
+        assertTrue(label.detail, label.detail.contains("文档 部署说明.md"))
+        assertFalse(
+            "the document id must not be printed when a title exists",
+            label.detail.contains("doc-1234567890")
+        )
+        assertTrue(label.detail, label.detail.contains("知识块 #"))
+    }
+
+    @Test
+    fun `a deleted knowledge base still shows its recorded name instead of its uuid`() {
+        val source = knowledgeSource(
+            ownerId = "deleted-base-id",
+            documentId = "doc-1",
+            chunkId = "chunk-1",
+            baseName = "旧资料库",
+            documentName = "旧文档.md"
+        )
+
+        val label = contextTraceOwnerLabel(source, isKnowledge = true, names = liveNames())
+
+        assertEquals("旧资料库（已不在当前资料库）", label.title)
+        assertFalse(label.title.contains("deleted-base-id"))
+        assertTrue(label.detail, label.detail.contains("旧文档.md"))
+    }
+
+    @Test
+    fun `an old knowledge trace without names falls back to the live base`() {
+        val source = knowledgeSource(
+            ownerId = "kh-1",
+            documentId = "doc-1234567890",
+            chunkId = "chunk-abcdef123456",
+            baseName = null,
+            documentName = null
+        )
+
+        val label = contextTraceOwnerLabel(source, isKnowledge = true, names = liveNames())
+
+        assertEquals("项目资料库", label.title)
+        assertFalse("a live hit is not 'gone'", label.title.contains("已不在"))
+        assertTrue("no document title recorded, so a short id stands in", label.detail.contains("文档 #"))
+    }
+
+    @Test
+    fun `without any library a knowledge base is not marked gone`() {
+        val withRecordedName = knowledgeSource(
+            ownerId = "unknown-base",
+            documentId = "doc-9",
+            chunkId = "chunk-9",
+            baseName = "只存在于记录里的资料库",
+            documentName = null
+        )
+        val withoutName = knowledgeSource(
+            ownerId = "unknown-base",
+            documentId = "doc-9",
+            chunkId = "chunk-9",
+            baseName = null,
+            documentName = null
+        )
+
+        assertEquals(
+            "只存在于记录里的资料库",
+            contextTraceOwnerLabel(withRecordedName, isKnowledge = true, names = ContextTraceLibraryNames()).title
+        )
+        assertEquals(
+            "未命名知识库",
+            contextTraceOwnerLabel(withoutName, isKnowledge = true, names = ContextTraceLibraryNames()).title
+        )
+    }
+
+    @Test
+    fun `the parser reads recorded knowledge names and tolerates traces without them`() {
+        val withNames = parseContextAssemblyTrace(knowledgeTraceJson("项目资料库", "部署说明.md"))
+        val withoutNames = parseContextAssemblyTrace(knowledgeTraceJson(null, null))
+
+        val parsedWith = withNames?.selectedKnowledge?.single()
+        val parsedWithout = withoutNames?.selectedKnowledge?.single()
+
+        assertEquals("项目资料库", parsedWith?.ownerName)
+        assertEquals("部署说明.md", parsedWith?.documentName)
+        assertNull(parsedWithout?.ownerName)
+        assertNull(parsedWithout?.documentName)
+        // Both traces still parse; only the optional names differ.
+        assertEquals("chunk-1", parsedWithout?.sourceId)
+    }
+
     private fun liveNames() = ContextTraceLibraryNames(
         worldBookNames = liveWorldBook,
         knowledgeBaseNames = liveKnowledgeBase
     )
+
+    private fun knowledgeTraceJson(baseName: String?, documentName: String?): String {
+        val nameFields = buildString {
+            if (baseName != null) append(",\"knowledgeBaseName\":\"").append(baseName).append('"')
+            if (documentName != null) append(",\"documentName\":\"").append(documentName).append('"')
+        }
+        return "{" +
+            "\"schemaVersion\":1,\"retrievalType\":\"lexical\"," +
+            "\"rolePromptHash\":\"hash-role\",\"assembledHash\":\"hash-context\",\"tokenBudget\":1024," +
+            "\"selectedWorldBookSources\":[],\"skippedWorldBookSources\":[]," +
+            "\"selectedKnowledgeSources\":[{\"knowledgeBaseId\":\"kh-1\",\"documentId\":\"doc-1\"," +
+            "\"chunkId\":\"chunk-1\",\"excerpt\":\"部署说明\",\"lexicalScore\":3,\"estimatedTokens\":12," +
+            "\"reason\":\"lexical_match\"" + nameFields + "}]," +
+            "\"skippedKnowledgeSources\":[],\"omittedSourceCount\":0}"
+    }
 
     private fun worldSource(ownerId: String, ownerName: String?) = ContextTraceSource(
         sourceId = "entry-958c34f0-0000-0000-0000-000000000001",
@@ -140,14 +253,22 @@ class ContextTraceOwnerLabelTest {
         ownerName = ownerName
     )
 
-    private fun knowledgeSource(ownerId: String, documentId: String, chunkId: String) = ContextTraceSource(
+    private fun knowledgeSource(
+        ownerId: String,
+        documentId: String,
+        chunkId: String,
+        baseName: String? = null,
+        documentName: String? = null
+    ) = ContextTraceSource(
         sourceId = chunkId,
         ownerId = ownerId,
         scope = documentId,
         excerpt = "第三章 部署说明",
         estimatedTokens = 12,
         reason = "lexical_match",
-        lexicalScore = 3
+        lexicalScore = 3,
+        ownerName = baseName,
+        documentName = documentName
     )
 
     private fun traceJson(bookName: String?): String {

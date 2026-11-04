@@ -77,7 +77,14 @@ data class KnowledgeSource(
     val excerpt: String,
     val lexicalScore: Int,
     val estimatedTokens: Int,
-    val reason: String
+    val reason: String,
+    /**
+     * Names at selection time, persisted in the context trace so the "上下文来源" panel shows
+     * "项目资料库 · 部署说明" instead of two UUIDs — and still does after the base or the document
+     * was deleted, which a live lookup alone could not.
+     */
+    val baseName: String? = null,
+    val documentName: String? = null
 )
 
 internal data class PreparedKnowledgeDocument(

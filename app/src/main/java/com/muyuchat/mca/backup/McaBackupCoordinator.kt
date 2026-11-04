@@ -28,7 +28,11 @@ internal class McaBackupCoordinator(
     private val snapshot: () -> MainUiState,
     private val appVersionName: String,
     private val showStatus: (String) -> Unit,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    /** Row reader for export; null keeps the manifest-only behaviour. */
+    private val rowSource: () -> McaBackupRowSource? = { null },
+    /** Restore target over the live database; null means restore is unavailable. */
+    private val restoreTarget: () -> McaBackupRestoreTarget? = { null }
 ) {
     companion object {
         /** Suggested SAF file name; also used by the Activity when it opens the create dialog. */
@@ -39,30 +43,52 @@ internal class McaBackupCoordinator(
         private const val LOCAL_FILE = "last-verified-backup.json"
     }
 
-    /** Builds the envelope from the current read-only state. Counts only; no row bodies. */
+    /**
+     * Builds the envelope from the current state.
+     *
+     * With a [rowSource] the database-backed families carry their rows and their manifest counts come
+     * from what was actually read; world books (a file store) and settings stay out of the payload and
+     * are reported as out of scope.
+     */
     fun buildEnvelope(): McaBackupEnvelope {
         val state = snapshot()
         val settings = settingsSnapshot(state)
+        val payload = rowSource()?.let(::readPayload).orEmpty()
+        val counts = McaBackupTable.REQUIRED.map { table ->
+            when {
+                table.restorable && payload.isNotEmpty() ->
+                    payload.firstOrNull { it.table == table }?.rowCount ?: 0
+                table == McaBackupTable.CHAT_SESSIONS -> state.chatSessions.size
+                table == McaBackupTable.CHAT_MESSAGES -> state.chatSessions.sumOf { it.messages.size }
+                table == McaBackupTable.ASSISTANTS -> state.assistants.size
+                table == McaBackupTable.WORLD_BOOKS -> state.worldBooks.size
+                table == McaBackupTable.KNOWLEDGE_BASES -> state.knowledgeBases.size
+                table == McaBackupTable.KNOWLEDGE_DOCUMENTS -> state.knowledgeDocumentCounts.values.sum()
+                else -> settings.size
+            }
+        }
         return McaBackupEnvelope(
             createdAtMillis = clock(),
             appVersionName = appVersionName,
-            tables = listOf(
-                McaBackupTableCount(McaBackupTable.CHAT_SESSIONS, state.chatSessions.size),
-                McaBackupTableCount(McaBackupTable.CHAT_MESSAGES, state.chatSessions.sumOf { it.messages.size }),
-                McaBackupTableCount(McaBackupTable.ASSISTANTS, state.assistants.size),
-                McaBackupTableCount(McaBackupTable.WORLD_BOOKS, state.worldBooks.size),
-                McaBackupTableCount(McaBackupTable.KNOWLEDGE_BASES, state.knowledgeBases.size),
-                McaBackupTableCount(
-                    McaBackupTable.KNOWLEDGE_DOCUMENTS,
-                    state.knowledgeDocumentCounts.values.sum()
-                ),
-                McaBackupTableCount(McaBackupTable.SETTINGS, settings.size)
-            ),
-            settings = settings
+            tables = McaBackupTable.REQUIRED.mapIndexed { index, table ->
+                McaBackupTableCount(table, counts[index])
+            },
+            settings = settings,
+            payload = payload
         )
     }
 
-    /** Writes a self-verified manifest to [uri] (SAF). Never touches the app's data files. */
+    /** Reads every restorable table; a failing table is omitted rather than silently emptied. */
+    private fun readPayload(source: McaBackupRowSource): List<McaBackupTableRows> =
+        McaBackupTable.RESTORABLE.mapNotNull { table ->
+            val dbTable = table.databaseTable ?: return@mapNotNull null
+            runCatching {
+                val raw = source.readTable(dbTable)
+                McaBackupRows.build(table, raw.columns, raw.rows)
+            }.getOrNull()
+        }
+
+    /** Writes a self-verified backup (rows when available) to [uri] through SAF. */
     fun exportBackup(uri: Uri, scope: CoroutineScope, fail: (String) -> Unit) {
         scope.launch(Dispatchers.IO) {
             runCatching {
@@ -82,13 +108,90 @@ internal class McaBackupCoordinator(
                 stream.use { it.write(payload) }
                 envelope
             }.onSuccess { envelope ->
+                val rows = envelope.payload.sumOf { it.rowCount }
+                val redacted = envelope.payload.sumOf { it.redactedColumns.size }
                 showStatus(
-                    "备份已导出：${envelope.totalRows} 行 / ${envelope.tables.size} 张表（不含聊天正文与凭据）"
+                    buildString {
+                        append("备份已导出：")
+                        if (envelope.payload.isEmpty()) {
+                            append("${envelope.totalRows} 行清单")
+                        } else {
+                            append("$rows 行 / ${envelope.payload.size} 张表")
+                        }
+                        if (redacted > 0) append("，剔除 $redacted 个敏感列")
+                        append("；世界书与助手卡为文件存储，不在本备份范围")
+                    }
                 )
             }.onFailure { error ->
                 fail("备份导出失败：${error.message ?: error.javaClass.simpleName}")
             }
         }
+    }
+
+    /**
+     * Restores a picked backup into the live database inside one transaction.
+     *
+     * Blocking on purpose: the caller already runs on IO. Returns null on success, otherwise the
+     * reason sentence. A "restore-before" snapshot of the current rows is written next to the last
+     * export first — it is a human fallback only, never part of the rollback decision.
+     */
+    fun restoreBackup(uri: Uri): String? = runCatching {
+        val target = restoreTarget()
+            ?: return@runCatching "当前版本未接入数据库恢复目标，无法恢复"
+        val stream = application.contentResolver.openInputStream(uri)
+            ?: return@runCatching "无法读取所选文件。"
+        val raw = stream.use { it.readBackupText() }
+            ?: return@runCatching "备份文件超过 ${McaBackupFormat.MAX_TEXT_BYTES / 1024 / 1024} MB 上限。"
+        val envelope = when (val decoded = decodeMcaBackupEnvelope(raw)) {
+            is McaBackupDecodeResult.Malformed -> return@runCatching decoded.reason
+            is McaBackupDecodeResult.Decoded -> decoded.envelope
+        }
+        when (val verification = McaBackupVerify.verify(envelope)) {
+            is McaBackupVerification.Incompatible -> return@runCatching McaBackupVerify.describe(verification)
+            is McaBackupVerification.Compatible -> Unit
+        }
+        val plan = when (val planned = McaBackupRows.plan(envelope, envelope.payload)) {
+            is McaBackupPayloadPlan.Rejected -> return@runCatching planned.reason
+            is McaBackupPayloadPlan.Ready -> planned
+        }
+        val result = McaBackupRestoreEngine(target) { writeRestoreSnapshot() }.restore(plan)
+        when (result) {
+            is McaDatabaseRestoreResult.Restored -> {
+                showStatus(
+                    "已恢复：${result.tables} 张表 / ${result.rows} 行" +
+                        (result.snapshot?.let { "；$it" } ?: "")
+                )
+                null
+            }
+
+            is McaDatabaseRestoreResult.Failed -> {
+                val message = "恢复失败：${result.failure.message}（${result.failure.code}）：${result.detail}"
+                showStatus(message)
+                message
+            }
+        }
+    }.getOrElse { error -> "恢复失败：${error.message ?: error.javaClass.simpleName}" }
+
+    /** Best-effort copy of the current rows before a restore; a failure is only a lost fallback. */
+    private fun writeRestoreSnapshot(): String? {
+        val source = rowSource() ?: return null
+        val payload = readPayload(source)
+        if (payload.isEmpty()) return null
+        val envelope = McaBackupEnvelope(
+            createdAtMillis = clock(),
+            appVersionName = appVersionName,
+            tables = McaBackupTable.REQUIRED.map { table ->
+                McaBackupTableCount(table, payload.firstOrNull { it.table == table }?.rowCount ?: 0)
+            },
+            settings = emptyMap(),
+            payload = payload
+        )
+        val file = File(File(application.cacheDir, LOCAL_DIR), "restore-snapshot-${clock()}.json")
+        val written = McaBackupStaging.publishVerified(
+            file = file,
+            payload = envelope.toJson().toByteArray(Charsets.UTF_8)
+        ) { staged -> decodeMcaBackupEnvelope(staged.readBackupText().orEmpty()) is McaBackupDecodeResult.Decoded }
+        return if (written.succeeded) "已先备份当前数据到 cache/$LOCAL_DIR/${file.name}" else null
     }
 
     /**

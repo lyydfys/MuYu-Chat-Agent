@@ -38,13 +38,19 @@ internal data class ContextTraceSource(
     val excerptTruncated: Boolean = false,
     val excerptSha256: String? = null,
     /**
-     * Book name recorded when the trace was written (world books only).
+     * Owner name recorded when the trace was written: the world-book name for lore sources, the
+     * knowledge-base name for knowledge sources.
      *
-     * This is what lets the panel name a book even after it was deleted: the persisted name is the
-     * only fact left. Old traces have no name and fall back to the live library lookup, then to a
-     * readable placeholder — never to the raw id.
+     * This is what lets the panel name the source even after it was deleted: the persisted name is
+     * the only fact left. Old traces have no name and fall back to the live library lookup, then to
+     * a readable placeholder — never to the raw id.
      */
-    val ownerName: String? = null
+    val ownerName: String? = null,
+    /**
+     * Document title recorded with a knowledge source, so the detail line can print the file name
+     * instead of a document id even when the document no longer exists.
+     */
+    val documentName: String? = null
 )
 
 /**
@@ -126,7 +132,11 @@ internal fun parseContextAssemblyTrace(raw: String?): ContextTraceDetail? {
                     reason = source.traceText("reason"),
                     lexicalScore = source.traceCount("lexicalScore"),
                     excerptTruncated = source.optBoolean("excerptTruncated", false),
-                    excerptSha256 = source.optString("excerptSha256").takeIf(String::isNotBlank)
+                    excerptSha256 = source.optString("excerptSha256").takeIf(String::isNotBlank),
+                    // Recorded names win so a deleted base/document still reads by name; absent in
+                    // traces written before the names were persisted.
+                    ownerName = source.optString("knowledgeBaseName").takeIf(String::isNotBlank),
+                    documentName = source.optString("documentName").takeIf(String::isNotBlank)
                 )
             }
         }
@@ -174,7 +184,8 @@ internal fun contextTraceOwnerLabel(
         else -> "未命名$kind"
     }
     val detail = if (isKnowledge) {
-        "知识库 · 文档 ${shortTraceId(source.scope)} · 知识块 ${shortTraceId(source.sourceId)}"
+        val documentLabel = source.documentName?.takeIf { it.isNotBlank() } ?: shortTraceId(source.scope)
+        "知识库 · 文档 $documentLabel · 知识块 ${shortTraceId(source.sourceId)}"
     } else {
         "世界书 · 范围：${contextTraceScopeLabel(source.scope)} · 条目 ${shortTraceId(source.sourceId)}"
     }
