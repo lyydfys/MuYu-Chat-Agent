@@ -111,6 +111,8 @@ internal fun MessageBubble(
      * cannot supply names still renders recorded names (or a readable placeholder), never a UUID.
      */
     contextTraceNames: ContextTraceLibraryNames = ContextTraceLibraryNames(),
+    /** 安全富文本块渲染开关（设置层提供；默认关闭保持既有 Markdown 外观）。 */
+    richBlocksEnabled: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val clipboard = LocalClipboard.current
@@ -173,6 +175,7 @@ internal fun MessageBubble(
                 readOnly = readOnly,
                 browserSessionId = browserSessionId,
                 characterCardHtml = characterCardHtml,
+                richBlocksEnabled = richBlocksEnabled,
                 onOpenBrowserTask = onOpenBrowserTask,
                 generatedImageRequest = generatedImageRequest,
                 generatedImageJob = generatedImageJob,

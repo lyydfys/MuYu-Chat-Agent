@@ -52,6 +52,7 @@ internal object MainUiBootstrapFactory {
         val initialDeviceProfile = deviceProfileReader.read()
         val initialPersistentPrefixCacheEnabled = GenerationPreferences.loadPersistentPrefixCacheEnabled(application)
         val initialChatLocalToolsEnabled = GenerationPreferences.loadChatLocalToolsEnabled(application)
+        val initialRichBlocksEnabled = GenerationPreferences.loadRichBlocksEnabled(application)
         val initialAssistantMemories = initialAssistants.flatMap { assistant ->
             chatSessionStore.loadMemories(assistant.id)
         }
@@ -187,6 +188,7 @@ internal object MainUiBootstrapFactory {
             webSearchDiagnostics = initialWebSearchDiagnostics,
             persistentPrefixCacheEnabled = initialPersistentPrefixCacheEnabled,
             chatLocalToolsEnabled = initialChatLocalToolsEnabled,
+            richBlocksEnabled = initialRichBlocksEnabled,
             contextCompressionThresholdPercent = ContextCompressionCoordinator.loadThreshold(contextCompressionPreferences).percent,
             contextSummaryModelSelection = ContextCompressionCoordinator.loadSummaryModelSelection(contextCompressionPreferences),
             appUpdate = initialAppUpdateState

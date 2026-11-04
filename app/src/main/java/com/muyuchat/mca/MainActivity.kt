@@ -175,10 +175,11 @@ class MainActivity : ComponentActivity() {
         val backupExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
             if (uri != null) startup.whenReady { it.exportBackup(uri) }
         }
-        // Read-only verification of a picked backup. It reports compatibility and never replaces the
-        // current library, so binding it to the Activity is safe before a restore path exists.
+        // Restore of a picked backup. The settings card shows a destructive confirmation before this
+        // launcher opens; the restore itself runs inside one database transaction and rolls back on
+        // any failure, so binding it to the Activity needs no extra state here.
         val backupPreviewLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) startup.whenReady { it.previewBackupRestore(uri) }
+            if (uri != null) startup.whenReady { it.restoreBackup(uri) }
         }
         val chatExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
             val sId = pendingChatExportSessionId
@@ -770,6 +771,7 @@ private fun McaApp(
                     onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled,
                     onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
                     onChatLocalToolsEnabledChanged = viewModel::setChatLocalToolsEnabled,
+                    onRichBlocksEnabledChanged = { enabled -> viewModel.setRichBlocksEnabled(enabled) },
                     offlineTranslationStatus = state.offlineTranslationStatus,
                     offlineTranslationInstalled = state.offlineTranslationInstalled,
                     offlineTranslationInstalling = state.offlineTranslationInstalling,

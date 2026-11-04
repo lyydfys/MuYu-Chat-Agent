@@ -243,6 +243,7 @@ internal fun ChatMessageListSection(
                     readOnly = state.conversationReadOnly,
                     browserSessionId = state.activeConversationId,
                     characterCardHtml = characterCardHtml,
+                    richBlocksEnabled = state.richBlocksEnabled,
                     contextTraceNames = contextTraceLibraryNames,
                     onOpenBrowserTask = onOpenBrowserTask,
                     generatedImageRequest = generatedImageRequest,

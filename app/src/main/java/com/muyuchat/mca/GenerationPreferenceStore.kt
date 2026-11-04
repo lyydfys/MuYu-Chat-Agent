@@ -37,6 +37,7 @@ internal object GenerationPreferences {
     internal const val GENERATION_PARAMETERS_PREFERENCES = "mca_generation_params"
     internal const val PERSISTENT_PREFIX_CACHE_ENABLED_KEY = "persistent_prefix_cache_enabled"
     internal const val CHAT_LOCAL_TOOLS_ENABLED_KEY = "chat_local_tools_enabled"
+internal const val RICH_BLOCKS_ENABLED_KEY = "chat_rich_blocks_enabled"
 
     private const val KEY_API_KEY = "api_key"
     private const val KEY_API_ENABLED = "api_enabled"
@@ -166,6 +167,23 @@ internal object GenerationPreferences {
         generationPreferences(context)
             .edit()
             .putBoolean(CHAT_LOCAL_TOOLS_ENABLED_KEY, enabled)
+            .apply()
+    }
+
+    /**
+     * Structured display of Tavern-style HTML blocks (`<details>`, `<status>`, `<StatusBlock>`).
+     *
+     * **Defaults to true**: a preset that emits those blocks currently shows raw tags, which is worse
+     * than the sanitized structure. The renderer keeps a per-message "查看原文" fallback, and scripts
+     * are never executed, so the default is safe for existing installs too.
+     */
+    fun loadRichBlocksEnabled(context: Context): Boolean =
+        generationPreferences(context).getBoolean(RICH_BLOCKS_ENABLED_KEY, true)
+
+    fun persistRichBlocksEnabled(context: Context, enabled: Boolean) {
+        generationPreferences(context)
+            .edit()
+            .putBoolean(RICH_BLOCKS_ENABLED_KEY, enabled)
             .apply()
     }
 

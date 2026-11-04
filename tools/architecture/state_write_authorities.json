@@ -538,6 +538,7 @@
   ],
   "ChatToolSettingsFields": [
     "chatLocalToolsEnabled",
+    "richBlocksEnabled",
     "statusMessage"
   ]
 }

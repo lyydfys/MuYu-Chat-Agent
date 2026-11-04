@@ -116,6 +116,8 @@ data class SettingsUiState(
     val persistentPrefixCacheEnabled: Boolean = true,
     /** Chat turns may offer the prompted local tools (device clock / arithmetic / dice). */
     val chatLocalToolsEnabled: Boolean = true,
+    /** Assistant messages may render safe rich blocks (`<details>`/`<status>`/`<StatusBlock>`). */
+    val richBlocksEnabled: Boolean = true,
     /** Whole-percent reuse rate across observed turns; null when nothing was observed yet. */
     val prefixCacheHitRatePercent: Int? = null,
     val prefixCacheAttempts: Long = 0L,
@@ -285,6 +287,7 @@ fun SettingsHubScreen(
     onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
     onClearPersistentPrefixCache: () -> Unit,
     onChatLocalToolsEnabledChanged: (Boolean) -> Unit = {},
+    onRichBlocksEnabledChanged: (Boolean) -> Unit = {},
     offlineTranslationStatus: String = "未安装",
     offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
@@ -411,6 +414,7 @@ fun SettingsHubScreen(
                         SettingsSection.EXPERIMENTS -> ExperimentsScreen(
                             state = state,
                             onChatLocalToolsEnabledChanged = onChatLocalToolsEnabledChanged,
+                            onRichBlocksEnabledChanged = onRichBlocksEnabledChanged,
                             modifier = Modifier.fillMaxSize()
                         )
                         SettingsSection.ABOUT -> SettingsAboutScreen(

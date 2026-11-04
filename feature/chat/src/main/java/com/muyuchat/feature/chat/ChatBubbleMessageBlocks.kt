@@ -141,7 +141,12 @@ internal fun AssistantMessageBlock(
     onCopy: () -> Unit,
     copied: Boolean = false,
     /** Live library names for the trace panel; the trace's own recorded names win over these. */
-    contextTraceNames: ContextTraceLibraryNames = ContextTraceLibraryNames()
+    contextTraceNames: ContextTraceLibraryNames = ContextTraceLibraryNames(),
+    /**
+     * 安全富文本块开关：由 `ChatUiState.richBlocksEnabled`（设置层投影）提供。
+     * 默认 false，既有 Markdown/角色卡预览路径完全不变。
+     */
+    richBlocksEnabled: Boolean = false
 ) {
     val richTextIdentity = ChatMessageIdentity(browserSessionId, message.id)
     val streamedContent = rememberSmoothedStreamingText(
@@ -180,6 +185,20 @@ internal fun AssistantMessageBlock(
     val visibleHtmlPreview = currentProjection?.preview?.takeIf { htmlCandidate }
     val visibleHtmlBlocks = currentProjection?.blocks?.takeIf { htmlCandidate }
     val previewPending = htmlCandidate && currentProjection?.source != message.content && visibleHtmlPreview == null
+    // 富文本块只在生成结束后解析：流式半截标签不该反复切换布局；关闭时完全不进入该路径。
+    val richBlocksActive = richBlocksEnabled && !isGenerating
+    val richProjection by produceState<RichBlockResult?>(
+        initialValue = null,
+        key1 = message.id,
+        key2 = message.content,
+        key3 = richBlocksActive,
+    ) {
+        value = if (richBlocksActive && message.content.isNotBlank()) {
+            withContext(Dispatchers.Default) { sanitizeRichBlocks(message.content) }
+        } else {
+            null
+        }
+    }
     var showHtmlSource by remember(message.id) { mutableStateOf(false) }
     Surface(
         color = Color.Transparent,
@@ -236,7 +255,36 @@ internal fun AssistantMessageBlock(
                     Spacer(modifier = Modifier.height(18.dp))
                 }
             } else if (message.content.isNotBlank() && generatedImageRequest == null) {
-                if (visibleHtmlPreview != null) {
+                val richResult = richProjection
+                if (richBlocksActive && richResult != null && richResult.detected) {
+                    var showRichSource by remember(message.id) { mutableStateOf(false) }
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            McaButton(style = McaButtonStyle.Text, onClick = { showRichSource = !showRichSource }) {
+                                Text(if (showRichSource) "返回预览" else "查看原文")
+                            }
+                        }
+                        SelectionContainer {
+                            when {
+                                showRichSource -> PagedAssistantRichText(
+                                    message.content,
+                                    contentIdentity = richTextIdentity
+                                )
+
+                                richResult.blocks.isEmpty() -> Text(
+                                    "该消息只包含不可显示的 HTML 内容",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+
+                                else -> RichBlockView(
+                                    blocks = richResult.blocks,
+                                    truncated = richResult.truncated,
+                                )
+                            }
+                        }
+                    }
+                } else if (visibleHtmlPreview != null) {
                     Column {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                             McaButton(style = McaButtonStyle.Text,onClick = { showHtmlSource = !showHtmlSource }) {

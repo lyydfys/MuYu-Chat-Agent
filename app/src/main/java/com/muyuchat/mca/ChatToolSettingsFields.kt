@@ -31,6 +31,7 @@ import com.muyuchat.feature.agent.AgentCandidateProgress
 data class ChatToolSettingsFields(
     override val snapshot: MainUiState,
     val chatLocalToolsEnabled: Boolean = snapshot.chatLocalToolsEnabled,
+    val richBlocksEnabled: Boolean = snapshot.richBlocksEnabled,
     val statusMessage: String? = snapshot.statusMessage,
 ) : UiStateFields
 
@@ -38,5 +39,6 @@ fun MainUiState.toChatToolSettingsFields(): ChatToolSettingsFields = ChatToolSet
 
 fun ChatToolSettingsFields.mergeInto(current: MainUiState): MainUiState = current.copy(
     chatLocalToolsEnabled = chatLocalToolsEnabled,
+    richBlocksEnabled = richBlocksEnabled,
     statusMessage = statusMessage,
 )

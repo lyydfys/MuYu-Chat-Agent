@@ -194,6 +194,7 @@ private fun BackupRestoreCard(
     onPreviewBackupRestore: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var confirmingRestore by remember { mutableStateOf(false) }
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -203,11 +204,11 @@ private fun BackupRestoreCard(
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("备份与恢复", fontWeight = FontWeight.Bold)
             Text(
-                "导出备份包：包含备份格式版本、导出时间、应用版本、六张数据表的行数与非敏感设置（温度、上下文、性能模式等）。",
+                "导出备份包：包含格式版本、导出时间、应用版本、五张数据库表的行数据（凭据列会被剔除并记录）与非敏感设置。",
                 style = MaterialTheme.typography.bodySmall
             )
             Text(
-                "不含聊天正文、助手卡、世界书条目、知识库文档，也不含任何 API Key 或 token：凭据与 mca.db 按隐私规则不会写入备份文件。",
+                "世界书与助手卡是文件存储，不在本备份范围；备份里也不会有任何 API Key 或 token。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -222,15 +223,15 @@ private fun BackupRestoreCard(
                 }
                 McaButton(
                     style = McaButtonStyle.Outlined,
-                    onClick = onPreviewBackupRestore,
+                    onClick = { confirmingRestore = true },
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(McaIcons.UploadFile, contentDescription = null)
-                    Text("校验备份包", modifier = Modifier.padding(start = 6.dp))
+                    Text("恢复（覆盖当前数据）", modifier = Modifier.padding(start = 6.dp))
                 }
             }
             Text(
-                "恢复入口当前只做校验：会检查版本与清单完整性并给出原因，但不会覆盖现有数据。",
+                "恢复会覆盖当前对话、消息、助手、知识库与知识库文档的数据库记录；失败时整批回滚，原数据不变。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -242,6 +243,47 @@ private fun BackupRestoreCard(
                 )
             }
         }
+    }
+    if (confirmingRestore) {
+        // Destructive action: the confirmation names the tables it replaces and the rollback rule, so
+        // a one-tap overwrite is impossible.
+        McaDialog(
+            onDismissRequest = { confirmingRestore = false },
+            title = { Text("恢复备份会覆盖当前数据") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "将用备份里的行数据替换当前数据库中的对话、消息、助手、知识库与知识库文档。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "恢复前会先把当前数据导出到应用缓存备份；恢复失败会整批回滚，现有数据保持不变。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "世界书与助手卡是文件存储，不会被这次恢复改动。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                McaButton(
+                    style = McaButtonStyle.Destructive,
+                    onClick = {
+                        confirmingRestore = false
+                        onPreviewBackupRestore()
+                    }
+                ) {
+                    Text("覆盖并恢复")
+                }
+            },
+            dismissButton = {
+                McaButton(style = McaButtonStyle.Text, onClick = { confirmingRestore = false }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 
@@ -550,6 +592,7 @@ private fun PrivacyCleanupCard(
 fun ExperimentsScreen(
     state: SettingsUiState,
     onChatLocalToolsEnabledChanged: (Boolean) -> Unit = {},
+    onRichBlocksEnabledChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // W9-1: the vision-readiness flag is a scan over the whole native stats JSON. Cache it by the
@@ -590,6 +633,12 @@ fun ExperimentsScreen(
             ChatLocalToolsCard(
                 enabled = state.chatLocalToolsEnabled,
                 onEnabledChanged = onChatLocalToolsEnabledChanged
+            )
+        }
+        item {
+            RichBlocksCard(
+                enabled = state.richBlocksEnabled,
+                onEnabledChanged = onRichBlocksEnabledChanged
             )
         }
         item {
@@ -646,6 +695,58 @@ private fun ChatLocalToolsCard(
             )
             Text(
                 "本地模型和云端模型都可用。模型不支持时不会调用，会像平常一样回复。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * Rich-block display switch. Same card/switch/typography as the local-tools card.
+ *
+ * Display-only: scripts and styles never execute, and every assistant message keeps a
+ * "查看原文" escape hatch back to the raw Markdown.
+ */
+@Composable
+private fun RichBlocksCard(
+    enabled: Boolean,
+    onEnabledChanged: (Boolean) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("富文本块显示", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(12.dp))
+                    McaSwitch(
+                        checked = enabled,
+                        onCheckedChange = onEnabledChanged,
+                        enabled = true,
+                        contentDescription = "富文本块显示"
+                    )
+                }
+                Text(
+                    "识别 <details>/<status>/<StatusBlock> 这类块并结构化显示，不再是满屏原始标签。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                "脚本与样式永不执行：script/style 整段丢弃，事件属性与危险链接不会进入界面。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "只影响显示；每条消息仍可点「查看原文」回到 Markdown。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

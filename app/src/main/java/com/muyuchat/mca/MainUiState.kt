@@ -147,6 +147,12 @@ data class MainUiState(
      * and an unusable or ignored offer degrades to a plain answer.
      */
     val chatLocalToolsEnabled: Boolean = true,
+    /**
+     * Whether assistant messages may render safe rich blocks (`<details>` / `<status>` /
+     * `<StatusBlock>`). Display-only: scripts, styles and attributes never execute; the raw
+     * Markdown stays available behind "查看原文". User-switchable in 设置 → 实验功能.
+     */
+    val richBlocksEnabled: Boolean = true,
     val models: List<ModelManifest> = emptyList(),
     val generationPresets: List<GenerationPresetRecord> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,

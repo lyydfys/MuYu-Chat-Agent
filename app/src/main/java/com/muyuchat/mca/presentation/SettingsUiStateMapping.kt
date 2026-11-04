@@ -50,6 +50,7 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
     persistentPrefixCacheBytes = persistentPrefixCacheBytes,
     chatLocalToolsEnabled = chatLocalToolsEnabled,
+    richBlocksEnabled = richBlocksEnabled,
     prefixCacheHitRatePercent = prefixCacheTelemetry.hitRatePercent,
     prefixCacheAttempts = prefixCacheTelemetry.attempts,
     prefixCacheHits = prefixCacheTelemetry.hits,

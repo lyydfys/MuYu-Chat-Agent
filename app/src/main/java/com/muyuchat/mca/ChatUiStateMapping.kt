@@ -443,7 +443,8 @@ internal fun buildChatUiState(
                     },
                     visionCapabilityLabel = chatVisionCapability.label,
                     visionCapabilityDetail = chatVisionCapability.detail,
-                    visionCapabilityReady = chatVisionCapability.ready
+                    visionCapabilityReady = chatVisionCapability.ready,
+                    richBlocksEnabled = state.richBlocksEnabled
     )
 }
 

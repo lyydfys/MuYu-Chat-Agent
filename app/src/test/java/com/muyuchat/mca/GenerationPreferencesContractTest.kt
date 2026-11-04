@@ -66,6 +66,18 @@ class GenerationPreferencesContractTest {
     }
 
     @Test
+    fun `rich blocks default on and round trip an explicit false`() {
+        val context = FakePreferencesContext()
+
+        assertTrue(GenerationPreferences.loadRichBlocksEnabled(context))
+        GenerationPreferences.persistRichBlocksEnabled(context, false)
+        assertFalse(GenerationPreferences.loadRichBlocksEnabled(context))
+        assertEquals(false, context.value("mca_generation_params", "chat_rich_blocks_enabled"))
+        GenerationPreferences.persistRichBlocksEnabled(context, true)
+        assertTrue(GenerationPreferences.loadRichBlocksEnabled(context))
+    }
+
+    @Test
     fun `api switches default to disabled in the api preferences file`() {
         val context = FakePreferencesContext()
 

@@ -98,7 +98,16 @@ data class ChatUiState(
     val webSearchProviderLabel: String = "",
     val visionCapabilityLabel: String = "识图未就绪",
     val visionCapabilityDetail: String = "请加载云端多模态模型，或绑定本地 mmproj 视觉投影器。",
-    val visionCapabilityReady: Boolean = false
+    val visionCapabilityReady: Boolean = false,
+    /**
+     * 安全富文本块（`<details>`/`<status>`/`<StatusBlock>` 等酒馆预设输出）渲染开关。
+     *
+     * 只影响展示：脚本/样式/事件属性永远不会执行或进入结果。feature 层默认 `false`，让直接构造
+     * （预览/测试）保持既有 Markdown 外观；实际值由设置层投影：`MainUiState.richBlocksEnabled`
+     * 读取 `GenerationPreferences.loadRichBlocksEnabled`（默认 `true`，与聊天本地工具一致），
+     * 用户可在「设置 → 实验功能」随时关闭。
+     */
+    val richBlocksEnabled: Boolean = false,
 )
 
 /** Visual preferences for the conversation canvas. URI is copied to app-private storage by the host. */
