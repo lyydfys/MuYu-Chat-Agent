@@ -21,6 +21,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
+import android.app.Application
 import com.muyuchat.mca.presentation.ChatContextSnapshot
 import java.util.concurrent.atomic.AtomicLong
 
@@ -40,6 +41,9 @@ internal data class AssistantImageModelBinding(
  * a receiver extension over this port so the verbatim flow stays byte-for-byte recognisable.
  */
 internal interface ChatGenerationExecutionPort {
+
+    /** Application context for local-only probes (message image attachments). */
+    val application: Application
 
     // Field-limited capability; execution cannot replace the app's root snapshot.
     val uiState: StateFlow<MainUiState>

@@ -2,8 +2,6 @@ package com.muyuchat.feature.chat
 
 import com.muyuchat.core.designsystem.McaIconSize
 import com.muyuchat.core.designsystem.McaIcons
-import com.muyuchat.core.designsystem.McaButton
-import com.muyuchat.core.designsystem.McaButtonStyle
 import android.content.ClipData
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -318,12 +316,11 @@ private fun UserMessageBubble(
                         // neighbour's decoded state and a stale frame is never shown for another item.
                         visibleImageAttachments.forEach { attachment ->
                             key(attachment.uriString) {
-                                var attachmentRetry by remember(attachment.uriString) { mutableStateOf(0) }
                                 val attachmentDisplay = rememberChatImageBitmap(
                                     context = context,
                                     uriString = attachment.uriString,
                                     maxDimensionPx = 384,
-                                    revisionKey = attachmentRetry,
+                                    revisionKey = attachment.uriString,
                                     taskIdentity = attachment.uriString
                                 )
                                 val displayBitmap = attachmentDisplay.readyValue
@@ -339,8 +336,9 @@ private fun UserMessageBubble(
                                             contentScale = ContentScale.Crop,
                                             modifier = Modifier.fillMaxSize()
                                         )
-                                        // A failed read is its own state with a retry, not the old
-                                        // "still decoding" placeholder that could never recover.
+                                        // 历史图片文件已丢失/被删除时只降级成一行浅色提示：
+                                        // 不显示红色错误、不提供无意义的“重试”，也不影响正文。
+                                        // 只有本轮用户新选的图片不可读才会在执行层给出可操作错误。
                                         attachmentDisplay.phase == ImageDisplayPhase.FAILED -> Column(
                                             modifier = Modifier
                                                 .fillMaxSize()
@@ -351,10 +349,18 @@ private fun UserMessageBubble(
                                             Icon(
                                                 McaIcons.Image,
                                                 contentDescription = null,
-                                                tint = McaPrimaryBlue.copy(alpha = 0.72f)
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                                             )
-                                            McaButton(style = McaButtonStyle.Text,onClick = { attachmentRetry += 1 }) {
-                                                Text("重试", fontSize = 12.sp)
+                                            imageAbsenceHint(
+                                                hasOtherContent = message.content.isNotBlank() ||
+                                                    visibleImageAttachments.size > 1
+                                            )?.let { hint ->
+                                                Text(
+                                                    hint,
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        .copy(alpha = 0.75f)
+                                                )
                                             }
                                         }
                                         attachmentDisplay.phase == ImageDisplayPhase.LOADING -> Box(

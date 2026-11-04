@@ -24,6 +24,7 @@ import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.deduplicateVisionAttachments
 import com.muyuchat.core.engine.visionDeduplicationKey
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
+import com.muyuchat.core.engine.ChatGeneratedImageStatus
 import com.muyuchat.core.engine.ChatGenerationMetrics
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatSourceReference
@@ -307,6 +308,24 @@ class ChatSessionStore(context: Context) {
         // those streams once per load so old rows are repaired in the database
         // before the first frame is rendered or sent to a vision runner.
         val contentKeyCache = HashMap<String, String?>()
+        // 旧会话可能留着已删除图片的引用（图片库删图、旧版本失败清理不完整）。加载时做一次
+        // 存在性校验：只从引用里剔除确认缺失的附件/id，绝不删除消息本身；没有变化时不写库，
+        // 因此反复打开会话不会重复重写。
+        val needsGeneratedImageIdPrune = ownedRecords.any { session ->
+            session.messages.any { message ->
+                val request = message.generatedImageRequest
+                request != null && request.status != ChatGeneratedImageStatus.DONE &&
+                    request.imageAssetIds.isNotEmpty()
+            }
+        }
+        val existingImageIds = if (needsGeneratedImageIdPrune) {
+            runCatching {
+                database.chatSessionDao().loadImageRecords()
+                    .mapTo(mutableSetOf(), ImageAssetRecord::id)
+            }.getOrDefault(emptySet())
+        } else {
+            emptySet()
+        }
         val normalizedRecords = ownedRecords.map { session ->
             session.copy(
                 messages = session.messages.map { message ->
@@ -314,8 +333,26 @@ class ChatSessionStore(context: Context) {
                         message.imageAttachments,
                         contentKeyCache
                     )
-                    if (attachments == message.imageAttachments) message
-                    else message.copy(imageAttachments = attachments)
+                    val readableAttachments = runCatching {
+                        pruneStoredChatImageAttachments(appContext, attachments)
+                    }.getOrDefault(attachments)
+                    val request = message.generatedImageRequest?.let { current ->
+                        if (current.status == ChatGeneratedImageStatus.DONE) {
+                            current
+                        } else {
+                            pruneMissingGeneratedImageAssetIds(current, existingImageIds)
+                        }
+                    }
+                    if (readableAttachments == message.imageAttachments &&
+                        request == message.generatedImageRequest
+                    ) {
+                        message
+                    } else {
+                        message.copy(
+                            imageAttachments = readableAttachments,
+                            generatedImageRequest = request,
+                        )
+                    }
                 }
             )
         }

@@ -62,7 +62,7 @@ internal class ChatLocalApiProviderPortAdapter(
 }
 
 internal class ChatGenerationExecutionPortAdapter(
-    private val application: Application,
+    override val application: Application,
     private val store: UiStateWriter<GenerationExecutionFields>,
     override val engine: McaInferenceService,
     override val chatRuns: ChatRunOwnership,

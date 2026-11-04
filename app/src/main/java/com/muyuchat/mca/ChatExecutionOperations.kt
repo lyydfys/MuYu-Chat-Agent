@@ -240,12 +240,31 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
     // compression pass.  Use that exact list for every provider; the
     // full list remains in the persisted session for future summaries.
     val admittedRequestMessages = contextAdmission.request.messages
+    // 历史消息可能还引用已删除的图片（图片库删图、旧版本未清理）。分级处理：
+    //  * 完全没有图片引用 → 不进入任何图片校验/加载路径；
+    //  * 历史消息的缺失图 → 静默剔除引用，不让它变成「当前消息」的红色错误；
+    //  * 只有本轮用户消息自己声明的图片不可读，才是可操作的发送错误。
+    val imageAudit = withContext(Dispatchers.IO) {
+        auditChatImageAttachments(admittedRequestMessages) { attachment ->
+            chatImageAttachmentReadState(application, attachment)
+        }
+    }
+    if (imageAudit.currentTurnNeedsRecovery) {
+        appendAssistant(
+            "\n图片读取失败：所选图片无法读取或已丢失，请重新选择图片后再发送。",
+            generationRunId = generationRunId
+        )
+        generationUiPublisher.refuseGenerationBeforeStream("图片读取失败")
+        persistChatSessions(generationRunId = generationRunId)
+        return
+    }
+    val imageSafeAdmittedMessages = imageAudit.messages
     // Live KV invalidation changes on every role switch. Keep the disk identity
     // stable for a return visit; native token-prefix validation rejects edited history.
     val frozenContextRevision = frozenContextRevisionFor(frozenSession.id, summaryRecords, summaryTurn.candidate)
     attachTurnContextAssemblyTraceFor(runtimeContextPlan, generationRunId, initialState)
     val state = uiState.value
-    val hasImageAttachments = admittedRequestMessages.any { it.imageAttachments.isNotEmpty() }
+    var hasImageAttachments = imageSafeAdmittedMessages.any { it.imageAttachments.isNotEmpty() }
     var cloudModelIdForToolTurn: String? = chatModelIdOverride
     var chatModelIdentityForToolTurn: String? = null
     var chatConfigForToolTurn: CloudApiConfig? = null
@@ -279,7 +298,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
     ) {
         return
     }
-    var turnMessages = admittedRequestMessages
+    var turnMessages = imageSafeAdmittedMessages
     var promptedToolRounds = 0
     var promptedToolContext = ""
     // A prompted tool round is one more stream over the same user turn plus the executed tool
@@ -298,7 +317,12 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                     .joinToString("\n\n")
             )
             if (!toolAdmission.isAccepted) break
-            turnMessages = toolAdmission.request.messages
+            // 工具轮会重新准入一份消息列表：只保留可读的图片引用，避免历史缺失图再次让整轮失败。
+            turnMessages = withContext(Dispatchers.IO) {
+                auditChatImageAttachments(toolAdmission.request.messages) { attachment ->
+                    chatImageAttachmentReadState(application, attachment)
+                }.messages
+            }
         }
         val turnSystemContext = listOf(runtimeSystemContextForTurn, promptedToolContext)
             .filter { it.isNotBlank() }
@@ -339,24 +363,36 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             cloudConfig
         )
         if (hasImageAttachments && !cloudConfig.supportsVision) {
-            appendAssistant(
-                "\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。",
-                generationRunId = generationRunId
-            )
-            generationUiPublisher.refuseGenerationBeforeStream("云端识图未启用")
-            persistChatSessions(generationRunId = generationRunId)
-            return
+            if (!imageAudit.currentTurnDeclaresImage) {
+                // 只有历史消息带图、而当前只是文本：降级为纯文本继续，不把历史图片问题挂到本轮。
+                turnMessages = messagesWithoutImageAttachments(turnMessages)
+                hasImageAttachments = false
+            } else {
+                appendAssistant(
+                    "\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。",
+                    generationRunId = generationRunId
+                )
+                generationUiPublisher.refuseGenerationBeforeStream("云端识图未启用")
+                persistChatSessions(generationRunId = generationRunId)
+                return
+            }
         }
         val cloudMessages = runCatching {
             withInlineImageDataForCloud(turnMessages)
         }.getOrElse { error ->
-            appendAssistant(
-                "\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}",
-                generationRunId = generationRunId
-            )
-            generationUiPublisher.refuseGenerationBeforeStream("图片读取失败")
-            persistChatSessions(generationRunId = generationRunId)
-            return
+            if (!imageAudit.currentTurnDeclaresImage) {
+                // 历史消息里的图片损坏/不可压缩：丢掉历史图片后按纯文本继续，不报红色错误。
+                runCatching { withInlineImageDataForCloud(messagesWithoutImageAttachments(turnMessages)) }
+                    .getOrDefault(messagesWithoutImageAttachments(turnMessages))
+            } else {
+                appendAssistant(
+                    "\n图片读取失败：所选图片无法读取或已压缩失败，请重新选择图片后再发送。${error.message?.let { "\n原因：$it" } ?: ""}",
+                    generationRunId = generationRunId
+                )
+                generationUiPublisher.refuseGenerationBeforeStream("图片读取失败")
+                persistChatSessions(generationRunId = generationRunId)
+                return
+            }
         }
         cloudChatProvider.streamChat(
             cloudConfig,
@@ -382,24 +418,34 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         )
     } else {
         if (hasImageAttachments && !localVisionRunnerAvailable()) {
-            appendAssistant(
-                "\n${localVisionUnavailableMessage(state)}",
-                generationRunId = generationRunId
-            )
-            generationUiPublisher.refuseGenerationBeforeStream("本地视觉 runner 未启用")
-            persistChatSessions(generationRunId = generationRunId)
-            return
+            if (!imageAudit.currentTurnDeclaresImage) {
+                turnMessages = messagesWithoutImageAttachments(turnMessages)
+                hasImageAttachments = false
+            } else {
+                appendAssistant(
+                    "\n${localVisionUnavailableMessage(state)}",
+                    generationRunId = generationRunId
+                )
+                generationUiPublisher.refuseGenerationBeforeStream("本地视觉 runner 未启用")
+                persistChatSessions(generationRunId = generationRunId)
+                return
+            }
         }
         val localMessages = if (hasImageAttachments) {
             runCatching { withLocalImageFilesForVision(turnMessages, preparedUiVisionFiles) }
                 .getOrElse { error ->
-                    appendAssistant(
-                        "\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
-                        generationRunId = generationRunId
-                    )
-                    generationUiPublisher.refuseGenerationBeforeStream("本地图片预处理失败")
-                    persistChatSessions(generationRunId = generationRunId)
-                    return
+                    if (!imageAudit.currentTurnDeclaresImage) {
+                        // 历史图片损坏/无法压缩：按纯文本继续，不把历史问题升级成本轮错误。
+                        messagesWithoutImageAttachments(turnMessages)
+                    } else {
+                        appendAssistant(
+                            "\n本地图片预处理失败：所选图片压缩或缓存失败，请重新选择图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
+                            generationRunId = generationRunId
+                        )
+                        generationUiPublisher.refuseGenerationBeforeStream("本地图片预处理失败")
+                        persistChatSessions(generationRunId = generationRunId)
+                        return
+                    }
                 }
         } else {
             turnMessages
@@ -692,3 +738,14 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         }
     }
 }
+
+/**
+ * 去掉历史消息里的图片引用，保留全部文本。仅用于「本轮没有声明图片、历史图不可用」的降级路径：
+ * 不能因为旧图损坏/已删除就让这轮纯文本消息失败。
+ */
+private fun messagesWithoutImageAttachments(messages: List<ChatMessage>): List<ChatMessage> =
+    messages.map { message ->
+        if (message.imageAttachments.isEmpty()) message
+        else message.copy(imageAttachments = emptyList())
+    }
+
