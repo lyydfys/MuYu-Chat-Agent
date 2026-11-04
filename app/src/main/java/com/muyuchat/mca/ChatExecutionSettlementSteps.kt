@@ -52,6 +52,48 @@ internal fun ChatGenerationExecutionPort.publishSummaryActivationFor(
                     }
 }
 
+internal fun ChatGenerationExecutionPort.applyTavernAssistantOutputFor(
+    initialState: MainUiState,
+    generationRunId: Long
+) {
+    if (!chatRuns.matches(generationRunId)) return
+    val state = uiState.value
+    val index = state.messages.indexOfLast { it.role == Role.ASSISTANT }
+    if (index < 0) return
+    val original = state.messages[index].content
+    if (original.isBlank() || original == EMPTY_ASSISTANT_COMPLETION_MESSAGE) return
+    val transformed = TavernPromptPipeline.transformAssistantOutput(initialState, original)
+    if (transformed == original) return
+    val occurredAt = System.currentTimeMillis()
+    generationUiWriter.update { fields ->
+        if (!chatRuns.matches(generationRunId)) return@update fields
+        val currentIndex = fields.messages.indexOfLast { it.role == Role.ASSISTANT }
+        if (currentIndex < 0) return@update fields
+        val updated = fields.messages.toMutableList().also { messages ->
+            messages[currentIndex] = messages[currentIndex].copy(
+                content = transformed,
+                // The stored content changed, so any previously measured token count is stale.
+                tokenCount = null
+            )
+        }
+        val sessionId = fields.snapshot.activeChatSessionId
+        val sessions = if (sessionId == null) {
+            fields.chatSessions
+        } else {
+            fields.chatSessions.upsertSessionFor(
+                state = fields.snapshot,
+                sessionId = sessionId,
+                messages = updated,
+                assistantId = fields.snapshot.selectedAssistantId,
+                modelMode = fields.snapshot.selectedChatBackend.bindingValue(),
+                modelId = fields.snapshot.currentChatModelId(),
+                occurredAt = occurredAt
+            )
+        }
+        fields.copy(messages = updated, chatSessions = sessions)
+    }
+}
+
 internal fun ChatGenerationExecutionPort.recordCompletedTurnMemoryFor(
     toolCalls: List<ChatToolCall>,
     characterMemoryEnabled: Boolean,
@@ -63,6 +105,10 @@ internal fun ChatGenerationExecutionPort.recordCompletedTurnMemoryFor(
     chatConfigForToolTurn: CloudApiConfig?,
     generationRunId: Long
 ) {
+                    // Apply the preset's output contract before the turn is persisted or recorded
+                    // into memory: macro expansion first, then regex_scripts(placement=2). The
+                    // streaming preview stays raw until this settlement point.
+                    applyTavernAssistantOutputFor(initialState, generationRunId)
                     val conversationPersistJob = persistChatSessions(generationRunId = generationRunId)
                     if (toolCalls.isEmpty() && characterMemoryEnabled && assistantSnapshot != null) {
                         val completedState = uiState.value

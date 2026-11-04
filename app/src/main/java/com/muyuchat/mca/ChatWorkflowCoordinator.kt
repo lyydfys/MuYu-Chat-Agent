@@ -332,9 +332,18 @@ internal class ChatWorkflowCoordinator(
                 )
             }
         } else ""
+        // Tavern preset pipeline: regex_scripts(placement=1) first, then macro expansion. It is a
+        // no-op unless the current model is bound to a preset carrying tavern_regex_scripts.
+        val modelInputText = TavernPromptPipeline.transformUserInput(state, preparedInput.text)
+        if (modelInputText.isBlank() && preparedInput.imageAttachments.isEmpty()) {
+            store.update {
+                it.copy(statusMessage = "酒馆宏展开后消息为空，请修改输入后再发送。")
+            }
+            return
+        }
         val user = ChatMessage(
             role = Role.USER,
-            content = preparedInput.text.ifBlank {
+            content = modelInputText.ifBlank {
                 if (preparedInput.imageAttachments.isNotEmpty()) "请描述这张图片。" else ""
             },
             imageAttachments = preparedInput.imageAttachments

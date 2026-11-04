@@ -4,6 +4,8 @@ import android.app.Application
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.feature.chat.tavern.TAVERN_REGEX_SCRIPTS_KEY
+import com.muyuchat.feature.chat.tavern.TavernRegexScriptParser
 import org.json.JSONObject
 import com.muyuchat.feature.modelhub.GenerationPresetUiItem
 import kotlinx.coroutines.CoroutineScope
@@ -12,6 +14,27 @@ import kotlinx.coroutines.launch
 
 /** JSON key of the imported prompt bundle; kept out of the sampler parser's key set. */
 internal const val PROMPT_APPENDIX_KEY: String = "prompt_appendix"
+
+/**
+ * Stores a Tavern preset's normalized prompt bundle and regex scripts beside its sampler values.
+ *
+ * Kept as a pure helper so the import path and its tests agree on the exact JSON key shape; an MCA
+ * preset never gets either key, which is what keeps old preset behavior byte-identical.
+ */
+internal fun generationPresetParamsJsonFor(mapping: TavernPresetMapping): String =
+    JSONObject(mapping.params.toAssistantGenerationJson())
+        .apply {
+            mapping.promptAppendix?.let { put(PROMPT_APPENDIX_KEY, it) }
+            // Store the key even for an empty source array: presence is the runtime gate, and an
+            // empty section still means the preset opted into the Tavern pipeline (macros included).
+            if (mapping.hasRegexScriptsKey || mapping.regexScripts.isNotEmpty()) {
+                put(
+                    TAVERN_REGEX_SCRIPTS_KEY,
+                    TavernRegexScriptParser.toJsonArray(mapping.regexScripts)
+                )
+            }
+        }
+        .toString()
 
 internal fun generationPresetSummary(paramsJson: String): String {
     val params = GenerationParams.fromJson(paramsJson, GenerationParams())
@@ -110,13 +133,9 @@ internal fun importGenerationPresetsFor(
                             name = name,
                             // The prompt bundle travels with the preset so a Tavern "jailbreak
                             // preset" keeps its text instead of being reduced to bare samplers.
-                            // The runtime parameter parser ignores the extra key; the preset
-                            // manager reads it to offer "apply to assistant".
-                            paramsJson = JSONObject(mapping.params.toAssistantGenerationJson())
-                                .apply {
-                                    mapping.promptAppendix?.let { put(PROMPT_APPENDIX_KEY, it) }
-                                }
-                                .toString(),
+                            // The runtime parameter parser ignores the extra keys; the preset
+                            // manager reads the prompt and the chat pipeline reads regex scripts.
+                            paramsJson = generationPresetParamsJsonFor(mapping),
                             appliedFields = mapping.mappedKeys.size,
                             clampedFields = mapping.clamped.size,
                             ignoredFields = mapping.ignoredKeys,

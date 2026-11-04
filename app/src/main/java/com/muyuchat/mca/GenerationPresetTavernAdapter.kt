@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.feature.chat.tavern.TavernRegexScript
+import com.muyuchat.feature.chat.tavern.TavernRegexScriptParser
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import org.json.JSONArray
@@ -63,7 +65,13 @@ internal data class TavernPresetMapping(
      */
     val promptAppendix: String? = null,
     /** Length of [promptAppendix] before the storage cap, for the import report. */
-    val promptChars: Int = 0
+    val promptChars: Int = 0,
+    /** Normalized `extensions.regex_scripts`; stored with the preset as `tavern_regex_scripts`. */
+    val regexScripts: List<TavernRegexScript> = emptyList(),
+    /** True when the source preset carried the regex section, even if it was empty. */
+    val hasRegexScriptsKey: Boolean = false,
+    /** Parser warnings for malformed regex entries; does not reject the preset. */
+    val regexWarnings: List<String> = emptyList()
 ) {
     /** True when the file carries sampler/output values a preset can store. */
     val hasApplicableValue: Boolean get() = mappedKeys.isNotEmpty()
@@ -347,7 +355,7 @@ internal object SillyTavernPresetAdapter {
                 "repetition_penalty", "rep_pen", "presence_penalty", "frequency_penalty",
                 "max_tokens", "openai_max_tokens", "max_length", "stop", "stop_sequences",
                 "stop_words", "seed", "name", "preset_name",
-                "settings", "sampler", "preset") +
+                "settings", "sampler", "preset", "extensions", "regex_scripts") +
             LOAD_BOUND_FIELDS
         val ignored = mutableListOf<String>()
         root.keys().forEach { key ->
@@ -362,6 +370,13 @@ internal object SillyTavernPresetAdapter {
         val promptMaterial = extractPromptAppendix(root)
         val promptText = promptMaterial?.first
         val promptChars = promptMaterial?.second ?: 0
+        val regex = TavernRegexScriptParser.parsePresetRoot(root)
+        if (regex.scripts.any { !it.disabled }) {
+            // A regex-only preset (for example an output formatter) is applicable even when it
+            // carries no sampler difference; it must not be rejected as "no applicable values".
+            applicable = true
+            mapped += "extensions.regex_scripts"
+        }
         if (!applicable && promptText == null) {
             return GenerationPresetParseResult.Rejected(
                 "该预设没有可应用的采样参数（只有提示词/模板或行为开关）；提示词请在角色卡中导入。"
@@ -378,7 +393,10 @@ internal object SillyTavernPresetAdapter {
                 unsupported = unsupported.values.toList(),
                 ignoredKeys = ignored.distinct(),
                 promptAppendix = promptText?.takeIf(String::isNotBlank),
-                promptChars = promptChars
+                promptChars = promptChars,
+                regexScripts = regex.scripts,
+                hasRegexScriptsKey = regex.hasKey,
+                regexWarnings = regex.warnings
             )
         )
     }
