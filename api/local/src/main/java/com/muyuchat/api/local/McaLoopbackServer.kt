@@ -46,6 +46,9 @@ class McaLoopbackServer(
     private var acceptJob: Job? = null
     internal val clientSocketLock = Any()
     private val activeClientSockets = linkedSetOf<Socket>()
+
+    /** Per-client failure counter for the LAN-facing API; see [LocalApiAuthThrottle]. */
+    private val authThrottle = LocalApiAuthThrottle()
     internal val responseStartedSockets = mutableSetOf<Socket>()
     private var clientAdmissionOpen = false
     internal val generationLeaseLock = Any()
@@ -205,9 +208,29 @@ class McaLoopbackServer(
                 writeHtml(client, mcaLocalApiChatPageHtml())
                 return
             }
-            if (!isPublicRoute(method, path) && !isAuthorized(headers)) {
-                writeError(client, "401 Unauthorized", "unauthorized", "API Key 不正确或缺失。")
-                return
+            if (!isPublicRoute(method, path)) {
+                // The API can listen on 0.0.0.0, so a wrong key is a network event: count failures
+                // per client address and refuse the whole address for a cool-down instead of letting
+                // it spray guesses. A success clears the history, so a typo never locks anyone out.
+                val clientAddress = runCatching { client.inetAddress?.hostAddress }
+                    .getOrNull() ?: "unknown"
+                val now = System.currentTimeMillis()
+                if (authThrottle.isBlocked(clientAddress, now)) {
+                    writeError(
+                        client,
+                        "429 Too Many Requests",
+                        "too_many_requests",
+                        "认证失败次数过多，请稍后再试。",
+                        retryAfterMs = authThrottle.retryAfterSeconds(clientAddress, now) * 1_000L
+                    )
+                    return
+                }
+                if (!isAuthorized(headers)) {
+                    authThrottle.recordFailure(clientAddress, now)
+                    writeError(client, "401 Unauthorized", "unauthorized", "API Key 不正确或缺失。")
+                    return
+                }
+                authThrottle.recordSuccess(clientAddress)
             }
             when {
                 method == "HEAD" && path == "/health" -> writeNoContent(client)

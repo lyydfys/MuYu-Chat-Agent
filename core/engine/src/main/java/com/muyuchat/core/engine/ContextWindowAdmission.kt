@@ -207,21 +207,114 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
         }
     )
 
-    val keptMessages = ArrayList<ChatMessage>(selected.size)
+    // The backward walk above spends the budget on whatever is newest, so a long assistant reply can
+    // push out an older *user* message. The user's own words are the part they remember writing, and
+    // losing one reads as "it forgot what I said". Trade an older retained reply for a dropped user
+    // message whenever that keeps the request inside the budget.
+    val rebalanced = rebalanceForUserMessages(request, selected, limits)
+    val finalIndices = rebalanced ?: selected
+    // A swap changes which messages are counted, so the accepted usage is recomputed from the final
+    // membership instead of patched by hand.
+    val finalUsage = if (rebalanced != null) {
+        recomputeUsage(request, finalIndices, limits) ?: usage
+    } else {
+        usage
+    }
+
+    val keptMessages = ArrayList<ChatMessage>(finalIndices.size)
     request.messages.forEachIndexed { index, message ->
-        if (index in selected) keptMessages += message
+        if (index in finalIndices) keptMessages += message
     }
     return ContextWindowAdmission(
         status = ContextWindowAdmissionStatus.TRIMMED,
         request = request.copy(messages = keptMessages),
         budget = budget,
         limits = limits,
-        admittedUsage = usage.snapshot(),
+        admittedUsage = finalUsage.snapshot(),
         trimmedMessageCount = request.messages.size - keptMessages.size,
         messageRetention = request.messages.mapIndexed { index, message ->
-            PromptMessageRetention(index, message.role, retained = index in selected)
+            PromptMessageRetention(index, message.role, retained = index in finalIndices)
         }
     )
+}
+
+/**
+ * Swaps older retained assistant replies for dropped user messages, newest user message first.
+ *
+ * Returns `null` when nothing could be improved, so the caller can reuse the original accounting.
+ * Only membership changes: the surviving messages keep their original order, and protected messages
+ * plus the newest user anchor are never touched.
+ */
+private fun rebalanceForUserMessages(
+    request: ChatRequest,
+    selected: Set<Int>,
+    limits: ContextWindowInputLimits
+): Set<Int>? {
+    val messages = request.messages
+    val newestUserIndex = messages.indexOfLast { it.role == Role.USER }
+    val candidates = ArrayList<Int>()
+    for (index in messages.indices) {
+        if (index in selected) continue
+        val message = messages[index]
+        if (message.role != Role.USER) continue
+        if (isAdmissionProtectedMessage(message, request)) continue
+        if (index == newestUserIndex) continue
+        candidates += index
+    }
+    if (candidates.isEmpty()) return null
+
+    val mutable = LinkedHashSet(selected)
+    var changed = false
+    for (userIndex in candidates) {
+        val spare = mutable
+            .filter { it < userIndex && messages[it].role == Role.ASSISTANT }
+            .minOrNull()
+            ?: continue
+        mutable.remove(spare)
+        mutable.add(userIndex)
+        if (fitsWithinLimits(request, mutable, limits)) {
+            changed = true
+        } else {
+            mutable.remove(userIndex)
+            mutable.add(spare)
+        }
+        if (mutable.size >= messages.size) break
+    }
+    if (!changed) return null
+    return mutable
+}
+
+/** True when [indices] plus the immutable context fits the budget. */
+private fun fitsWithinLimits(
+    request: ChatRequest,
+    indices: Set<Int>,
+    limits: ContextWindowInputLimits
+): Boolean = recomputeUsage(request, indices, limits) != null
+
+/**
+ * Recomputes accounting for [indices]; returns `null` when some message no longer fits.
+ *
+ * Accounting starts from the immutable parts (protected messages, prompts, reasoning reserve) so a
+ * swap can never quietly hide an over-budget request.
+ */
+private fun recomputeUsage(
+    request: ChatRequest,
+    indices: Set<Int>,
+    limits: ContextWindowInputLimits
+): MutableContextWindowUsage? {
+    val usage = MutableContextWindowUsage()
+    for (message in request.messages) {
+        if (!isAdmissionProtectedMessage(message, request)) continue
+        if (usage.tryAddMessage(message, limits) != null) return null
+    }
+    if (usage.tryAddText(request.params.systemPrompt, limits) != null) return null
+    if (usage.tryAddText(request.runtimeSystemContext, limits) != null) return null
+    if (usage.tryAddStaticTokens(REASONING_INSTRUCTION_ESTIMATE_TOKENS, limits) != null) return null
+    for (index in request.messages.indices) {
+        if (index !in indices) continue
+        if (usage.tryAddMessage(request.messages[index], limits) != null) return null
+    }
+    return usage
 }
 
 /**
