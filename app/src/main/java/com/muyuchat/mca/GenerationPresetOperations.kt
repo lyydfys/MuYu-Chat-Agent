@@ -4,13 +4,14 @@ import android.app.Application
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.feature.chat.SillyTavernPresetCodec
-import com.muyuchat.feature.chat.readSillyTavernPresetJson
+import org.json.JSONObject
 import com.muyuchat.feature.modelhub.GenerationPresetUiItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import org.json.JSONObject
+
+/** JSON key of the imported prompt bundle; kept out of the sampler parser's key set. */
+internal const val PROMPT_APPENDIX_KEY: String = "prompt_appendix"
 
 internal fun generationPresetSummary(paramsJson: String): String {
     val params = GenerationParams.fromJson(paramsJson, GenerationParams())
@@ -69,6 +70,12 @@ private fun openableDisplayNameReader(application: Application): (Uri) -> String
  * Importing presets one at a time meant one picker round-trip and one status message per file.
  * Each file still parses independently, so one unreadable file no longer aborts the rest; the
  * caller sees "已导入 N 个，M 个失败" instead of a single error.
+ *
+ * Both dialects are accepted: a Tavern chat-completion preset goes through
+ * [SillyTavernPresetAdapter] (clamped values, recorded ignored/unsupported keys) and an MCA preset
+ * file is parsed with the same parameter contract the runtime uses. The file name is the preset
+ * name in both cases (the existing `GenerationPresetNaming` rules); a name declared inside the JSON
+ * is reported by the adapter but never overrides the file name.
  */
 internal fun importGenerationPresetsFor(
     scope: CoroutineScope,
@@ -83,7 +90,7 @@ internal fun importGenerationPresetsFor(
     scope.launch(Dispatchers.IO) {
         val imported = mutableListOf<GenerationPresetRecord>()
         val failures = mutableListOf<String>()
-        var promptAppendixSeen = false
+        var report = GenerationPresetImportReport()
         for (uriString in targets) {
             val uri = runCatching { Uri.parse(uriString) }.getOrNull()
             // Resolved once per file: it names both the imported record and any failure line.
@@ -91,33 +98,47 @@ internal fun importGenerationPresetsFor(
             val fallbackName = GenerationPresetNaming.fallbackName(displayName, uri?.lastPathSegment)
             runCatching {
                 val target = uri ?: error("无法识别所选文件。")
-                val json = requireNotNull(application.contentResolver.openInputStream(target)) {
+                val raw = requireNotNull(application.contentResolver.openInputStream(target)) {
                     "无法读取所选预设文件。"
-                }.use { readSillyTavernPresetJson(it) }
-                SillyTavernPresetCodec.parse(
-                    rawJson = json,
-                    // Priority: the preset file's own name (codec) → DISPLAY_NAME → normalized
-                    // lastPathSegment → `模型预设`; a raw lastPathSegment is a provider id.
-                    fallbackName = fallbackName
-                )
+                }.use { readGenerationPresetJson(it) }
+                val name = GenerationPresetNaming.recordName(fallbackName)
+                when (val parsed = SillyTavernPresetAdapter.adapt(raw)) {
+                    is GenerationPresetParseResult.Rejected -> error(parsed.reason)
+                    is GenerationPresetParseResult.Tavern -> {
+                        val mapping = parsed.mapping
+                        ImportedGenerationPreset(
+                            name = name,
+                            // The prompt bundle travels with the preset so a Tavern "jailbreak
+                            // preset" keeps its text instead of being reduced to bare samplers.
+                            // The runtime parameter parser ignores the extra key; the preset
+                            // manager reads it to offer "apply to assistant".
+                            paramsJson = JSONObject(mapping.params.toAssistantGenerationJson())
+                                .apply {
+                                    mapping.promptAppendix?.let { put(PROMPT_APPENDIX_KEY, it) }
+                                }
+                                .toString(),
+                            appliedFields = mapping.mappedKeys.size,
+                            clampedFields = mapping.clamped.size,
+                            ignoredFields = mapping.ignoredKeys,
+                            unsupportedFields = mapping.unsupported.map(TavernPresetUnsupported::key),
+                            promptChars = mapping.promptChars
+                        )
+                    }
+                    is GenerationPresetParseResult.Mca -> {
+                        val mapping = parsed.mapping
+                        ImportedGenerationPreset(
+                            name = name,
+                            paramsJson = mapping.params.toAssistantGenerationJson(),
+                            appliedFields = mapping.mappedKeys.size,
+                            clampedFields = 0,
+                            ignoredFields = mapping.ignoredKeys,
+                            unsupportedFields = mapping.unsupported.map(TavernPresetUnsupported::key)
+                        )
+                    }
+                }
             }.onSuccess { preset ->
-                val defaults = GenerationParams()
-                val params = defaults.copy(
-                    nPredict = preset.maxTokens?.coerceIn(16, 65_536) ?: defaults.nPredict,
-                    temperature = preset.temperature ?: defaults.temperature,
-                    topK = preset.topK ?: defaults.topK,
-                    topP = preset.topP ?: defaults.topP,
-                    minP = preset.minP ?: defaults.minP,
-                    repeatPenalty = preset.repeatPenalty ?: defaults.repeatPenalty,
-                    presencePenalty = preset.presencePenalty ?: defaults.presencePenalty,
-                    frequencyPenalty = preset.frequencyPenalty ?: defaults.frequencyPenalty,
-                    stopWords = preset.stopWords ?: defaults.stopWords
-                )
-                imported += GenerationPresetRecord(
-                    name = GenerationPresetNaming.recordName(preset.name),
-                    paramsJson = params.toAssistantGenerationJson()
-                )
-                if (preset.promptAppendix != null) promptAppendixSeen = true
+                imported += GenerationPresetRecord(name = preset.name, paramsJson = preset.paramsJson)
+                report = report.plus(preset)
             }.onFailure { error ->
                 // Same normalization as the success path: no provider ids in user-visible text.
                 failures += "$fallbackName（${error.message ?: "请确认文件格式"}）"
@@ -128,19 +149,35 @@ internal fun importGenerationPresetsFor(
             presetStore.save(presetStore.load() + imported)
         }
         val records = presetStore.load()
-        val promptNote = if (promptAppendixSeen) "；提示词请在角色卡中导入" else ""
-        val message = when {
-            imported.isEmpty() -> "模型预设导入失败：${failures.joinToString("；")}"
-            failures.isEmpty() && imported.size == 1 -> "已导入模型预设：${imported.first().name}$promptNote"
-            failures.isEmpty() -> "已导入 ${imported.size} 个模型预设$promptNote"
-            else -> "已导入 ${imported.size} 个模型预设，${failures.size} 个失败：${failures.joinToString("；")}"
-        }
+        val message = generationPresetImportMessage(imported, report, failures)
         uiStateWriter.update {
             it.copy(
                 generationPresets = records,
                 statusMessage = message
             )
         }
+    }
+}
+
+/**
+ * Status line of one batch import.
+ *
+ * Pure and kept next to the import loop so the legacy batch wording and the new per-field counts
+ * ("应用 N 项 / 忽略 N 项 / 不支持 N 项") are testable without Android: one unreadable file must
+ * not hide what the readable ones imported, and a value that was clamped must be visible.
+ */
+internal fun generationPresetImportMessage(
+    imported: List<GenerationPresetRecord>,
+    report: GenerationPresetImportReport,
+    failures: List<String>
+): String {
+    val detail = report.detailSuffix()
+    return when {
+        imported.isEmpty() -> "模型预设导入失败：${failures.joinToString("；")}"
+        failures.isEmpty() && imported.size == 1 -> "已导入模型预设：${imported.first().name}$detail"
+        failures.isEmpty() -> "已导入 ${imported.size} 个模型预设$detail"
+        else -> "已导入 ${imported.size} 个模型预设$detail，${failures.size} 个失败：" +
+            failures.joinToString("；")
     }
 }
 

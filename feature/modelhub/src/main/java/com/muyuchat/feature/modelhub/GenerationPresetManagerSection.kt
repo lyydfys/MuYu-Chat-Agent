@@ -124,7 +124,7 @@ private fun PresetManagerHeader(
             PresetImportButton(onClick = { picker.launch(arrayOf("*/*")) })
         }
         Text(
-            text = "可一次选择多个预设文件；提示词、模板和宏请继续在角色卡中导入。",
+            text = "可一次选择多个预设文件（酒馆预设 JSON 或 MCA 预设）；酒馆的提示词、模板和宏仍请在角色卡中导入，导入结果会列出忽略与不支持的字段。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -296,7 +296,7 @@ private fun PresetManagerEmptyState(modifier: Modifier = Modifier) {
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "点击右上角「批量导入」，一次可以选择多个酒馆预设文件；导入后即可在这里管理绑定的本地 / 云端模型。",
+                text = "点击右上角「批量导入」，一次可以选择多个预设文件（酒馆预设 JSON 或 MCA 预设）；导入后即可在这里管理绑定的本地 / 云端模型。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center

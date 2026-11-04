@@ -7,8 +7,7 @@ package com.muyuchat.mca
  * opaque document id rather than a file name: `document:1000156859`,
  * `primary:Download/preset.json`, `raw:/storage/emulated/0/Download/preset.json`. Using it directly
  * as the fallback name leaked provider ids into the preset list, the import status line and the
- * import failure message.
- *
+ * import failure message. *
  * Everything here is pure: no `Uri`, no `ContentResolver`. The caller resolves the real file name
  * (`OpenableColumns.DISPLAY_NAME`) behind an injected `(Uri) -> String?` lambda and passes only
  * plain strings in, so the naming order and normalization are testable on the JVM.
@@ -34,8 +33,9 @@ internal object GenerationPresetNaming {
      * Import-time fallback name for one picked file, in priority order:
      * the resolver's real file name → the normalized SAF `lastPathSegment` → [FALLBACK_NAME].
      *
-     * A `name` field inside the preset JSON still outranks this value, because
-     * `SillyTavernPresetCodec.parse` only reaches for the fallback when the file declares no name.
+     * The preset manager stores exactly this value as the preset name for every dialect (Tavern or
+     * MCA). A name declared inside the JSON (`preset_name`) is reported by the adapter but never
+     * replaces the file name, so two files sharing a name stay two presets.
      */
     fun fallbackName(displayName: String?, lastPathSegment: String?): String {
         normalizeFileName(displayName)?.let { return it }
