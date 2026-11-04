@@ -111,6 +111,13 @@ data class MainUiState(
     val knowledgeBaseImportingIds: Set<String> = emptySet(),
     val selectedKnowledgeBaseIds: Set<String> = emptySet(),
     val input: String = "",
+    /**
+     * One-turn structured quote attached to the next accepted send.
+     *
+     * Request-scoped by design: the send path folds it into that turn's model-facing content and the
+     * composer clears it; it is never written into the stored message text.
+     */
+    val quotedMessage: com.muyuchat.feature.chat.ChatQuotedMessage? = null,
     val isGenerating: Boolean = false,
     /** Exact runtime stage; a missing token progress remains intentionally indeterminate. */
     val generationPhase: GenerationPhase? = null,

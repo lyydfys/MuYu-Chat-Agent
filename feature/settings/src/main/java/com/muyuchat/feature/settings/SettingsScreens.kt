@@ -307,7 +307,13 @@ fun SettingsHubScreen(
     onInstallUpdate: () -> Unit = {},
     onOpenRelease: () -> Unit = {},
     onAutoCheckChanged: (Boolean) -> Unit = {},
-    onOpenWebPage: (String) -> Unit = {}
+    onOpenWebPage: (String) -> Unit = {},
+    /**
+     * Backup manifest actions of the logs/privacy page. Defaulted so callers that do not wire a SAF
+     * launcher still compile; the page renders the honest "not wired" state through the same card.
+     */
+    onExportBackup: () -> Unit = {},
+    onPreviewBackupRestore: () -> Unit = {}
 ) {
     val startSection = if (startInWebSearch) SettingsSection.SEARCH else null
     // Null means the dashboard. A section opens as a full-height detail page with a draggable
@@ -379,7 +385,9 @@ fun SettingsHubScreen(
                             onRefreshLogs = onRefreshLogs,
                             onRefreshDiagnostics = onRefreshDiagnostics,
                             onExportDiagnostics = onExportDiagnostics,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            onExportBackup = onExportBackup,
+                            onPreviewBackupRestore = onPreviewBackupRestore
                         )
                         SettingsSection.PRIVACY -> PrivacyDataScreen(
                             state = state,

@@ -130,6 +130,7 @@ internal fun mainChatScreenActions(
             onUndoContextSummary = viewModel::undoContextSummary,
             onSearchContextSummarySources = viewModel::contextSummaryEvidenceForQuery,
             onMessageIntent = viewModel::handleChatMessageIntent,
+            onEditAndResend = viewModel::editAndResendMessage,
         ),
         generation = ChatGenerationActions(
             onInputChange = viewModel::onInputChange,
@@ -144,6 +145,7 @@ internal fun mainChatScreenActions(
                 },
             onLoadModel = viewModel::selectChatModel,
             onUploadFile = viewModel::attachFile,
+            onQuoteMessage = viewModel::setQuotedMessage,
             releaseGenerationImageGrantsIfCoordinatorIdle =
                     viewModel::releaseGenerationImageGrantsIfCoordinatorIdle,
         ),

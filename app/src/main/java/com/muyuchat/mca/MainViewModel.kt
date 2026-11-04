@@ -678,7 +678,7 @@ class MainViewModel @JvmOverloads internal constructor(
     }
 
     fun updateAgentPreference(preference: UserPreference) = agentTuningCoordinator.updateAgentPreference(preference)
-    fun sendMessage() { chatWorkflowCoordinator.sendMessage(this) }
+    fun sendMessage() { if (chatWorkflowCoordinator.sendMessage(this)) setQuotedMessage(null) }
 
     internal fun sendChatImageRequestWithPromptBridge(
         visibleUserText: String, prompt: String, requestedOutputCount: Int? = null, allowCloudTranslationFallback: Boolean = false
@@ -759,8 +759,8 @@ class MainViewModel @JvmOverloads internal constructor(
     }
 
     fun stopGeneration() { stopActiveGeneration(chatStopGenerationPort) }
-    fun selectChatSession(sessionId: String) { chatSessionManagementCoordinator.selectChatSession(sessionId) }
-    fun newChat() { if (!rejectWhileConversationMutationInProgress()) newChatForAssistant(uiStateStore.current.selectedAssistant()) }
+    fun selectChatSession(sessionId: String) { setQuotedMessage(null); chatSessionManagementCoordinator.selectChatSession(sessionId) }
+    fun newChat() { if (!rejectWhileConversationMutationInProgress()) { setQuotedMessage(null); newChatForAssistant(uiStateStore.current.selectedAssistant()) } }
 
     internal fun newChatForAssistant(assistant: AssistantRecord?, bindDefaultModel: Boolean = false): Boolean {
         if (rejectWhileConversationMutationInProgress()) return false
@@ -960,7 +960,7 @@ class MainViewModel @JvmOverloads internal constructor(
         sessions: List<ChatSessionRecord>? = null, knowledgeBinding: Pair<String, Set<String>>? = null, generationRunId: Long? = null
     ): Job? = runChatSessionPersistence(chatSessionPersistencePort, sessions, knowledgeBinding, generationRunId)
 
-    private fun persistConversationMutation(
+    internal fun persistConversationMutation(
         sessions: List<ChatSessionRecord>, rollback: ConversationMutationRollbackState, preserveReusableNativePrefix: Boolean = false,
         onCommitted: (() -> Unit)? = null, onCommitFailed: (() -> Unit)? = null
     ): Job = runPersistConversationMutation(chatSessionPersistencePort, sessions, rollback, preserveReusableNativePrefix, onCommitted, onCommitFailed)

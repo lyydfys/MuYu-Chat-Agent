@@ -170,6 +170,16 @@ class MainActivity : ComponentActivity() {
         val diagnosticExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
             if (uri != null) startup.whenReady { it.exportDiagnosticReport(uri) }
         }
+        // User-initiated backup manifest (settings -> logs/privacy). The file is a versioned,
+        // verifiable envelope built by `McaBackupCoordinator`; it is never a database dump.
+        val backupExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            if (uri != null) startup.whenReady { it.exportBackup(uri) }
+        }
+        // Read-only verification of a picked backup. It reports compatibility and never replaces the
+        // current library, so binding it to the Activity is safe before a restore path exists.
+        val backupPreviewLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) startup.whenReady { it.previewBackupRestore(uri) }
+        }
         val chatExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
             val sId = pendingChatExportSessionId
             pendingChatExportSessionId = null
@@ -245,6 +255,8 @@ class MainActivity : ComponentActivity() {
                             onImportKnowledgeDocument = { id -> pendingKnowledgeBaseId = id; pendingKnowledgeDocumentOwner = viewModel.captureContentImportOwner(); knowledgeDocumentImportLauncher.launch(Unit) },
                             onAttachVisionProjector = { id -> pendingVisionProjectorModelId = id; visionProjectorImportLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
                             onExportDiagnostics = { diagnosticExportLauncher.launch("mca-diagnostic-${System.currentTimeMillis()}.json") },
+                            onExportBackup = { backupExportLauncher.launch(viewModel.suggestedBackupFileName()) },
+                            onPreviewBackupRestore = { backupPreviewLauncher.launch(arrayOf("application/json", "text/json")) },
                             onExportChatSession = { id -> pendingChatExportSessionId = id; chatExportLauncher.launch(viewModel.chatSessionExportFileName(id)) },
                             viewModel = viewModel
                         )
@@ -313,6 +325,7 @@ private fun McaApp(
     onImportOfflineTranslation: () -> Unit, onImportAssistantCardFile: () -> Unit,
     onImportWorldBookFile: (WorldBookImportScope) -> Unit, onImportKnowledgeDocument: (String) -> Unit,
     onAttachVisionProjector: (String) -> Unit, onExportDiagnostics: () -> Unit,
+    onExportBackup: () -> Unit, onPreviewBackupRestore: () -> Unit,
     onExportChatSession: (String) -> Unit, viewModel: MainViewModel
 ) {
     val timestampLocale = androidx.compose.ui.platform.LocalLocale.current.platformLocale
@@ -752,6 +765,7 @@ private fun McaApp(
                     state = state.settingsUiState(),
                     onRefreshLogs = viewModel::refreshLogs, onRefreshDiagnostics = viewModel::refreshDiagnostics,
                     onExportDiagnostics = onExportDiagnostics, onClearChatHistory = viewModel::clearChatHistory,
+                    onExportBackup = onExportBackup, onPreviewBackupRestore = onPreviewBackupRestore,
                     onClearImageLibrary = viewModel::clearImageLibrary, onClearFileLibrary = viewModel::clearFileLibrary,
                     onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled,
                     onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,

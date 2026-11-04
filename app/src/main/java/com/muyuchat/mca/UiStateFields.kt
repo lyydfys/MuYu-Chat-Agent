@@ -219,6 +219,9 @@ val UiStateFields.selectedKnowledgeBaseIds: Set<String>
 val UiStateFields.input: String
     get() = snapshot.input
 
+val UiStateFields.quotedMessage: com.muyuchat.feature.chat.ChatQuotedMessage?
+    get() = snapshot.quotedMessage
+
 val UiStateFields.isGenerating: Boolean
     get() = snapshot.isGenerating
 

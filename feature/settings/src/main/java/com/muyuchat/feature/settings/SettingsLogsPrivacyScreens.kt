@@ -50,7 +50,14 @@ fun LogsApiScreen(
     onRefreshLogs: () -> Unit,
     onRefreshDiagnostics: () -> Unit,
     onExportDiagnostics: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * Backup manifest export through the existing SAF create-document channel. Defaulted so the
+     * page (and its previews) still compile where no launcher is wired.
+     */
+    onExportBackup: () -> Unit = {},
+    /** Verify a picked backup file. Read-only: it never replaces the live library. */
+    onPreviewBackupRestore: () -> Unit = {}
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -120,6 +127,13 @@ fun LogsApiScreen(
                 )
             }
         }
+        item {
+            BackupRestoreCard(
+                statusMessage = state.statusMessage,
+                onExportBackup = onExportBackup,
+                onPreviewBackupRestore = onPreviewBackupRestore
+            )
+        }
         if (state.logs.isNotEmpty()) {
             item {
                 Text(
@@ -166,6 +180,82 @@ fun LogsApiScreen(
         }
     }
 }
+
+/**
+ * Backup entry points of the logs/privacy page.
+ *
+ * The copy states exactly what the file contains and, equally important, what this build does not
+ * do yet: a picked backup is verified against the format but never written into the live library.
+ */
+@Composable
+private fun BackupRestoreCard(
+    statusMessage: String?,
+    onExportBackup: () -> Unit,
+    onPreviewBackupRestore: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("备份与恢复", fontWeight = FontWeight.Bold)
+            Text(
+                "导出备份包：包含备份格式版本、导出时间、应用版本、六张数据表的行数与非敏感设置（温度、上下文、性能模式等）。",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "不含聊天正文、助手卡、世界书条目、知识库文档，也不含任何 API Key 或 token：凭据与 mca.db 按隐私规则不会写入备份文件。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                McaButton(
+                    style = McaButtonStyle.Primary,
+                    onClick = onExportBackup,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(McaIcons.FileDownload, contentDescription = null)
+                    Text("导出备份包（JSON）", modifier = Modifier.padding(start = 6.dp))
+                }
+                McaButton(
+                    style = McaButtonStyle.Outlined,
+                    onClick = onPreviewBackupRestore,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(McaIcons.UploadFile, contentDescription = null)
+                    Text("校验备份包", modifier = Modifier.padding(start = 6.dp))
+                }
+            }
+            Text(
+                "恢复入口当前只做校验：会检查版本与清单完整性并给出原因，但不会覆盖现有数据。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            backupStatusLine(statusMessage)?.let { line ->
+                Text(
+                    line,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The status line belongs to this card only when the backup action produced it; the app's global
+ * status surface stays the authority for everything else.
+ */
+internal fun backupStatusLine(statusMessage: String?): String? {
+    val text = statusMessage?.trim().orEmpty()
+    if (text.isEmpty()) return null
+    return text.takeIf { candidate -> BACKUP_STATUS_PREFIXES.any { prefix -> candidate.startsWith(prefix) } }
+}
+
+private val BACKUP_STATUS_PREFIXES = listOf("备份", "可恢复", "无法恢复")
 
 @Composable
 fun PrivacyDataScreen(
