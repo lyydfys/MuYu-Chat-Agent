@@ -163,27 +163,49 @@ fun DshOverlayPanel(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     MascotPreview(appearance = appearance, customImageMissing = snapshot.customImageMissing)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MascotChoice(
-                            label = "小鲸鱼",
-                            selected = selectedId(appearance) == MascotId.WHALE,
-                            onClick = { commit(appearance.copy(mascotId = MascotId.WHALE.id)) }
-                        )
-                        MascotChoice(
-                            label = "小肥鱼",
-                            selected = selectedId(appearance) == MascotId.FATTY_FISH,
-                            onClick = { commit(appearance.copy(mascotId = MascotId.FATTY_FISH.id)) }
-                        )
-                        MascotChoice(
-                            label = "小猫",
-                            selected = selectedId(appearance) == MascotId.CAT,
-                            onClick = { commit(appearance.copy(mascotId = MascotId.CAT.id)) }
-                        )
-                        MascotChoice(
-                            label = "自定义",
-                            selected = selectedId(appearance) == MascotId.CUSTOM,
-                            onClick = { commit(appearance.copy(mascotId = MascotId.CUSTOM.id)) }
-                        )
+                    // Two rows on purpose: six choices in one row clip at 320 dp, and the picker is
+                    // the one place where a clipped label would hide a whole character.
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            MascotChoice(
+                                label = "小鲸鱼",
+                                selected = selectedId(appearance) == MascotId.WHALE,
+                                onClick = { commit(appearance.copy(mascotId = MascotId.WHALE.id)) }
+                            )
+                            MascotChoice(
+                                label = "鲸鱼娘 Q",
+                                selected = selectedId(appearance) == MascotId.WHALE_GIRL_Q,
+                                onClick = {
+                                    commit(appearance.copy(mascotId = MascotId.WHALE_GIRL_Q.id))
+                                }
+                            )
+                            MascotChoice(
+                                label = "鲸鱼娘 成熟",
+                                selected = selectedId(appearance) == MascotId.WHALE_GIRL_MATURE,
+                                onClick = {
+                                    commit(
+                                        appearance.copy(mascotId = MascotId.WHALE_GIRL_MATURE.id)
+                                    )
+                                }
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            MascotChoice(
+                                label = "小肥鱼",
+                                selected = selectedId(appearance) == MascotId.FATTY_FISH,
+                                onClick = { commit(appearance.copy(mascotId = MascotId.FATTY_FISH.id)) }
+                            )
+                            MascotChoice(
+                                label = "小猫",
+                                selected = selectedId(appearance) == MascotId.CAT,
+                                onClick = { commit(appearance.copy(mascotId = MascotId.CAT.id)) }
+                            )
+                            MascotChoice(
+                                label = "自定义",
+                                selected = selectedId(appearance) == MascotId.CUSTOM,
+                                onClick = { commit(appearance.copy(mascotId = MascotId.CUSTOM.id)) }
+                            )
+                        }
                     }
                     if (selectedId(appearance) == MascotId.CUSTOM) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -367,6 +389,8 @@ private fun selectedId(appearance: DshOverlayAppearance): MascotId =
 
 private fun mascotOf(appearance: DshOverlayAppearance): McaMascot = when (selectedId(appearance)) {
     MascotId.WHALE -> McaMascot.WHALE
+    MascotId.WHALE_GIRL_Q -> McaMascot.WHALE_GIRL_Q
+    MascotId.WHALE_GIRL_MATURE -> McaMascot.WHALE_GIRL_MATURE
     MascotId.FATTY_FISH -> McaMascot.FATTY_FISH
     MascotId.CAT -> McaMascot.CAT
     MascotId.CUSTOM -> McaMascot.CUSTOM

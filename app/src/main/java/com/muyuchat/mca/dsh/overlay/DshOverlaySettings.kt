@@ -128,6 +128,8 @@ internal object DshOverlaySettingsCodec {
 /** The design-system mark a stored contract id paints; unknown ids fall back to the whale. */
 internal fun MascotId.toMcaMascot(): McaMascot = when (this) {
     MascotId.WHALE -> McaMascot.WHALE
+    MascotId.WHALE_GIRL_Q -> McaMascot.WHALE_GIRL_Q
+    MascotId.WHALE_GIRL_MATURE -> McaMascot.WHALE_GIRL_MATURE
     MascotId.FATTY_FISH -> McaMascot.FATTY_FISH
     MascotId.CAT -> McaMascot.CAT
     MascotId.CUSTOM -> McaMascot.CUSTOM
@@ -136,6 +138,8 @@ internal fun MascotId.toMcaMascot(): McaMascot = when (this) {
 /** Inverse of [toMcaMascot], used when the picker writes a new appearance. */
 internal fun McaMascot.toMascotId(): MascotId = when (this) {
     McaMascot.WHALE -> MascotId.WHALE
+    McaMascot.WHALE_GIRL_Q -> MascotId.WHALE_GIRL_Q
+    McaMascot.WHALE_GIRL_MATURE -> MascotId.WHALE_GIRL_MATURE
     McaMascot.FATTY_FISH -> MascotId.FATTY_FISH
     McaMascot.CAT -> MascotId.CAT
     McaMascot.CUSTOM -> MascotId.CUSTOM

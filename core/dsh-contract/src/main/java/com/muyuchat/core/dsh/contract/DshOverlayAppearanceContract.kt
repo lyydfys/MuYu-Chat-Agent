@@ -49,6 +49,8 @@ data class DshOverlayAppearance(
 /** Stable ids for the marks the design system can paint. Unknown ids decode to [WHALE]. */
 enum class MascotId(val id: String) {
     WHALE("whale"),
+    WHALE_GIRL_Q("whale_girl_q"),
+    WHALE_GIRL_MATURE("whale_girl_mature"),
     FATTY_FISH("fatty_fish"),
     CAT("cat"),
     CUSTOM("custom");
