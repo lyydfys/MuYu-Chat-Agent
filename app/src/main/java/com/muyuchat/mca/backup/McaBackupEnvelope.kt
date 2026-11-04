@@ -89,6 +89,11 @@ internal data class McaBackupEnvelope(
     val tables: List<McaBackupTableCount>,
     val settings: Map<String, String>,
     /**
+     * What this package covers. [McaBackupScope.FULL] by default, which is also what a package
+     * written before scoped backups existed means.
+     */
+    val scope: McaBackupScope = McaBackupScope.FULL,
+    /**
      * Row payload. Empty means "manifest only" — the shape every backup written before the row
      * export existed has, which still verifies but cannot be restored.
      */
@@ -122,6 +127,7 @@ internal data class McaBackupEnvelope(
             .put("appVersion", appVersionName)
             .put("tables", tableArray)
             .put("settings", settingsJson)
+            .put("scope", scope.wireName)
             // Omitted entirely for a manifest-only backup, so old readers keep seeing the old shape.
             .apply { if (payload.isNotEmpty()) put("payload", McaBackupRows.encode(payload)) }
             .toString(2)
@@ -205,6 +211,13 @@ internal fun decodeMcaBackupEnvelope(raw: String): McaBackupDecodeResult {
             else -> value.toString()
         }
     }
+    // Old files have no scope key and mean FULL; a value this build does not know is refused here so
+    // never reaches a restore (a scope decides which tables may be overwritten).
+    val scope = McaBackupScope.fromWireName(root.optString("scope", "").takeIf { root.has("scope") })
+        ?: return McaBackupDecodeResult.Malformed(
+            McaBackupRejection.UNKNOWN_SCOPE,
+            "未知的备份范围：${root.optString("scope")}"
+        )
     // Absent for manifest-only backups (and for every file written before row export existed).
     // A payload that is present but structurally broken is a corrupt file, not an old one.
     val payload = when {
@@ -223,6 +236,7 @@ internal fun decodeMcaBackupEnvelope(raw: String): McaBackupDecodeResult {
             appVersionName = appVersion,
             tables = tables,
             settings = settings,
+            scope = scope,
             payload = payload
         )
     )
@@ -243,7 +257,9 @@ internal enum class McaBackupRejection(val message: String) {
     SETTING_LIMIT_EXCEEDED("备份的设置项过多"),
     ENVELOPE_INCOMPATIBLE("备份与当前版本不兼容"),
     PAYLOAD_MISSING("备份包没有可恢复的行数据"),
-    CELL_TOO_LARGE("备份包含过大的单元格")
+    CELL_TOO_LARGE("备份包含过大的单元格"),
+    UNKNOWN_SCOPE("备份范围未知"),
+    SCOPE_MISMATCH("备份内容与声明的范围不一致")
 }
 
 /**

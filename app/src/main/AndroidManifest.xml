@@ -19,6 +19,20 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+    <!-- Optional DSH device-access capabilities (parity with the reference project's
+         sensors/location and read-only SMS entries). Every one of these is off by default and
+         needs an explicit in-app switch plus the runtime grant; a missing grant is reported as
+         NOT_GRANTED / PERMISSION_MISSING by the /sensors and /sms routes, never used for device
+         admission or feature gating. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- Sensors, GPS and flash are optional hardware: their absence narrows the capability list
+         and must never filter the APK off a device. -->
+    <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
     <uses-sdk tools:overrideLibrary="com.geniex.sdk" />
     <!-- Match Edge Gallery's optional NPU declaration without making NPU a
          device-admission requirement; native load remains authoritative. -->

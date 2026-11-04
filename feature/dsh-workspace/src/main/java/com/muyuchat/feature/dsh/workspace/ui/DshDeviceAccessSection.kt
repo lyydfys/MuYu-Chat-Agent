@@ -8,7 +8,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,6 +69,12 @@ fun DshDeviceAccessSection(modifier: Modifier = Modifier) {
         onSetAutoReconnect = viewModel::setAutoReconnect,
         onProvisionAdb = viewModel::provisionAdb,
         onAdbEndpointChange = viewModel::updateAdbEndpoint,
+        onSetPairingEnabled = viewModel::setPairingEnabled,
+        onTogglePairingSection = viewModel::togglePairingSection,
+        onPairingEndpointChange = viewModel::updatePairingEndpoint,
+        onPairingCodeChange = viewModel::updatePairingCode,
+        onStartPairing = viewModel::startPairing,
+        onCancelPairing = viewModel::cancelPairing,
         modifier = modifier
     )
 }
@@ -81,6 +90,12 @@ internal fun DshDeviceAccessSectionContent(
     onSetAutoReconnect: (Boolean) -> Unit,
     onProvisionAdb: () -> Unit,
     onAdbEndpointChange: (String) -> Unit,
+    onSetPairingEnabled: (Boolean) -> Unit = {},
+    onTogglePairingSection: () -> Unit = {},
+    onPairingEndpointChange: (String) -> Unit = {},
+    onPairingCodeChange: (String) -> Unit = {},
+    onStartPairing: () -> Unit = {},
+    onCancelPairing: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showProvisionConfirm by remember { mutableStateOf(false) }
@@ -197,6 +212,15 @@ internal fun DshDeviceAccessSectionContent(
                     color = MaterialTheme.colorScheme.tertiary
                 )
             }
+            DshAdbPairingControls(
+                state = state,
+                onSetPairingEnabled = onSetPairingEnabled,
+                onTogglePairingSection = onTogglePairingSection,
+                onPairingEndpointChange = onPairingEndpointChange,
+                onPairingCodeChange = onPairingCodeChange,
+                onStartPairing = onStartPairing,
+                onCancelPairing = onCancelPairing
+            )
         }
         state.provisioning?.let { provisioning ->
             DshAdbProvisioningResult(provisioning)
@@ -327,6 +351,116 @@ fun dshAdbProvisioningNextStepHint(failure: DshDeviceCommandFailure): String = w
 
     DshDeviceCommandFailure.EXEC_FAILED ->
         "命令执行失败：可先手动「连接 ADB」确认端口，再重试自动配置。"
+}
+
+/**
+ * Experimental wireless pairing: opt-in, collapsed by default, honest about what is unverified.
+ *
+ * The switch is the gate. While it is off this only explains how to enable it; the channel rejects any
+ * attempt without opening a socket. The warning is deliberately loud because the four wire-format
+ * assumptions have not been confirmed against a real adbd yet, so failures are expected.
+ */
+@Composable
+private fun DshAdbPairingControls(
+    state: DshDeviceAccessUiState,
+    onSetPairingEnabled: (Boolean) -> Unit,
+    onTogglePairingSection: () -> Unit,
+    onPairingEndpointChange: (String) -> Unit,
+    onPairingCodeChange: (String) -> Unit,
+    onStartPairing: () -> Unit,
+    onCancelPairing: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Switch(
+                checked = state.pairingEnabled,
+                onCheckedChange = onSetPairingEnabled,
+                enabled = state.busy == null && !state.pairingBusy
+            )
+            Text(
+                text = "允许实验性无线配对",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (!state.pairingEnabled) {
+            Text(
+                text = "实验性配对需要先打开上面的开关。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            return@Column
+        }
+        McaButton(
+            style = McaButtonStyle.Text,
+            onClick = onTogglePairingSection,
+            enabled = !state.pairingBusy
+        ) {
+            Text(if (state.pairingExpanded) "收起：配对无线调试" else "配对无线调试")
+        }
+        if (!state.pairingExpanded) return@Column
+
+        Text(
+            text = "自签证书 TLS + Curve25519 SPAKE2 直连配对端口；四项线格式假设尚未在真机确认，" +
+                "失败属预期；仅在你信任当前网络时使用。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error
+        )
+        OutlinedTextField(
+            value = state.pairingEndpoint,
+            onValueChange = onPairingEndpointChange,
+            label = { Text("配对端点 host:port") },
+            singleLine = true,
+            enabled = !state.pairingBusy,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = state.pairingCode,
+            onValueChange = onPairingCodeChange,
+            label = { Text("6 位配对码") },
+            singleLine = true,
+            enabled = !state.pairingBusy,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DshDeviceActionButton(
+                label = "开始配对",
+                busy = state.pairingBusy,
+                enabled = !state.pairingBusy,
+                onClick = onStartPairing,
+                modifier = Modifier.weight(1f)
+            )
+            if (state.pairingBusy) {
+                DshDeviceActionButton(
+                    label = "取消",
+                    busy = false,
+                    enabled = true,
+                    onClick = onCancelPairing,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        state.pairingResult?.let { line ->
+            Text(
+                text = line,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        state.pairingFailure?.let { line ->
+            Text(
+                text = line,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+    }
 }
 
 @Composable

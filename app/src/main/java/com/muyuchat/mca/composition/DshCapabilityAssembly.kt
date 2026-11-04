@@ -19,7 +19,9 @@ import com.muyuchat.core.dsh.contract.capability.DshCapability
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityAuthority
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityBridgeEndpoint
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityBridgeEndpointProvider
+import com.muyuchat.core.dsh.contract.capability.DshCapabilityConsentDecision
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityConsentPort
+import com.muyuchat.core.dsh.contract.capability.DshCapabilityConsentPrompt
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityHttpMethod
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityRouteTable
 import com.muyuchat.core.dsh.contract.capability.DshCapabilityState
@@ -57,6 +59,12 @@ import com.muyuchat.core.dsh.vscreen.DshVscreenProjectionHolder
 import com.muyuchat.core.dsh.vscreen.DshVscreenProof
 import com.muyuchat.core.dsh.vscreen.DshVscreenRoutes
 import com.muyuchat.core.dsh.vscreen.VirtualScreenOwner
+import com.muyuchat.mca.agent.device.AgentDeviceAccessStore
+import com.muyuchat.mca.agent.device.AgentDeviceCapabilityRoutes
+import com.muyuchat.mca.agent.device.AgentDevicePermissionGate
+import com.muyuchat.mca.agent.device.AgentSmsConfirmationPort
+import com.muyuchat.mca.agent.device.sensors.AndroidAgentSensorReader
+import com.muyuchat.mca.agent.device.sms.AndroidAgentSmsReader
 import com.muyuchat.mca.dsh.overlay.DshOverlayController
 import com.muyuchat.mca.dsh.overlay.DshOverlayHost
 import com.muyuchat.mca.dsh.overlay.DshOverlayStatusProvider
@@ -144,6 +152,35 @@ internal class DshCapabilityAssembly(
         if (path.startsWith("/terminal/")) terminalThrottle else throttle
     }
     private val channels: DshPrivilegedChannelProvider = DevicePrivilegeProbe(appContext)
+
+    /**
+     * Device-access consent (sensors/location/torch + read-only SMS), read from the shared
+     * preferences the Settings card writes. Everything defaults to off; the routes never bypass it.
+     */
+    private val deviceAccessStore: AgentDeviceAccessStore by lazy { AgentDeviceAccessStore(appContext) }
+
+    /** Runtime-permission probe of the device-access lane; `null` permission means "no grant needed". */
+    private val deviceAccessPermissions: AgentDevicePermissionGate = AgentDevicePermissionGate { permission ->
+        permission == null ||
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                appContext,
+                permission
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * One confirmation per SMS query, shown through the one capability consent dialog. A denial or
+     * a background (no resumed surface) answer is a refusal; the route reports CONFIRMATION_DENIED.
+     */
+    private val smsQueryConfirmation: AgentSmsConfirmationPort = AgentSmsConfirmationPort { detail ->
+        consent.requestConsent(
+            DshCapabilityConsentPrompt(
+                title = "允许 DSH 只读查询短信？",
+                detail = detail,
+                capability = DshCapability.ANDROID_SYSTEM
+            )
+        ) == DshCapabilityConsentDecision.ALLOW
+    }
 
     /**
      * The real privileged shell channels.
@@ -479,7 +516,9 @@ internal class DshCapabilityAssembly(
                 toolRegistered = bridgeRunning,
                 detail = if (bridgeRunning) {
                     "App-local: clipboard/notification/usage/overlay/setting; " +
-                        "package/app/screenshot/input use the payload's own root/Shizuku path"
+                        "package/app/screenshot/input use the payload's own root/Shizuku path; " +
+                        AgentDeviceCapabilityRoutes.summaryDetail(deviceAccessStore) +
+                        " (GET /sensors /sms, POST /sensors/torch)"
                 } else {
                     "App-local bridge is not running"
                 }
@@ -783,6 +822,26 @@ internal class DshCapabilityAssembly(
         }
         // One owner, three typed tree routes; no chooser/save/download path is mounted here.
         mountWorkspaceTreeGrantRoutes(builder, workspaceTreeGrant.value)
+        // Device-access lane (sensors/location/torch + read-only SMS). The capability enum is a
+        // contract file this cut must not change, so the three routes are mounted under
+        // ANDROID_SYSTEM and the console detail names them explicitly. Each path keeps its own
+        // verb: the two reads are GET, the torch switch is POST.
+        val deviceAccessTable = AgentDeviceCapabilityRoutes(
+            consent = deviceAccessStore,
+            permissions = deviceAccessPermissions,
+            sensors = AndroidAgentSensorReader(appContext, deviceAccessStore),
+            sms = AndroidAgentSmsReader(appContext),
+            smsConfirmation = smsQueryConfirmation
+        ).register(DshCapabilityRouteTable.builder()).build()
+        AgentDeviceCapabilityRoutes.paths().forEach { path ->
+            val handler = deviceAccessTable.handlerFor(path) ?: return@forEach
+            builder.route(
+                path = path,
+                methods = AgentDeviceCapabilityRoutes.methodsFor(path),
+                capability = DshCapability.ANDROID_SYSTEM,
+                handler = handler
+            )
+        }
         return builder.build()
     }
 

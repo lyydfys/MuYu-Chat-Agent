@@ -161,9 +161,12 @@ internal object McaBackupRows {
      */
     fun plan(envelope: McaBackupEnvelope, payload: List<McaBackupTableRows>?): McaBackupPayloadPlan {
         if (payload == null || payload.isEmpty()) {
+            // A settings/plugins package legitimately has no row data; say *why* it cannot be
+            // restored instead of the generic "manifest only" message.
             return McaBackupPayloadPlan.Rejected(
                 McaBackupRejection.PAYLOAD_MISSING,
-                "备份包只包含清单，没有可恢复的行数据"
+                McaBackupScopePlan.restoreUnavailableReason(envelope.scope)
+                    ?: "备份包只包含清单，没有可恢复的行数据"
             )
         }
         val duplicated = payload.groupingBy { it.table }.eachCount().filterValues { it > 1 }.keys
@@ -173,9 +176,25 @@ internal object McaBackupRows {
                 "重复的数据表：${duplicated.joinToString(", ") { it.wireId }}"
             )
         }
-        // Only the database-backed families must be present: world books are a file store and
-        // settings travel in the settings map, so a payload is never expected to carry them.
-        val missing = McaBackupTable.RESTORABLE.filter { required -> payload.none { it.table == required } }
+        // Scope first: a package only carries the families its scope covers, and a restore only ever
+        // writes those. The plugins/settings scopes have nothing to write into the database at all.
+        val requiredTables = McaBackupScopePlan.tablesFor(envelope.scope)
+        if (requiredTables.isEmpty()) {
+            return McaBackupPayloadPlan.Rejected(
+                McaBackupRejection.PAYLOAD_MISSING,
+                McaBackupScopePlan.restoreUnavailableReason(envelope.scope)
+                    ?: "备份没有可恢复的行数据"
+            )
+        }
+        val outsideScope = payload.filter { it.table.restorable && it.table !in requiredTables }
+        if (outsideScope.isNotEmpty()) {
+            return McaBackupPayloadPlan.Rejected(
+                McaBackupRejection.SCOPE_MISMATCH,
+                "备份范围「${envelope.scope.label}」不含：" +
+                    outsideScope.joinToString(", ") { it.table.label }
+            )
+        }
+        val missing = requiredTables.filter { required -> payload.none { it.table == required } }
         if (missing.isNotEmpty()) {
             return McaBackupPayloadPlan.Rejected(
                 McaBackupRejection.TABLE_MISSING,

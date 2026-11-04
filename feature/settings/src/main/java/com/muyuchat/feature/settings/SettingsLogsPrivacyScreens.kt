@@ -3,6 +3,13 @@ package com.muyuchat.feature.settings
 import com.muyuchat.core.designsystem.*
 
 import android.content.ClipData
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,12 +26,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -33,10 +43,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import kotlinx.coroutines.launch
@@ -382,6 +397,10 @@ fun PrivacyDataScreen(
                     }
                 }
             )
+        }
+        item {
+            // DSH 设备访问（传感器/定位/手电筒 + 短信只读）：默认全关，逐项授权。
+            DeviceAccessCard()
         }
         item {
             PrivacyCleanupCard(
@@ -810,6 +829,310 @@ private fun LogsEmptyState() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// DSH 设备访问授权卡：传感器/定位/手电筒（逐项）+ 短信只读（单独开关 + 每次确认）
+//
+// 这一块与 app 侧 `AgentDeviceAccessStore` 共用同一个 SharedPreferences 文件与键名；两个模块
+// 之间没有编译期依赖（feature:settings 不能依赖 app），键名一致性由 app 侧
+// `AgentDeviceAccessSettingsKeyContractTest` 做源码契约校验。全部默认关闭。
+// ---------------------------------------------------------------------------------------------
+
+private const val DEVICE_ACCESS_PREFERENCES = "mca_agent_device_access"
+private const val DEVICE_ACCESS_SENSOR_KEY_PREFIX = "sensor."
+private const val DEVICE_ACCESS_SMS_READ_KEY = "sms.read_enabled"
+private const val DEVICE_ACCESS_SMS_SKIP_KEY = "sms.skip_confirmation_session"
+
+private const val PERMISSION_ACTIVITY_RECOGNITION = "android.permission.ACTIVITY_RECOGNITION"
+private const val PERMISSION_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATION"
+private const val PERMISSION_READ_SMS = "android.permission.READ_SMS"
+
+/** One row of the sensor authorisation list (ids match `AgentSensorId` on the app side). */
+private data class DeviceSensorSetting(
+    val id: String,
+    val name: String,
+    val permission: String?,
+    val permissionLabel: String?,
+    val note: String
+)
+
+private val DEVICE_SENSOR_SETTINGS = listOf(
+    DeviceSensorSetting(
+        id = "light", name = "光线", permission = null, permissionLabel = null,
+        note = "读取一次环境光强度（lux）"
+    ),
+    DeviceSensorSetting(
+        id = "accelerometer", name = "加速度", permission = null, permissionLabel = null,
+        note = "读取一次三轴加速度合矢量（m/s²）"
+    ),
+    DeviceSensorSetting(
+        id = "gyroscope", name = "陀螺仪", permission = null, permissionLabel = null,
+        note = "读取一次三轴角速度合矢量（rad/s）"
+    ),
+    DeviceSensorSetting(
+        id = "magnetometer", name = "磁力计", permission = null, permissionLabel = null,
+        note = "读取一次三轴磁场合矢量（µT）"
+    ),
+    DeviceSensorSetting(
+        id = "barometer", name = "气压", permission = null, permissionLabel = null,
+        note = "读取一次大气压（hPa）"
+    ),
+    DeviceSensorSetting(
+        id = "step_counter", name = "步数", permission = PERMISSION_ACTIVITY_RECOGNITION,
+        permissionLabel = "身体活动",
+        note = "读取今日累计步数；需要「身体活动」权限"
+    ),
+    DeviceSensorSetting(
+        id = "location", name = "定位", permission = PERMISSION_FINE_LOCATION,
+        permissionLabel = "精确位置",
+        note = "只取最近已知位置，不主动发起新定位；需要「位置」权限"
+    ),
+    DeviceSensorSetting(
+        id = "torch", name = "手电筒", permission = null, permissionLabel = null,
+        note = "允许 DSH 开关后置闪光灯（不读取内容）"
+    )
+)
+
+private fun deviceAccessPermissionGranted(context: Context, permission: String?): Boolean =
+    permission == null ||
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+private fun openMcaAppSettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null)
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
+}
+
+@Composable
+private fun DeviceAccessCard() {
+    val context = LocalContext.current
+    val preferences = remember(context) {
+        context.getSharedPreferences(DEVICE_ACCESS_PREFERENCES, Context.MODE_PRIVATE)
+    }
+    // Re-read permission grants when the user comes back from the system settings page.
+    var permissionRevision by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionRevision += 1
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val permissionGrants = remember(permissionRevision, context) {
+        DEVICE_SENSOR_SETTINGS.associate { it.id to deviceAccessPermissionGranted(context, it.permission) }
+    }
+    var sensorToggles by remember {
+        mutableStateOf(
+            DEVICE_SENSOR_SETTINGS.associate { setting ->
+                setting.id to preferences.getBoolean(DEVICE_ACCESS_SENSOR_KEY_PREFIX + setting.id, false)
+            }
+        )
+    }
+    var pendingSensorId by remember { mutableStateOf<String?>(null) }
+    var smsPermissionDenied by remember { mutableStateOf(false) }
+    var smsEnabled by remember {
+        mutableStateOf(preferences.getBoolean(DEVICE_ACCESS_SMS_READ_KEY, false))
+    }
+    var smsSkipConfirmation by remember {
+        mutableStateOf(preferences.getBoolean(DEVICE_ACCESS_SMS_SKIP_KEY, false))
+    }
+
+    fun writeSensor(setting: DeviceSensorSetting, enabled: Boolean) {
+        preferences.edit().putBoolean(DEVICE_ACCESS_SENSOR_KEY_PREFIX + setting.id, enabled).apply()
+        sensorToggles = sensorToggles + (setting.id to enabled)
+    }
+
+    val activityRecognitionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { grantedNow ->
+        val sensorId = pendingSensorId
+        pendingSensorId = null
+        val setting = DEVICE_SENSOR_SETTINGS.firstOrNull { it.id == sensorId }
+        if (grantedNow && setting != null) writeSensor(setting, true)
+        permissionRevision += 1
+    }
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { grantedNow ->
+        val sensorId = pendingSensorId
+        pendingSensorId = null
+        val setting = DEVICE_SENSOR_SETTINGS.firstOrNull { it.id == sensorId }
+        if (grantedNow && setting != null) writeSensor(setting, true)
+        permissionRevision += 1
+    }
+    val smsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { grantedNow ->
+        smsPermissionDenied = !grantedNow
+        if (grantedNow) {
+            preferences.edit().putBoolean(DEVICE_ACCESS_SMS_READ_KEY, true).apply()
+            smsEnabled = true
+        }
+        permissionRevision += 1
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("设备传感器与位置（DSH 能力）", fontWeight = FontWeight.Bold)
+            Text(
+                "默认全部关闭，由你逐项打开。每次请求只读取一次数据，不会持续采集；" +
+                    "定位只取最近已知位置，不主动发起新定位以免耗电。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            DEVICE_SENSOR_SETTINGS.forEach { setting ->
+                val enabled = sensorToggles[setting.id] == true
+                val granted = permissionGrants[setting.id] != false
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(setting.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            setting.note,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    McaSwitch(
+                        checked = enabled,
+                        onCheckedChange = { wanted ->
+                            if (!wanted) {
+                                writeSensor(setting, false)
+                            } else if (granted) {
+                                writeSensor(setting, true)
+                            } else {
+                                pendingSensorId = setting.id
+                                when (setting.permission) {
+                                    PERMISSION_ACTIVITY_RECOGNITION -> activityRecognitionLauncher.launch(
+                                        PERMISSION_ACTIVITY_RECOGNITION
+                                    )
+                                    PERMISSION_FINE_LOCATION -> locationLauncher.launch(PERMISSION_FINE_LOCATION)
+                                }
+                            }
+                        }
+                    )
+                }
+                if (enabled && !granted) {
+                    Text(
+                        "缺少「${setting.permissionLabel}」权限，DSH 读取时会返回未授权。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        McaButton(style = McaButtonStyle.Text, onClick = {
+                            pendingSensorId = setting.id
+                            when (setting.permission) {
+                                PERMISSION_ACTIVITY_RECOGNITION ->
+                                    activityRecognitionLauncher.launch(PERMISSION_ACTIVITY_RECOGNITION)
+                                PERMISSION_FINE_LOCATION ->
+                                    locationLauncher.launch(PERMISSION_FINE_LOCATION)
+                            }
+                        }) { Text("授予权限") }
+                        McaButton(style = McaButtonStyle.Text, onClick = { openMcaAppSettings(context) }) {
+                            Text("去系统设置")
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Text("短信只读查询（DSH 能力）", fontWeight = FontWeight.Bold)
+            Text(
+                "只读查询最近短信（最多 20 条），返回号码后 4 位、接收时间和 120 字预览；" +
+                    "不发送、不修改、不写日志、不进备份。需要系统「短信」权限，且每次查询仍需确认。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            val smsPermissionGranted = deviceAccessPermissionGranted(context, PERMISSION_READ_SMS)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("允许 DSH 读取短信", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (smsPermissionGranted) "系统权限已授予" else "尚未授予系统「短信」权限",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (smsPermissionGranted) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        }
+                    )
+                }
+                McaSwitch(
+                    checked = smsEnabled && smsPermissionGranted,
+                    onCheckedChange = { wanted ->
+                        if (!wanted) {
+                            preferences.edit().putBoolean(DEVICE_ACCESS_SMS_READ_KEY, false).apply()
+                            smsEnabled = false
+                        } else {
+                            smsPermissionDenied = false
+                            smsLauncher.launch(PERMISSION_READ_SMS)
+                        }
+                    }
+                )
+            }
+            if (!smsPermissionGranted || smsPermissionDenied) {
+                Text(
+                    "短信权限被拒绝或系统未授予：DSH 查询会返回未授权。可重新授权，或到系统设置中打开。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    McaButton(style = McaButtonStyle.Text, onClick = {
+                        smsPermissionDenied = false
+                        smsLauncher.launch(PERMISSION_READ_SMS)
+                    }) { Text("重新授权") }
+                    McaButton(style = McaButtonStyle.Text, onClick = { openMcaAppSettings(context) }) {
+                        Text("去系统设置")
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("本次运行内不再询问短信确认", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "关闭时每次查询都会弹一次确认；重启应用后恢复询问。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                McaSwitch(
+                    checked = smsSkipConfirmation,
+                    enabled = smsEnabled && smsPermissionGranted,
+                    onCheckedChange = { wanted ->
+                        preferences.edit().putBoolean(DEVICE_ACCESS_SMS_SKIP_KEY, wanted).apply()
+                        smsSkipConfirmation = wanted
+                    }
+                )
+            }
+            Text(
+                "以上能力只服务于 DSH 官方的设备与短信工具；MCA 自身不会在后台读取它们，也不会上传到任何服务器。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }

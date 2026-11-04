@@ -129,7 +129,11 @@ class DshDeviceChannelHost internal constructor(
                 adb = DshAdbChannel(
                     transport = SocketAdbTransport(identityFile),
                     // Experimental pairing records the endpoint only after the device proves the exchange.
-                    pairingPort = DshAdbPairingPort(saveEndpoint = endpointStore::saveEndpoint)
+                    pairingPort = DshAdbPairingPort(
+                        saveEndpoint = endpointStore::saveEndpoint,
+                        // Experimental path: the four wire-format assumptions are opt-in by design.
+                        assumptions = AdbPairingWireAssumptions.EXPERIMENTAL
+                    )
                 ),
                 endpointStore = endpointStore,
                 provisionerFactory = { DshAdbProvisioner(root = root, identityFile = identityFile) }

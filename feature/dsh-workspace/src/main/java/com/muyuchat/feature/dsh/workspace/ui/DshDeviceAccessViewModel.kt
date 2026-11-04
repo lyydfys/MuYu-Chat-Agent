@@ -83,7 +83,21 @@ data class DshDeviceAccessUiState(
     /** "waiting N s for retry k/5" note while an automatic attempt is pending. */
     val retryNote: String? = null,
     /** Result of the last one-tap provisioning run, step by step. */
-    val provisioning: DshAdbProvisioningUiState? = null
+    val provisioning: DshAdbProvisioningUiState? = null,
+    /** Experimental wireless pairing: off by default, and the section stays hidden while off. */
+    val pairingEnabled: Boolean = false,
+    /** Whether the pairing form is expanded. */
+    val pairingExpanded: Boolean = false,
+    /** "host:port" of the device pairing endpoint. */
+    val pairingEndpoint: String = "",
+    /** Six digits only; never logged or persisted. */
+    val pairingCode: String = "",
+    /** True while a pairing attempt is in flight (independent from [busy]). */
+    val pairingBusy: Boolean = false,
+    /** Success line, e.g. "配对成功，已可用 ADB 通道（无需 root）". */
+    val pairingResult: String? = null,
+    /** Failure line: stable reason code + unverified assumption names; never the code or hex. */
+    val pairingFailure: String? = null
 )
 
 /** Default ADB endpoint: the loopback port `adb tcpip 5555` opens. */
@@ -206,6 +220,9 @@ class DshDeviceAccessViewModel internal constructor(
     private var rootJob: Job? = null
     private var adbJob: Job? = null
     private var provisionJob: Job? = null
+
+    /** Single-flight slot for the experimental pairing attempt; independent from [busy]. */
+    private var pairingJob: Job? = null
     private var started = false
 
     /** First entry into the console block. Idempotent and privilege-free. */
@@ -262,6 +279,90 @@ class DshDeviceAccessViewModel internal constructor(
     /** Updates the endpoint text and clears the previous validation message. */
     fun updateAdbEndpoint(text: String) {
         _state.update { it.copy(adbEndpoint = text, adbEndpointError = null) }
+    }
+
+    /**
+     * Turns the experimental wireless pairing switch on/off.
+     *
+     * Off is the default: the section hides the form and [DshAdbChannel.pair] refuses without opening a
+     * socket. Turning it off clears any previous result and collapses the form.
+     */
+    fun setPairingEnabled(enabled: Boolean) {
+        adb.setExperimentalPairingEnabled(enabled)
+        _state.update {
+            it.copy(
+                pairingEnabled = enabled,
+                pairingExpanded = false,
+                pairingResult = null,
+                pairingFailure = null
+            )
+        }
+    }
+
+    /** Expands/collapses the experimental pairing form; no channel side effects. */
+    fun togglePairingSection() {
+        _state.update { it.copy(pairingExpanded = !it.pairingExpanded) }
+    }
+
+    fun updatePairingEndpoint(text: String) {
+        _state.update { it.copy(pairingEndpoint = text, pairingFailure = null) }
+    }
+
+    /** Keeps the code field to six ASCII digits (non-digits are dropped as they are typed). */
+    fun updatePairingCode(text: String) {
+        val digits = dshAdbPairingCodeDigits(text)
+        _state.update { it.copy(pairingCode = digits, pairingFailure = null) }
+    }
+
+    /**
+     * Runs one experimental pairing attempt.
+     *
+     * Inputs are validated locally before the channel is touched. A success fills
+     * [DshDeviceAccessUiState.adbEndpoint] with the proven endpoint so the user can connect; a failure
+     * renders only the stable reason code plus the unverified assumption names.
+     */
+    fun startPairing() {
+        if (pairingJob?.isActive == true) return
+        val inputError = dshAdbPairingInputError(
+            hostPortValid = dshAdbEndpointFrom(_state.value.pairingEndpoint) != null,
+            code = _state.value.pairingCode
+        )
+        if (inputError != null) {
+            _state.update { it.copy(pairingFailure = inputError) }
+            return
+        }
+        val endpoint = requireNotNull(dshAdbEndpointFrom(_state.value.pairingEndpoint))
+        val code = _state.value.pairingCode
+        pairingJob = viewModelScope.launch {
+            _state.update { it.copy(pairingBusy = true, pairingFailure = null, pairingResult = null) }
+            val result = adb.pair(endpoint.host, endpoint.port, code)
+            _state.update { current ->
+                if (result.succeeded) {
+                    current.copy(
+                        pairingBusy = false,
+                        pairingResult = result.message,
+                        pairingFailure = null,
+                        adbEndpoint = "${endpoint.host}:${endpoint.port}"
+                    )
+                } else {
+                    current.copy(
+                        pairingBusy = false,
+                        pairingResult = null,
+                        pairingFailure = dshAdbPairingFailureLine(
+                            result.reasonCode,
+                            result.unverifiedAssumptions
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** Cancels a running pairing attempt; the channel reports `cancelled`. */
+    fun cancelPairing() {
+        pairingJob?.cancel()
+        pairingJob = null
+        _state.update { it.copy(pairingBusy = false) }
     }
 
     /**
