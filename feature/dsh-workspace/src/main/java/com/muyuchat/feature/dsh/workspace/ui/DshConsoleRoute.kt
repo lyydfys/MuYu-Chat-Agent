@@ -85,6 +85,7 @@ fun DshConsoleRoute(
                 // Additive device-privilege block of the same console column (Root + ADB status).
                 // It adds no destination and does not reorder the existing sections.
                 DshDeviceAccessSection()
+                DshPictureInPictureSection()
             }
         )
         SnackbarHost(
