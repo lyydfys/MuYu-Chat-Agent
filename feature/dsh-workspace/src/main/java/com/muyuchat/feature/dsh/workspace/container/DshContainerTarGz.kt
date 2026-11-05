@@ -27,6 +27,9 @@ object DshContainerTarGz {
 
     /** Depth bound of the materialisation walk. */
     const val MAX_MATERIALISE_DEPTH: Int = 8
+
+    /** Consecutive zero-byte reads tolerated before a stream is declared stalled. */
+    const val MAX_IDLE_READS: Int = 2
     /** A real Ubuntu base rootfs has ~20k entries; this is a runaway guard, not a target. */
     const val MAX_ENTRIES: Int = 400_000
 
@@ -72,6 +75,7 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
         val root = destination.canonicalFile
         val rootPrefix = root.absolutePath + File.separator
 
+        var currentEntry = ""
         var entries = 0
         var files = 0
         var total = 0L
@@ -136,6 +140,7 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                 pendingPaxSize = null
 
                 if (name.isEmpty()) throw Rejection("tar 条目缺少名字")
+            currentEntry = name
                 if (name.startsWith("/")) throw Rejection("tar 条目使用绝对路径：$name")
                 if (name.split('/').any { it == ".." }) throw Rejection("tar 条目包含 .. 段：$name")
 
@@ -321,11 +326,13 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
         val buffer = ByteArray(64 * 1024)
         var remaining = size
         var written = 0L
+        var idle = 0
         target.outputStream().buffered(64 * 1024).use { out ->
             while (remaining > 0) {
                 val want = minOf(remaining, buffer.size.toLong()).toInt()
                 val read = tar.read(buffer, 0, want)
                 if (read <= 0) throw Rejection("tar 数据在 ${target.name} 处意外结束")
+                idle = 0
                 out.write(buffer, 0, read)
                 remaining -= read
                 written += read
@@ -419,11 +426,19 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
 
     private fun skipFully(input: InputStream, length: Long) {
         var remaining = length
+        var idle = 0
         val buffer = ByteArray(8 * 1024)
         while (remaining > 0) {
             val n = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
             if (n < 0) throw Rejection("tar 数据被截断")
-            remaining -= n
+            if (n == 0) {
+                // Some streams may report "nothing available" without EOF; without this guard the
+                // loop would spin forever and the device would look frozen mid-extraction.
+                if (++idle > MAX_IDLE_READS) throw Rejection("跳过条目数据时读取停滞（第 $length 字节）")
+            } else {
+                idle = 0
+                remaining -= n
+            }
         }
     }
 
