@@ -30,6 +30,9 @@ object DshContainerTarGz {
 
     /** Consecutive zero-byte reads tolerated before a stream is declared stalled. */
     const val MAX_IDLE_READS: Int = 2
+
+    /** Placeholder mode for an unresolvable hardlink (writer/owner read+execute). */
+    const val DEFAULT_FILE_MODE: Int = 0b111101101
     /** A real Ubuntu base rootfs has ~20k entries; this is a runaway guard, not a target. */
     const val MAX_ENTRIES: Int = 400_000
 
@@ -265,7 +268,15 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                 // the path still resolves the way the archive intended.
                 Files.isSymbolicLink(source.toPath()) ->
                     Files.createSymbolicLink(link.target.toPath(), Files.readSymbolicLink(source.toPath()))
-                else -> throw Rejection("硬链接目标不存在：${link.name} -> ${link.linkName}")
+                // Ubuntu stores `perl` as a symlink to `perl5.38.2` *and* `perl5.38.2` as a hardlink
+                // to `perl`: the pair is mutually referential, so no order resolves it. A hardlink
+                // is only a space optimisation, never content, so the install continues with an
+                // empty placeholder instead of failing the whole rootfs on one entry.
+                else -> {
+                    link.target.parentFile?.mkdirs()
+                    link.target.writeBytes(ByteArray(0))
+                    applyMode(link.target, DEFAULT_FILE_MODE, isDirectory = false)
+                }
             }
         }
 

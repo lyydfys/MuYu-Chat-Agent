@@ -93,7 +93,8 @@ object DshContainerInstaller {
                 is Event.Succeeded -> "step ${event.step.position} ok ${event.detail}"
                 is Event.Failed -> "step ${event.step.position} FAILED ${event.reason} — ${event.detail}"
             }
-            android.util.Log.i("MCA-CONTAINER", text)
+            // Guarded: android.util.Log is not mocked on the JVM, and this file is unit tested there.
+            runCatching { android.util.Log.i("MCA-CONTAINER", text) }
             onEventRaw(event)
         }
         val containerDir = File(layout.containerDir)
