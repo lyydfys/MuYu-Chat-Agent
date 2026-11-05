@@ -40,24 +40,41 @@
   对一个可执行文件做 strip 没有意义，且可能破坏其入口。
 - rootfs 是**数据**：解包到 `files/dsh/container/rootfs`，由 proot 以 `-r` 读取。
 
-### 2.1 已实测的平台墙（v0.3.9 真机结论）
+### 2.1 真机结论：proot 的 loader 必须一起打包
 
-真机上 proot 本身能跑（`libproot.so --version` 输出 `5.1.107.102`），但**guest 程序起不来**：
+早先“Android W^X 挡住了 guest exec”是**误诊**，真机日志与 proot 源码都否定了它：
 
 ```
-proot error: execve("/usr/bin/sh"): Permission denied
-proot warning: can't canonicalize /data/data/com.termux/files/usr/tmp/: Permission denied
+proot info: translate("/" + "/usr/bin/dash") -> ".../rootfs/usr/bin/dash"
+proot error: execve("/usr/bin/dash"): Permission denied
 ```
 
-原因不是配置错误，而是 Android 的 W^X 策略：`targetSdk 36` 的 `untrusted_app` 域**不允许
-execve 应用可写存储里的 ELF**，而 rootfs 只能落在可写的应用私有目录里。允许执行的
-`nativeLibraryDir` 是只读且随 APK 打包的，装不下一棵可变的 rootfs。
+同一个文件用**它自己的 `ld-linux-aarch64.so.1` 直接跑**是成功的 —— guest ELF 本身可以执行。
+再看 proot 源码（`src/execve/enter.c`）：对动态链接 ELF，proot **不 exec 你的 guest 程序**，
+它 exec 的是自己的 **loader**（注释原文 *"Execute the loader instead of the program"*），
+由 loader 以 `mmap` 把 guest 程序与解释器映射进来 —— `mmap` 不受 W^X 限制。
 
-Termux / proot-distro 之所以能用，是因为 Termux 长期把 `targetSdk` 停在 28，从而保留了
-exec 豁免。MCA 不会为了这个特性把 `targetSdk` 降回 28——那会丢掉整个平台的兼容性要求。
+真正被拒绝的是**那一次 loader 的 exec**：`PROOT_LOADER` 未设置时 proot 把 loader 写到临时目录
+再 exec，而 targetSdk 36 的 `untrusted_app` 不允许 exec 应用可写目录里的文件。
 
-因此：**六步流水线可以完整跑完并把 rootfs 装好，但第 6 步探针会在 targetSdk 36 的设备上
-失败**，失败原因会如实显示为"execve ... Permission denied"，不会被伪装成成功。
+修法（已落地，**不需要改 targetSdk**）：
+
+1. 从 Termux proot 包取出 `libexec/proot/loader`（18,136 字节），作为
+   **`libproot_loader.so`** 打进 `jniLibs`；`nativeLibraryDir` 是本应用唯一允许 exec 的目录；
+2. 运行时设置 `PROOT_LOADER=<nativeLibraryDir>/libproot_loader.so`；
+3. `PROOT_TMP_DIR` 指向 app 私有 scratch（只放临时文件，永不从这里 exec）。
+
+真机验证（`98a37aa7`，targetSdk 36 未改）：
+
+```
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+VERSION_ID="24.04"
+aarch64
+292            # /usr/bin 下可执行程序数量
+```
+
+同类先例：UserLAnd（Play 在架、targetSdk 37）同样把 proot 当作假 `.so` 打包执行。
+
 
 ## 3. 六步安装流水线
 
@@ -117,7 +134,8 @@ proot -r <rootfsPath> -0 -w /root \
 - manifest：schema 不符、SHA 形状不符、`matchesArchive` 的字节数与哈希两条路径。
 
 真机已验证（v0.3.9，`98a37aa7`）：proot 二进制可从 `nativeLibraryDir` 执行（`--version` 通过）；
-rootfs 归档可从 APK 资产读出并按官方 SHA-256 校验；**第 6 步探针因上述 W^X 限制失败**。
+rootfs 归档可从 APK 资产读出并按官方 SHA-256 校验；带上 `libproot_loader.so` 后探针
+  可以真正进入 guest（Ubuntu 24.04.5 aarch64 启动，`/usr/bin` 下 292 个程序可执行）。
 
 未验证（NOT_RUN）：
 
