@@ -3,19 +3,30 @@ package com.muyuchat.core.designsystem
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.Dp
+
+/**
+ * Carries the enclosing [McaIconButton] interaction source when the button's content slot is a
+ * visual plate ([McaPlateSize]), so the bounded ripple renders strictly inside the plate's clipped
+ * geometry instead of spilling into the outer 48dp touch-target box.
+ */
+internal val LocalMcaIconPlateInteraction = staticCompositionLocalOf<InteractionSource?> { null }
 
 /**
  * The visual plate behind a small glyph: soft tonal fill, 0.5dp hairline, optional accent state.
@@ -81,9 +92,17 @@ public fun Modifier.mcaIconPlate(
     } else {
         edgeTarget
     }
+    val plateInteraction = LocalMcaIconPlateInteraction.current
     return this
         .size(size)
         .clip(shape)
         .background(fill)
+        .then(
+            if (plateInteraction != null && enabled) {
+                Modifier.indication(plateInteraction, ripple(bounded = true))
+            } else {
+                Modifier
+            }
+        )
         .border(McaHairline.Width, edge, shape)
 }

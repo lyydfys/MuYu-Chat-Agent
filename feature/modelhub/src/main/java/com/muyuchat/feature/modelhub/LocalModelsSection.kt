@@ -249,7 +249,7 @@ private fun LocalModelCard(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = if (isLoaded) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else McaHairline.stroke()
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val isMnnRuntime = model.runtime == ChatModelRuntime.MNN
@@ -530,7 +530,7 @@ private fun LocalImageModelCard(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = if (model.selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else McaHairline.stroke()
     ) {
         Column(
             modifier = Modifier.padding(12.dp),

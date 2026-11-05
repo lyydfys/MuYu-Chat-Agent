@@ -93,6 +93,10 @@ public fun McaIconButton(
         animationSpec = McaColorMotion.state,
         label = "mcaIconButtonContent"
     )
+    // When the slot is a visual plate (e.g. McaPlateSize.Medium = 32.dp) inside a 48.dp touch
+    // target, delegate the bounded ripple to the inner McaIconPlate so the ripple never forms a
+    // 48.dp circular halo outside the 32.dp plate border.
+    val delegatesRippleToPlate = glyphSize >= McaPlateSize.Small && size > glyphSize
     Box(
         modifier = modifier
             .size(size)
@@ -110,7 +114,7 @@ public fun McaIconButton(
             )
             .clickable(
                 interactionSource = interaction,
-                indication = ripple(bounded = true),
+                indication = if (delegatesRippleToPlate) null else ripple(bounded = true),
                 enabled = enabled,
                 role = Role.Button,
                 onClickLabel = onClickLabel,
@@ -122,7 +126,10 @@ public fun McaIconButton(
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,
     ) {
-        CompositionLocalProvider(LocalContentColor provides animatedContentColor) {
+        CompositionLocalProvider(
+            LocalContentColor provides animatedContentColor,
+            LocalMcaIconPlateInteraction provides if (delegatesRippleToPlate) interaction else null,
+        ) {
             Box(Modifier.size(glyphSize), contentAlignment = Alignment.Center) {
                 content()
             }

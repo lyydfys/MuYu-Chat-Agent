@@ -6,6 +6,7 @@ import com.muyuchat.core.designsystem.*
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -419,13 +420,17 @@ private fun ModelHubHeader(
                 ) {
                     Icon(McaIcons.Refresh, contentDescription = null, modifier = Modifier.size(McaIconSize.L))
                 }
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape) {
+                McaIconPlate(
+                    size = McaPlateSize.Medium,
+                    shape = McaShape.Badge,
+                    selected = true
+                ) {
                     Icon(
                         McaIcons.Folder,
                         contentDescription = null,
                         // 容器配对前景色：primary 在暗色 primaryContainer 上仅约 2.1:1，非文本图标也不足 3:1
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(9.dp).size(McaIconSize.M)
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             }
@@ -506,7 +511,7 @@ private fun ModelHubSegmentedTabs(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = McaHairline.stroke()
     ) {
         if (compactForLargeText) {
             // Five equal segments cannot hold 2.0x labels; wrap them instead of clipping the last
@@ -547,13 +552,24 @@ private fun ModelHubTab(
     modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val tabContainerColor by animateColorAsState(
+        targetValue = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surface,
+        animationSpec = McaColorMotion.state,
+        label = "modelHubTabContainerColor"
+    )
+    val tabContentColor by animateColorAsState(
+        targetValue = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+        animationSpec = McaColorMotion.state,
+        label = "modelHubTabContentColor"
+    )
     Surface(
         onClick = { onSection(item) },
         modifier = modifier
             .heightIn(min = 46.dp)
             .mcaPressScale(interactionSource),
         interactionSource = interactionSource,
-        color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surface,
+        color = tabContainerColor,
+        border = if (active) BorderStroke(McaHairline.Width, McaHairline.selected(MaterialTheme.colorScheme.primary)) else null,
         shape = RoundedCornerShape(12.dp)
     ) {
         Box(
@@ -569,7 +585,7 @@ private fun ModelHubTab(
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 // onPrimaryContainer reads 5.95:1 light / 6.30:1 dark on this container;
                 // primary only reached 4.12 / 3.43.
-                color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                color = tabContentColor
             )
         }
     }

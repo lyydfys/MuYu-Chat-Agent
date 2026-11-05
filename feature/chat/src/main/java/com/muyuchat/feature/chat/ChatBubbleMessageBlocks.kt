@@ -1,7 +1,9 @@
 package com.muyuchat.feature.chat
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIconPlate
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaPlateSize
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
@@ -47,9 +49,11 @@ import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.TokenProgress
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import com.muyuchat.core.designsystem.McaIconSize
 
 private data class CharacterHtmlProjection(
@@ -86,6 +90,9 @@ private fun rememberSmoothedStreamingText(
             return@LaunchedEffect
         }
         while (true) {
+            if (revealedChars == latestTarget.length) {
+                snapshotFlow { latestTarget.length }.first { it != revealedChars }
+            }
             withFrameNanos { }
             val targetLen = latestTarget.length
             val current = revealedChars
@@ -378,33 +385,48 @@ internal fun AssistantMessageBlock(
                         onTogglePinned = onTogglePinned
                     )
                 } else if (!readOnly) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         McaIconButton(
                             contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
                             onClick = onTogglePinned,
                             enabled = canTogglePinned,
                             hapticsEnabled = false,
                             size = 48.dp,
-                            glyphSize = McaIconSize.Xs,
-                            tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                            glyphSize = McaPlateSize.Medium,
+                            tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                         ) {
-                            Icon(
-                                if (message.pinned) McaIcons.PushPin else McaIcons.PinUnselected,
-                                contentDescription = null,
-                            )
+                            McaIconPlate(
+                                size = 32.dp,
+                                selected = message.pinned,
+                                enabled = canTogglePinned,
+                                accent = McaPrimaryBlue,
+                            ) {
+                                Icon(
+                                    if (message.pinned) McaIcons.PushPin else McaIcons.PinUnselected,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(McaIconSize.Optical.Inline),
+                                )
+                            }
                         }
                         McaIconButton(
                             contentDescription = "引用回复",
                             onClick = onQuote,
                             hapticsEnabled = false,
                             size = 48.dp,
-                            glyphSize = McaIconSize.Xs,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            glyphSize = McaPlateSize.Medium,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                         ) {
-                            Icon(
-                                McaIcons.ChatBubbleOutline,
-                                contentDescription = null,
-                            )
+                            McaIconPlate(size = 32.dp) {
+                                Icon(
+                                    McaIcons.ChatBubbleOutline,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(McaIconSize.Xs),
+                                )
+                            }
                         }
                     }
                 }

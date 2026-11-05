@@ -1,10 +1,12 @@
 package com.muyuchat.feature.chat
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaColorMotion
 import com.muyuchat.core.designsystem.McaIcons
 
 import android.content.ClipData
 import android.util.Log
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -327,6 +329,16 @@ private fun CodeBlock(language: String?, code: String, fileName: String? = null,
         animationSpec = McaMotion.sizeChange,
         label = "codeCopyScale"
     )
+    val iconRotation by animateFloatAsState(
+        targetValue = if (copied) 0f else -8f,
+        animationSpec = McaMotion.sizeChange,
+        label = "codeCopyRotation"
+    )
+    val copyActionTint by animateColorAsState(
+        targetValue = if (copied) Color(0xFF93C5FD) else Color.White.copy(alpha = 0.78f),
+        animationSpec = McaColorMotion.state,
+        label = "codeCopyTint"
+    )
     val highlightedCode = remember(code, language) {
         buildHighlightedCode(code, language)
     }
@@ -381,18 +393,20 @@ private fun CodeBlock(language: String?, code: String, fileName: String? = null,
                                 .graphicsLayer {
                                     scaleX = iconScale
                                     scaleY = iconScale
+                                    rotationZ = if (copied) iconRotation else 0f
                                 },
-                            tint = Color.White.copy(alpha = 0.78f)
+                            tint = copyActionTint
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             if (copied) "已复制" else "复制",
-                            color = Color.White.copy(alpha = 0.78f),
+                            color = copyActionTint,
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
                 }
             }
+            HorizontalDivider(thickness = 0.5.dp, color = Color.White.copy(alpha = 0.08f))
             Text(
                 text = highlightedCode,
                 color = Color.White,

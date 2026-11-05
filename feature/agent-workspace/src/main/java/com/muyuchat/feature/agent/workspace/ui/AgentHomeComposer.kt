@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -188,6 +189,7 @@ internal fun AgentHomeComposer(
                     ) {
                         Icon(
                             imageVector = McaIcons.Send,
+                            modifier = Modifier.offset(x = 2.dp),
                             contentDescription = null
                         )
                     }

@@ -348,7 +348,7 @@ internal fun ChatHistoryDrawer(
                                     shadowElevation = 3.dp
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                        modifier = Modifier.padding(horizontal = 2.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         McaIconButton(
@@ -365,6 +365,12 @@ internal fun ChatHistoryDrawer(
                                                 contentDescription = null
                                             )
                                         }
+                                        Box(
+                                            modifier = Modifier
+                                                .width(0.5.dp)
+                                                .height(16.dp)
+                                                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f))
+                                        )
                                         McaIconButton(
                                             contentDescription = "打开应用菜单",
                                             onClick = onOpenAppMenu,

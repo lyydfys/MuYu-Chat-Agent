@@ -184,9 +184,9 @@ internal fun ReasoningPanel(
                 modifier = shimmer?.modifier ?: Modifier,
                 color = if (shimmer == null) muted else Color.Unspecified,
                 style = if (shimmer != null) {
-                    MaterialTheme.typography.bodySmall.copy(brush = shimmer.brush)
+                    MaterialTheme.typography.bodySmall.copy(brush = shimmer.brush, fontFeatureSettings = "tnum")
                 } else {
-                    MaterialTheme.typography.bodySmall
+                    MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum")
                 },
                 fontWeight = FontWeight.Medium
             )
@@ -307,9 +307,9 @@ internal fun PendingReasoningPanel(
                 text = displayTitle,
                 modifier = shimmer?.modifier ?: Modifier,
                 style = if (shimmer != null) {
-                    MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp, brush = shimmer.brush)
+                    MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp, brush = shimmer.brush, fontFeatureSettings = "tnum")
                 } else {
-                    MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp)
+                    MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp, fontFeatureSettings = "tnum")
                 },
                 color = if (shimmer == null) muted else Color.Unspecified,
                 fontWeight = FontWeight.Medium
@@ -353,7 +353,7 @@ internal fun PendingReasoningPanel(
                 Text(
                     text = text,
                     modifier = Modifier.padding(top = 5.dp),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                     color = muted
                 )
             }
@@ -488,7 +488,7 @@ internal fun GenerationPerformanceLine(stats: RuntimeStats?) {
     Text(
         text = summary,
         modifier = Modifier.padding(top = 1.dp),
-        style = MaterialTheme.typography.labelMedium,
+        style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }

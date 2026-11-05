@@ -46,24 +46,6 @@ internal fun UserMessageActionMenu(
     val haptics = rememberMcaHaptics()
     val interaction = remember { MutableInteractionSource() }
     val editEnabled = !readOnly && canEdit
-    val containerColor by animateColorAsState(
-        targetValue = if (menuOpen) {
-            McaPrimaryBlue.copy(alpha = 0.14f)
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        animationSpec = tween(durationMillis = 160),
-        label = "userMessageMenuPillBg"
-    )
-    val borderColor by animateColorAsState(
-        targetValue = if (menuOpen) {
-            McaPrimaryBlue.copy(alpha = 0.38f)
-        } else {
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
-        },
-        animationSpec = tween(durationMillis = 160),
-        label = "userMessageMenuPillBorder"
-    )
     Box(modifier = modifier) {
         McaIconButton(
             contentDescription = "更多消息操作",
@@ -77,9 +59,8 @@ internal fun UserMessageActionMenu(
         ) {
             McaIconPlate(
                 size = 32.dp,
-                containerColor = containerColor,
-                borderColor = borderColor,
-                animateColors = false
+                selected = menuOpen,
+                accent = McaPrimaryBlue,
             ) {
                 Icon(
                     imageVector = McaIcons.MoreVert,

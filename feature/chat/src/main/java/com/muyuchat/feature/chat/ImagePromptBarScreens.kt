@@ -530,6 +530,7 @@ internal fun ImagePromptBar(
                             Icon(
                                 McaIcons.Send,
                                 contentDescription = "生成图片",
+                                modifier = Modifier.offset(x = 2.dp),
                                 tint = if (prompt.isBlank()) inputPlaceholderColor else Color.White
                             )
                         }

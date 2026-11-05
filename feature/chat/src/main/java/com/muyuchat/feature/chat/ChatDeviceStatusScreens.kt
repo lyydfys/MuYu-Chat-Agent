@@ -325,7 +325,7 @@ internal fun ChatDeviceStatusOverlay(
                             Spacer(Modifier.weight(1f))
                             Text(
                                 if (memoryTotalKb > 0L) "可用 $ballMemoryLabel" else "内存待检测",
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
                                 fontWeight = FontWeight.SemiBold,
                                 color = memoryHeadlineColor
                             )
@@ -580,7 +580,7 @@ internal fun ChatDeviceStatusOverlay(
                                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(ballMemoryLabel,
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 11.sp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 11.sp, fontFeatureSettings = "tnum"),
                                 fontWeight = FontWeight.SemiBold, maxLines = 1,
                                 color = MaterialTheme.colorScheme.onSurface)
                         }
@@ -595,7 +595,7 @@ internal fun ChatDeviceStatusOverlay(
                             // The compact label is what keeps this readable: the full
                             // "4.7 GB" measured wider than the whole ball at 28dp.
                             Text(ballCompactMemoryLabel,
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp, fontFeatureSettings = "tnum"),
                                 fontWeight = FontWeight.SemiBold, maxLines = 1,
                                 color = MaterialTheme.colorScheme.onSurface)
                         }

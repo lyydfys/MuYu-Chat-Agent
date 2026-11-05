@@ -117,6 +117,9 @@ internal fun Modifier.streamingTailFade(
     val tracker = remember { StreamingTailTracker() }
     val glyphs = remember(text, streaming) { tracker.update(text, streaming, clock.nowNanos) }
     val frameTime = remember { mutableLongStateOf(0L) }
+    val masks = remember { ArrayList<Pair<Rect, StreamingTailGlyph>>(8) }
+    val path = remember { Path() }
+    val paint = remember { Paint() }
     LaunchedEffect(glyphs) {
         if (glyphs.isEmpty()) {
             clock.pause()
@@ -137,38 +140,50 @@ internal fun Modifier.streamingTailFade(
         clock.pause()
     }
     return drawWithCache {
+        masks.clear()
+        path.rewind()
         val result = layout()
-        val geometry = if (result == null || result.layoutInput.text.text != text) emptyList() else
-            glyphs.mapNotNull { glyph ->
+        if (result != null && result.layoutInput.text.text == text) {
+            // Ligatures can give multiple characters the same/overlapping glyph box. Merge these
+            // regions once so DstIn never multiplies alpha on the same pixels.
+            for (glyphIndex in glyphs.indices) {
+                val glyph = glyphs[glyphIndex]
                 var bounds = result.getBoundingBox(glyph.start)
                 for (offset in glyph.start + 1 until glyph.end) {
                     val box = result.getBoundingBox(offset)
-                    bounds = Rect(minOf(bounds.left, box.left), minOf(bounds.top, box.top),
-                        maxOf(bounds.right, box.right), maxOf(bounds.bottom, box.bottom))
+                    bounds = Rect(
+                        minOf(bounds.left, box.left),
+                        minOf(bounds.top, box.top),
+                        maxOf(bounds.right, box.right),
+                        maxOf(bounds.bottom, box.bottom)
+                    )
                 }
-                if (bounds.width <= 0f || bounds.height <= 0f) null else bounds to glyph
+                if (bounds.width <= 0f || bounds.height <= 0f) continue
+                var union = bounds
+                var youngest = glyph
+                var index = 0
+                while (index < masks.size) {
+                    val (other, previous) = masks[index]
+                    if (union.overlaps(other)) {
+                        union = Rect(
+                            minOf(union.left, other.left),
+                            minOf(union.top, other.top),
+                            maxOf(union.right, other.right),
+                            maxOf(union.bottom, other.bottom)
+                        )
+                        if (previous.bornNanos > youngest.bornNanos) youngest = previous
+                        masks.removeAt(index)
+                        index = 0
+                    } else {
+                        index++
+                    }
+                }
+                masks.add(union to youngest)
             }
-        // Ligatures can give multiple characters the same/overlapping glyph box. Merge these
-        // regions once so DstIn never multiplies alpha on the same pixels.
-        val masks = ArrayList<Pair<Rect, StreamingTailGlyph>>()
-        geometry.forEach { (rect, glyph) ->
-            var union = rect
-            var youngest = glyph
-            var index = 0
-            while (index < masks.size) {
-                val (other, previous) = masks[index]
-                if (union.overlaps(other)) {
-                    union = Rect(minOf(union.left, other.left), minOf(union.top, other.top),
-                        maxOf(union.right, other.right), maxOf(union.bottom, other.bottom))
-                    if (previous.bornNanos > youngest.bornNanos) youngest = previous
-                    masks.removeAt(index)
-                    index = 0
-                } else index++
+            for (maskIndex in masks.indices) {
+                path.addRect(masks[maskIndex].first)
             }
-            masks.add(union to youngest)
         }
-        val path = Path().apply { masks.forEach { (rect, _) -> addRect(rect) } }
-        val paint = Paint()
         onDrawWithContent {
             if (masks.isEmpty() || masks.all { (_, glyph) -> glyph.alpha(frameTime.longValue) >= 1f }) {
                 drawContent()
@@ -180,10 +195,15 @@ internal fun Modifier.streamingTailFade(
                 try {
                     clipPath(path) {
                         this@onDrawWithContent.drawContent()
-                        masks.forEach { (rect, glyph) ->
+                        for (maskIndex in masks.indices) {
+                            val (rect, glyph) = masks[maskIndex]
                             val alpha = glyph.alpha(frameTime.longValue)
-                            drawRect(Color.Black.copy(alpha = alpha), rect.topLeft, rect.size,
-                                blendMode = BlendMode.DstIn)
+                            drawRect(
+                                Color.Black.copy(alpha = alpha),
+                                rect.topLeft,
+                                rect.size,
+                                blendMode = BlendMode.DstIn
+                            )
                         }
                     }
                 } finally {

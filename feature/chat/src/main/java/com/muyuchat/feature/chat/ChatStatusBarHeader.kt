@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -264,7 +265,7 @@ internal fun ChatStatusBar(
             shadowElevation = 2.dp
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                modifier = Modifier.padding(horizontal = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 McaIconButton(
@@ -281,6 +282,12 @@ internal fun ChatStatusBar(
                         modifier = Modifier.size(McaIconSize.M)
                     )
                 }
+                Box(
+                    modifier = Modifier
+                        .width(0.5.dp)
+                        .height(16.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f))
+                )
                 McaIconButton(
                     contentDescription = "打开应用菜单",
                     onClick = onOpenAppMenu,

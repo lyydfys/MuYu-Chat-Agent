@@ -641,7 +641,7 @@ private fun SettingsHero(
                     )
                 )
             )
-            .border(1.dp, primary.copy(alpha = 0.42f), shape)
+            .border(0.5.dp, primary.copy(alpha = 0.42f), shape)
     ) {
         Canvas(Modifier.matchParentSize()) {
             val orbitCenter = Offset(size.width * 0.78f, size.height * 0.47f)
@@ -744,7 +744,7 @@ private fun HeroStatusPill(
             .widthIn(max = 240.dp)
             .clip(shape)
             .background(Color.White.copy(alpha = 0.07f))
-            .border(1.dp, Color.White.copy(alpha = 0.12f), shape)
+            .border(0.5.dp, Color.White.copy(alpha = 0.14f), shape)
             .padding(horizontal = 9.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -832,7 +832,7 @@ private fun SettingsSectionCard(
             )
             .clip(shape)
             .background(surface)
-            .border(1.dp, accent.copy(alpha = borderAlpha), shape)
+            .border(0.5.dp, accent.copy(alpha = borderAlpha), shape)
             .clickable(
                 interactionSource = interaction,
                 indication = LocalIndication.current,
@@ -870,8 +870,8 @@ private fun SettingsSectionCard(
                         .clip(RoundedCornerShape(12.dp))
                         .background(accent.copy(alpha = if (dark) 0.16f else 0.09f))
                         .border(
-                            width = 1.dp,
-                            color = accent.copy(alpha = 0.18f),
+                            width = 0.5.dp,
+                            color = accent.copy(alpha = 0.22f),
                             shape = RoundedCornerShape(12.dp)
                         ),
                     contentAlignment = Alignment.Center
@@ -930,7 +930,7 @@ private fun SettingsStatusBadge(
         modifier = modifier
             .clip(shape)
             .background(color.copy(alpha = 0.10f))
-            .border(1.dp, color.copy(alpha = 0.20f), shape)
+            .border(0.5.dp, color.copy(alpha = 0.24f), shape)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

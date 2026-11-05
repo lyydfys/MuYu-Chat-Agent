@@ -410,46 +410,20 @@ private fun UserMessageBubble(
             animationSpec = McaMotion.sizeChange,
             label = "userPinIconScale"
         )
+        val pinIconRotation by animateFloatAsState(
+            targetValue = if (message.pinned) 12f else 0f,
+            animationSpec = McaMotion.sizeChange,
+            label = "userPinIconRotation"
+        )
         val copyIconScale by animateFloatAsState(
             targetValue = if (copied) 1.15f else 1.0f,
             animationSpec = McaMotion.sizeChange,
             label = "userCopyIconScale"
         )
-        val pinPillBg by animateColorAsState(
-            targetValue = if (message.pinned && canTogglePinned) {
-                McaPrimaryBlue.copy(alpha = 0.14f)
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (canTogglePinned) 0.45f else 0.22f)
-            },
-            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-            label = "userPinPillBg"
-        )
-        val pinPillBorder by animateColorAsState(
-            targetValue = if (message.pinned && canTogglePinned) {
-                McaPrimaryBlue.copy(alpha = 0.38f)
-            } else {
-                MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (canTogglePinned) 0.42f else 0.20f)
-            },
-            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-            label = "userPinPillBorder"
-        )
-        val copyPillBg by animateColorAsState(
-            targetValue = if (copied) {
-                McaPrimaryBlue.copy(alpha = 0.14f)
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-            },
-            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-            label = "userCopyPillBg"
-        )
-        val copyPillBorder by animateColorAsState(
-            targetValue = if (copied) {
-                McaPrimaryBlue.copy(alpha = 0.38f)
-            } else {
-                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
-            },
-            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-            label = "userCopyPillBorder"
+        val copyIconRotation by animateFloatAsState(
+            targetValue = if (copied) 0f else -8f,
+            animationSpec = McaMotion.sizeChange,
+            label = "userCopyIconRotation"
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (!readOnly) {
@@ -466,12 +440,12 @@ private fun UserMessageBubble(
                     glyphSize = McaPlateSize.Medium,
                     tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                 ) {
-                  McaIconPlate(
-                      size = 32.dp,
-                      containerColor = pinPillBg,
-                      borderColor = pinPillBorder,
-                      animateColors = false,
-                  ) {
+                    McaIconPlate(
+                        size = 32.dp,
+                        selected = message.pinned,
+                        enabled = canTogglePinned,
+                        accent = McaPrimaryBlue,
+                    ) {
                         Icon(
                             if (message.pinned) McaIcons.PushPin else McaIcons.PinUnselected,
                             contentDescription = null,
@@ -480,6 +454,7 @@ private fun UserMessageBubble(
                                 .graphicsLayer {
                                     scaleX = pinIconScale
                                     scaleY = pinIconScale
+                                    rotationZ = pinIconRotation
                                 },
                         )
                     }
@@ -493,12 +468,11 @@ private fun UserMessageBubble(
                 interactionSource = copyInteraction,
                 glyphSize = McaPlateSize.Medium,
             ) {
-              McaIconPlate(
-                  size = 32.dp,
-                  containerColor = copyPillBg,
-                  borderColor = copyPillBorder,
-                  animateColors = false,
-              ) {
+                McaIconPlate(
+                    size = 32.dp,
+                    selected = copied,
+                    accent = McaPrimaryBlue,
+                ) {
                     Icon(
                         if (copied) McaIcons.Check else McaIcons.ContentCopy,
                         contentDescription = null,
@@ -507,6 +481,7 @@ private fun UserMessageBubble(
                             .graphicsLayer {
                                 scaleX = copyIconScale
                                 scaleY = copyIconScale
+                                rotationZ = if (copied) copyIconRotation else 0f
                             },
                         tint = if (copied) {
                             McaPrimaryBlue

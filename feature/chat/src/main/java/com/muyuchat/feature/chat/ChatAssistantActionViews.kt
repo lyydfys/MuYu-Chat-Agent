@@ -109,41 +109,15 @@ internal fun AssistantActionRow(
         animationSpec = McaMotion.sizeChange,
         label = "assistantCopyIconScale"
     )
-    val copyPillBg by animateColorAsState(
-        targetValue = if (copied) {
-            McaPrimaryBlue.copy(alpha = 0.14f)
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-        label = "assistantCopyPillBg"
+    val copyIconRotation by animateFloatAsState(
+        targetValue = if (copied) 0f else -8f,
+        animationSpec = McaMotion.sizeChange,
+        label = "assistantCopyIconRotation"
     )
-    val copyPillBorder by animateColorAsState(
-        targetValue = if (copied) {
-            McaPrimaryBlue.copy(alpha = 0.38f)
-        } else {
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
-        },
-        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-        label = "assistantCopyPillBorder"
-    )
-    val morePillBg by animateColorAsState(
-        targetValue = if (menuOpen) {
-            McaPrimaryBlue.copy(alpha = 0.14f)
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-        label = "assistantMorePillBg"
-    )
-    val morePillBorder by animateColorAsState(
-        targetValue = if (menuOpen) {
-            McaPrimaryBlue.copy(alpha = 0.38f)
-        } else {
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
-        },
-        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
-        label = "assistantMorePillBorder"
+    val moreIconRotation by animateFloatAsState(
+        targetValue = if (menuOpen) 90f else 0f,
+        animationSpec = McaMotion.sizeChange,
+        label = "assistantMoreIconRotation"
     )
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -168,13 +142,7 @@ internal fun AssistantActionRow(
             ) {
                 McaIconPlate(
                     size = 32.dp,
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(
-                        alpha = if (canRegenerate) 0.45f else 0.22f
-                    ),
-                    borderColor = MaterialTheme.colorScheme.outlineVariant.copy(
-                        alpha = if (canRegenerate) 0.42f else 0.20f
-                    ),
-                    animateColors = false,
+                    enabled = canRegenerate,
                 ) {
                     Icon(
                         McaIcons.Replay,
@@ -192,12 +160,11 @@ internal fun AssistantActionRow(
             interactionSource = copyInteraction,
             glyphSize = McaPlateSize.Medium,
         ) {
-              McaIconPlate(
-                  size = 32.dp,
-                  containerColor = copyPillBg,
-                  borderColor = copyPillBorder,
-                  animateColors = false,
-              ) {
+            McaIconPlate(
+                size = 32.dp,
+                selected = copied,
+                accent = McaPrimaryBlue,
+            ) {
                 Icon(
                     imageVector = if (copied) McaIcons.Check else McaIcons.ContentCopy,
                     contentDescription = null,
@@ -206,6 +173,7 @@ internal fun AssistantActionRow(
                         .graphicsLayer {
                             scaleX = copyIconScale
                             scaleY = copyIconScale
+                            rotationZ = if (copied) copyIconRotation else 0f
                         },
                     tint = if (copied) McaPrimaryBlue else tint.copy(alpha = 0.85f)
                 )
@@ -222,16 +190,17 @@ internal fun AssistantActionRow(
                 glyphSize = McaPlateSize.Medium,
                 hapticsEnabled = false,
             ) {
-                  McaIconPlate(
-                      size = 32.dp,
-                      containerColor = morePillBg,
-                      borderColor = morePillBorder,
-                      animateColors = false,
-                  ) {
+                McaIconPlate(
+                    size = 32.dp,
+                    selected = menuOpen,
+                    accent = McaPrimaryBlue,
+                ) {
                     Icon(
                         McaIcons.MoreVert,
                         contentDescription = null,
-                        modifier = Modifier.size(McaIconSize.S),
+                        modifier = Modifier
+                            .size(McaIconSize.S)
+                            .graphicsLayer { rotationZ = moreIconRotation },
                         tint = if (menuOpen) McaPrimaryBlue else tint.copy(alpha = 0.85f)
                     )
                 }
@@ -303,4 +272,3 @@ internal fun AssistantActionRow(
         }
     }
 }
-
