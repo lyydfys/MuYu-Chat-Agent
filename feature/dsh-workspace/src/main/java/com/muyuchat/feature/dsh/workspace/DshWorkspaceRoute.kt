@@ -31,6 +31,7 @@ import com.muyuchat.core.dsh.contract.DshRuntimeClient
 import com.muyuchat.core.dsh.contract.auth.DshAccountLoginPort
 import com.muyuchat.core.dsh.contract.console.DshAccountAuthUrlMatcher
 import com.muyuchat.core.dsh.contract.console.DshConsolePort
+import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
 import com.muyuchat.core.dsh.contract.console.DshExternalBrowserPort
 import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsolePort
 import com.muyuchat.core.dsh.contract.console.DshPopupHandoffResult
@@ -88,6 +89,8 @@ fun DshWorkspaceRoute(
     onOpenExternal: ((android.net.Uri) -> Unit)? = null,
     firstFrameReporter: DshFirstFrameReporter = DshFirstFrameReporter.None,
     consolePort: DshConsolePort? = null,
+    /** In-app plugin administration; null keeps the console's plugin block read-only. */
+    pluginAdminPort: DshPluginAdminPort? = null,
     maintenanceConsolePort: DshMaintenanceConsolePort? = null,
     externalBrowserPort: DshExternalBrowserPort? = null,
     accountAuthUrlMatcher: DshAccountAuthUrlMatcher = DshAccountAuthUrlMatcher { false },
@@ -385,6 +388,7 @@ fun DshWorkspaceRoute(
                 port = consolePort,
                 modifier = Modifier.fillMaxSize(),
                 maintenancePort = maintenanceConsolePort,
+                pluginAdminPort = pluginAdminPort,
                 onBack = {
                     destination = DshWorkspaceDestinationPolicy.backDestination(destination)
                 }

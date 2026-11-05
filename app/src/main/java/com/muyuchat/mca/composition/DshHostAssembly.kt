@@ -14,7 +14,10 @@ import com.muyuchat.core.dsh.contract.console.DshExternalBrowserPort
 import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsolePort
 import com.muyuchat.core.dsh.maintenance.DshTrialLaunchPort
 import com.muyuchat.core.dsh.runtime.auth.DshAccountLoginOwner
+import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
 import com.muyuchat.core.dsh.runtime.config.DshMcpDeclarationStore
+import com.muyuchat.core.dsh.runtime.config.DshRuntimeConfig
+import com.muyuchat.core.dsh.runtime.plugin.DshPluginAdmin
 import com.muyuchat.core.dsh.runtime.config.DshShellSandboxStatusStore
 import com.muyuchat.core.dsh.runtime.state.DshInFlightChannel
 import com.muyuchat.core.dsh.runtime.state.DshInFlightEvidence
@@ -212,6 +215,32 @@ internal class DshHostAssembly(
      * Read-only D20 console port. It projects the runtime, the capability bridge and the
      * maintenance admission owner, and forwards typed intents to them.
      */
+    /**
+     * In-app plugin administration.
+     *
+     * It runs the *packaged* pnpm CLI inside the official profile, and refuses while a generation is
+     * live so `node_modules` is never rewritten under a running loader. Nothing here touches the
+     * official plugin manager's files directly.
+     */
+    private val pluginAdminPort: DshPluginAdminPort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        DshPluginAdmin(
+            config = DshRuntimeConfig(dataRoot = File(application.filesDir, DSH_DATA_ROOT_NAME)),
+            nativeLibraryDir = File(application.applicationInfo.nativeLibraryDir),
+            runtimeIsLive = {
+                when (runtimeClient.snapshot.value.phase) {
+                    DshRuntimePhase.STARTING,
+                    DshRuntimePhase.READY,
+                    DshRuntimePhase.STOPPING -> true
+                    DshRuntimePhase.STOPPED,
+                    DshRuntimePhase.FAILED -> false
+                }
+            }
+        )
+    }
+
+    /** Console-facing seam for the plugin block; the owner above stays the only mutator. */
+    val pluginAdmin: DshPluginAdminPort get() = pluginAdminPort
+
     private val consolePort: DshConsolePortAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         DshConsolePortAdapter(
             runtime = runtimeClient,

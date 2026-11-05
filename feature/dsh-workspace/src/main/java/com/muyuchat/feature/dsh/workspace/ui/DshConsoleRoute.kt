@@ -12,7 +12,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -20,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,10 +42,15 @@ import com.muyuchat.feature.dsh.workspace.DshConsoleTone
 import com.muyuchat.feature.dsh.workspace.DshConsoleUiState
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.muyuchat.core.dsh.contract.console.DshConsolePort
+import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
+import com.muyuchat.core.dsh.contract.console.DshPluginAdminResult
+import com.muyuchat.core.dsh.contract.console.DshPluginName
+import com.muyuchat.core.dsh.contract.console.DshPluginOperation
 import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsolePort
 import com.muyuchat.feature.dsh.workspace.DshConsoleViewModel
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -61,7 +70,9 @@ fun DshConsoleRoute(
     port: DshConsolePort,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
-    maintenancePort: DshMaintenanceConsolePort? = null
+    maintenancePort: DshMaintenanceConsolePort? = null,
+    /** In-app plugin administration; null keeps the plugin block read-only. */
+    pluginAdminPort: DshPluginAdminPort? = null
 ) {
     val viewModel: DshConsoleViewModel = viewModel(
         key = "dsh-console",
@@ -115,6 +126,7 @@ fun DshConsoleRoute(
                 // Read-only plugin inventory. The official plugin manager owns installation, so this
                 // block only lists what is already there and links to the official page.
                 DshPluginsSection(
+                    pluginAdminPort = pluginAdminPort,
                     availableIntents = (state as? DshConsoleUiState.Ready)?.availableIntents
                         ?: emptySet(),
                     onIntent = viewModel::execute
@@ -466,6 +478,7 @@ internal fun listInstalledPluginDirectories(appFilesDir: File): List<String> {
 
 @Composable
 private fun DshPluginsSection(
+    pluginAdminPort: DshPluginAdminPort?,
     availableIntents: Set<DshConsoleIntent>,
     onIntent: (DshConsoleIntent) -> Unit,
     modifier: Modifier = Modifier
@@ -533,6 +546,13 @@ private fun DshPluginsSection(
             ) {
                 Text("打开官方插件页")
             }
+        }
+        if (pluginAdminPort != null) {
+            DshPluginAdminBlock(
+                port = pluginAdminPort,
+                installedDirectories = inventory?.installedDirectories.orEmpty(),
+                onChanged = { refreshKey += 1 }
+            )
         }
         Text(
             text = "每行都由官方插件管理器管理；MCA 只显示已声明的依赖与已安装目录。",
@@ -602,3 +622,147 @@ private fun DshPluginsCatalogRows(inventory: DshPluginInventory) {
 
 /** Rows rendered inline; the parser keeps up to [DSH_PLUGIN_MAX_ROWS]. */
 private const val DSH_PLUGIN_ROWS_VISIBLE: Int = 12
+
+/**
+ * Install / remove affordances of the plugin block.
+ *
+ * The writes are performed by the packaged pnpm CLI (see `DshPluginAdmin`); this composable only
+ * validates nothing itself 鈥?it shows the owner's typed answer verbatim and refreshes the inventory
+ * after a success. A non-null port is the only difference between the read-only and the managed
+ * block, so a build without the runtime can never show a dead button.
+ */
+@Composable
+private fun DshPluginAdminBlock(
+    port: DshPluginAdminPort,
+    installedDirectories: List<String>,
+    onChanged: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var name by remember { mutableStateOf("") }
+    var version by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var pendingRemove by remember { mutableStateOf<String?>(null) }
+
+    fun report(result: DshPluginAdminResult) {
+        message = when (result) {
+            is DshPluginAdminResult.Succeeded ->
+                (if (result.operation == DshPluginOperation.INSTALL) "已安装 " else "已删除 ") +
+                    result.plugin + "（下次启动运行时生效）"
+            is DshPluginAdminResult.Rejected -> "未执行：" + result.reason
+            is DshPluginAdminResult.Failed ->
+                "失败（" + result.reasonCode + "）" +
+                    if (result.detail.isBlank()) "" else "：" + result.detail
+        }
+    }
+
+    fun submit(action: suspend () -> DshPluginAdminResult) {
+        if (busy) return
+        busy = true
+        message = null
+        scope.launch {
+            val result = runCatching { action() }.getOrElse { error ->
+                DshPluginAdminResult.Rejected(error.message ?: "调用失败")
+            }
+            report(result)
+            busy = false
+            if (result is DshPluginAdminResult.Succeeded) {
+                name = ""
+                version = ""
+                onChanged()
+            }
+        }
+    }
+
+    Text(
+        text = "安装 / 删除（由随包的 pnpm 在官方 profile 内执行）",
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary
+    )
+    OutlinedTextField(
+        value = name,
+        onValueChange = { name = it },
+        singleLine = true,
+        enabled = !busy,
+        label = { Text("插件名，例如 dsh-plugin-market 或 @scope/name") },
+        modifier = Modifier.fillMaxWidth()
+    )
+    OutlinedTextField(
+        value = version,
+        onValueChange = { version = it },
+        singleLine = true,
+        enabled = !busy,
+        label = { Text("版本（可留空 = 最新）") },
+        modifier = Modifier.fillMaxWidth()
+    )
+    DshPluginName.rejectReason(name)?.takeIf { name.isNotBlank() }?.let { reason ->
+        Text(
+            text = reason,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error
+        )
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        McaButton(
+            style = McaButtonStyle.Primary,
+            enabled = !busy && DshPluginName.isAcceptable(name),
+            onClick = { submit { port.install(name.trim(), version.trim().ifBlank { null }) } },
+            modifier = Modifier.weight(1f)
+        ) {
+            Text(if (busy) "处理中縲" else "安装")
+        }
+    }
+    if (installedDirectories.isNotEmpty()) {
+        Text(
+            text = "已安装目录",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        installedDirectories.take(8).forEach { directory ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = directory,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f)
+                )
+                McaButton(
+                    style = McaButtonStyle.Text,
+                    enabled = !busy,
+                    onClick = { pendingRemove = directory }
+                ) {
+                    Text("删除")
+                }
+            }
+        }
+    }
+    message?.let { text ->
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    pendingRemove?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("删除插件") },
+            text = { Text("确定从官方 profile 中删除 " + target + " 吗？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRemove = null
+                    submit { port.remove(target) }
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemove = null }) { Text("取消") }
+            }
+        )
+    }
+}
