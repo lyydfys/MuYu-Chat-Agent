@@ -263,7 +263,16 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
             val source = File(root, link.linkName)
             link.target.delete()
             when {
-                source.isFile -> Files.createLink(link.target.toPath(), source.toPath())
+                // A hardlink is only a space optimisation, so a filesystem that refuses it
+                // (cross-device, or an fs without link support) degrades to a byte copy instead of
+                // failing the whole rootfs.
+                source.isFile -> {
+                    val linked = runCatching { Files.createLink(link.target.toPath(), source.toPath()) }
+                    if (linked.isFailure) {
+                        runCatching { source.copyTo(link.target, overwrite = true) }
+                            .onFailure { link.target.writeBytes(ByteArray(0)) }
+                    }
+                }
                 // A hardlink to a symlink is not representable; materialise the same link target so
                 // the path still resolves the way the archive intended.
                 Files.isSymbolicLink(source.toPath()) ->
