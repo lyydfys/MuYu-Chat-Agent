@@ -228,11 +228,10 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                 // An absolute target is a *guest* path: inside the container `/usr/bin/mawk`
                 // means `<root>/usr/bin/mawk`. Resolving it against the host root would look like
                 // an escape on every platform, so it is re-rooted first.
-                val resolved = if (link.linkName.startsWith("/")) {
-                    File(root, link.linkName.trimStart('/')).canonicalFile
-                } else {
-                    File(link.target.parentFile, link.linkName).canonicalFile
-                }
+                // Lexical resolution only. `canonicalFile` follows symlinks on disk, and a real
+                // Ubuntu rootfs contains cycles (`bin -> usr/bin` combined with links inside usr),
+                // so canonicalisation can spin forever on exactly the tree we are unpacking.
+                val resolved = resolveLexically(root, link.target.parentFile, link.linkName)
                 val insideRoot = resolved.absolutePath.startsWith(rootPrefix) || resolved == root
                 when {
                     !insideRoot ->
@@ -319,6 +318,37 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
         target.delete()
         copy(source, target, 0)
         target.setLastModified(source.lastModified())
+    }
+
+    /**
+     * Resolves [linkName] against [parent] *without touching the filesystem*.
+     *
+     * Returns the guest path re-rooted at [root]. `..` segments are folded lexically and a result
+     * that escapes the root is refused, which is exactly the check a validator needs; following
+     * links on disk (what `canonicalFile` does) is both unnecessary and hazardous here.
+     */
+    private fun resolveLexically(root: File, parent: File, linkName: String): File {
+        val rootPath = root.absoluteFile.path.replace('\\', '/').trimEnd('/')
+        val basePath = when {
+            linkName.startsWith("/") -> rootPath
+            else -> parent.absoluteFile.path.replace('\\', '/')
+        }
+        val combined = (basePath + "/" + linkName.trimStart('/')).replace('\\', '/')
+        val parts = ArrayDeque<String>()
+        combined.split('/').forEach { segment ->
+            when (segment) {
+                "", "." -> Unit
+                ".." -> if (parts.isNotEmpty()) parts.removeLast()
+                else -> parts.addLast(segment)
+            }
+        }
+        val resolved = parts.joinToString("/")
+        val rootSegments = rootPath.split('/').filter { it.isNotEmpty() }
+        val resolvedSegments = resolved.split('/').filter { it.isNotEmpty() }
+        val insideRoot = resolvedSegments.size >= rootSegments.size &&
+            rootSegments.indices.all { resolvedSegments[it] == rootSegments[it] }
+        if (!insideRoot) throw Rejection("符号链接越出解压目录：$linkName")
+        return File(resolved)
     }
 
     private fun writeFile(tar: InputStream, target: File, size: Long, onWritten: (Long) -> Unit) {
