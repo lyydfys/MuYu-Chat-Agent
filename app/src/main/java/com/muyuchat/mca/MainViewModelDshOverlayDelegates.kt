@@ -9,6 +9,7 @@ import com.muyuchat.core.dsh.contract.console.DshConsolePort
 import com.muyuchat.core.dsh.contract.console.DshExternalBrowserPort
 import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsolePort
 import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
+import com.muyuchat.core.dsh.contract.console.DshTerminalUiPort
 import com.muyuchat.feature.dsh.workspace.DshFirstFrameReporter
 import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiPort
 import com.muyuchat.mca.dsh.overlay.DshOverlayHost
@@ -36,6 +37,9 @@ internal val MainViewModel.dshConsolePort: DshConsolePort
 
 internal val MainViewModel.dshPluginAdminPort: DshPluginAdminPort
     get() = runtimeAssembly.dshHost.pluginAdmin
+
+internal val MainViewModel.dshTerminalUiPort: DshTerminalUiPort
+    get() = runtimeAssembly.dshHost.terminalUi
 
 internal val MainViewModel.dshMaintenanceConsolePort: DshMaintenanceConsolePort
     get() = runtimeAssembly.dshHost.maintenanceConsolePort

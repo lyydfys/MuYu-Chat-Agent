@@ -231,6 +231,17 @@ internal class DshCapabilityAssembly(
     private val overlayController: DshOverlayController
         get() = DshOverlayHost.of(appContext).also { it.statusProvider = overlayStatus }.controller
 
+    /**
+     * The terminal service of the current generation, or null before one exists.
+     *
+     * Read through the lane's facts on every call so a generation stop is observed here instead of
+     * being cached: the native terminal page must never write into a dead owner.
+     */
+    internal val terminalService: com.muyuchat.core.dsh.runtime.process.DshTerminalToolService?
+        get() = runCatching<com.muyuchat.core.dsh.runtime.process.DshTerminalToolService?> {
+            terminalLane.service()
+        }.getOrNull()
+
     /** One terminal lane per capability generation; see [createDshTerminalLane]. */
     private val terminalLane: DshTerminalLane = createDshTerminalLane(
         context = appContext,

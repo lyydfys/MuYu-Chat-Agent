@@ -32,6 +32,7 @@ import com.muyuchat.core.dsh.contract.auth.DshAccountLoginPort
 import com.muyuchat.core.dsh.contract.console.DshAccountAuthUrlMatcher
 import com.muyuchat.core.dsh.contract.console.DshConsolePort
 import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
+import com.muyuchat.core.dsh.contract.console.DshTerminalUiPort
 import com.muyuchat.core.dsh.contract.console.DshExternalBrowserPort
 import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsolePort
 import com.muyuchat.core.dsh.contract.console.DshPopupHandoffResult
@@ -46,6 +47,7 @@ import com.muyuchat.feature.dsh.workspace.ui.DshWorkspaceScreen
 import com.muyuchat.feature.dsh.workspace.web.DshAccountReplyDeduper
 import com.muyuchat.feature.dsh.workspace.web.DshWebStorage
 import com.muyuchat.feature.dsh.workspace.web.DshWebViewController
+import com.muyuchat.feature.dsh.workspace.terminal.DshTerminalPage
 import com.muyuchat.feature.dsh.workspace.web.DshGeckoViewHost
 import com.muyuchat.feature.dsh.workspace.web.DshWebKernel
 import com.muyuchat.feature.dsh.workspace.web.DshWebKernelPolicy
@@ -91,6 +93,8 @@ fun DshWorkspaceRoute(
     consolePort: DshConsolePort? = null,
     /** In-app plugin administration; null keeps the console's plugin block read-only. */
     pluginAdminPort: DshPluginAdminPort? = null,
+    /** Native terminal page; null hides the entry and keeps the tab byte-for-byte as before. */
+    terminalPort: DshTerminalUiPort? = null,
     maintenanceConsolePort: DshMaintenanceConsolePort? = null,
     externalBrowserPort: DshExternalBrowserPort? = null,
     accountAuthUrlMatcher: DshAccountAuthUrlMatcher = DshAccountAuthUrlMatcher { false },
@@ -389,10 +393,15 @@ fun DshWorkspaceRoute(
                 modifier = Modifier.fillMaxSize(),
                 maintenancePort = maintenanceConsolePort,
                 pluginAdminPort = pluginAdminPort,
+                // Only offered when the runtime actually injected a terminal owner.
+                onOpenTerminal = terminalPort?.let { { destination = DshWorkspaceDestination.TERMINAL } },
                 onBack = {
                     destination = DshWorkspaceDestinationPolicy.backDestination(destination)
                 }
             )
+        }
+        if (terminalPort != null && destination == DshWorkspaceDestination.TERMINAL) {
+            DshTerminalPage(port = terminalPort, modifier = Modifier.fillMaxSize())
         }
     }
 }

@@ -553,6 +553,7 @@ private fun McaApp(
                     firstFrameReporter = viewModel.dshFirstFrameReporter,
                     consolePort = viewModel.dshConsolePort,
                     pluginAdminPort = viewModel.dshPluginAdminPort,
+                    terminalPort = viewModel.dshTerminalUiPort,
                     maintenanceConsolePort = viewModel.dshMaintenanceConsolePort,
                     externalBrowserPort = viewModel.dshExternalBrowserPort,
                     accountAuthUrlMatcher = viewModel.dshAccountAuthUrlMatcher,

@@ -15,6 +15,7 @@ import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsolePort
 import com.muyuchat.core.dsh.maintenance.DshTrialLaunchPort
 import com.muyuchat.core.dsh.runtime.auth.DshAccountLoginOwner
 import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
+import com.muyuchat.core.dsh.contract.console.DshTerminalUiPort
 import com.muyuchat.core.dsh.runtime.config.DshMcpDeclarationStore
 import com.muyuchat.core.dsh.runtime.config.DshRuntimeConfig
 import com.muyuchat.core.dsh.runtime.plugin.DshPluginAdmin
@@ -240,6 +241,11 @@ internal class DshHostAssembly(
 
     /** Console-facing seam for the plugin block; the owner above stays the only mutator. */
     val pluginAdmin: DshPluginAdminPort get() = pluginAdminPort
+
+    /** Native terminal page seam; the page renders, the runtime owns every process. */
+    val terminalUi: DshTerminalUiPort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        DshTerminalUiAdapter(service = { capabilityAssembly.terminalService })
+    }
 
     private val consolePort: DshConsolePortAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         DshConsolePortAdapter(

@@ -72,7 +72,9 @@ fun DshConsoleRoute(
     modifier: Modifier = Modifier,
     maintenancePort: DshMaintenanceConsolePort? = null,
     /** In-app plugin administration; null keeps the plugin block read-only. */
-    pluginAdminPort: DshPluginAdminPort? = null
+    pluginAdminPort: DshPluginAdminPort? = null,
+    /** Opens the native terminal page; null hides the entry entirely. */
+    onOpenTerminal: (() -> Unit)? = null
 ) {
     val viewModel: DshConsoleViewModel = viewModel(
         key = "dsh-console",
@@ -119,6 +121,9 @@ fun DshConsoleRoute(
                 DshPictureInPictureSection()
                 // Additive container block (proot + user-supplied rootfs): read-only verdict plus
                 // the one fixed probe. It adds no destination and no layout change.
+                if (onOpenTerminal != null) {
+                    DshTerminalEntry(onOpenTerminal)
+                }
                 DshContainerSection()
                 // Web kernel choice: system WebView (default) or GeckoView, with the effective
                 // kernel reported so an unsupported ABI never looks like a silent failure.
@@ -764,5 +769,40 @@ private fun DshPluginAdminBlock(
                 TextButton(onClick = { pendingRemove = null }) { Text("取消") }
             }
         )
+    }
+}
+
+/**
+ * Entry row of the native terminal page.
+ *
+ * A one-row block rather than a new console destination: the page is a peer of the console inside
+ * the same DSH tab, and the row is rendered only when the composition root injected a terminal
+ * owner, so a build without the runtime owner never shows a dead button.
+ */
+@Composable
+private fun DshTerminalEntry(onOpen: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = "原生终端",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text = "在应用内直接操作 DSH 的 shell（PTY 由运行时提供），支持多标签、扩展键行与双指缩放。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        McaButton(
+            style = McaButtonStyle.Outlined,
+            onClick = onOpen,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("打开终端")
+        }
     }
 }

@@ -6,6 +6,7 @@ import com.muyuchat.core.dsh.runtime.config.DshRuntimeConfig
 import com.muyuchat.core.dsh.runtime.process.DshTerminalAssembly
 import com.muyuchat.core.dsh.runtime.process.DshTerminalHostShutdown
 import com.muyuchat.core.dsh.runtime.process.DshTerminalSeamInstaller
+import com.muyuchat.core.dsh.runtime.process.DshTerminalToolService
 import com.muyuchat.core.dsh.runtime.process.DshTerminalSeamState
 import java.io.File
 
@@ -140,6 +141,14 @@ internal class DshTerminalLane(
         get() = synchronized(lock) { assembly != null }
 
     /** Read-only projection of the lane; never creates or opens anything. */
+    /**
+     * The service of the generation that currently owns a terminal assembly, or null.
+     *
+     * The native terminal page reads this on every call instead of caching it, so a generation stop
+     * closes the terminal rather than leaving the page writing into a dead owner.
+     */
+    fun service(): DshTerminalToolService? = synchronized(lock) { assembly }?.service
+
     fun facts(): DshTerminalLaneFacts {
         val snapshot = synchronized(lock) {
             Snapshot(
