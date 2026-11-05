@@ -92,8 +92,9 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
                     nativeLibraryDir = context.applicationInfo.nativeLibraryDir
                 )
                 val assets = AndroidDshContainerAssets(context.assets)
+                val runner = DshContainerProcessRunnerBridge(layout.libraryDir)
                 val result = withContext(Dispatchers.IO) {
-                    DshContainerInstaller.install(assets, layout, DshContainerProcessRunnerBridge::invoke) { event ->
+                    DshContainerInstaller.install(assets, layout, runner::invoke) { event ->
                         // Events are emitted sequentially from this single IO coroutine, so a
                         // read-modify-write on the flow cannot interleave.
                         installFlow.value = installFlow.value.reduce(event)

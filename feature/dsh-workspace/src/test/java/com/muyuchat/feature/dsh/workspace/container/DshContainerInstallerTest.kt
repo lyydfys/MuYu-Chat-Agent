@@ -159,12 +159,14 @@ class DshContainerInstallerTest {
         val container = File(root, "container")
         val prootDir = File(root, "lib").apply { mkdirs() }
         File(prootDir, "libproot.so").writeText("proot")
+        File(prootDir, DshContainerLayout.PACKAGED_TALLOC_LIBRARY_NAME).writeText("talloc")
         return DshContainerLayout(
             containerDir = container.absolutePath,
             rootfsDir = File(container, "rootfs").absolutePath,
             executableProotCandidates = listOf(File(prootDir, "libproot.so").absolutePath),
             nonExecutableProotCandidates = emptyList(),
-            appFilesMount = root.absolutePath
+            appFilesMount = root.absolutePath,
+            libraryDir = File(container, DshContainerLayout.LIBRARY_DIR_NAME).absolutePath
         )
     }
 
@@ -227,6 +229,11 @@ class DshContainerInstallerTest {
         assertTrue(succeeded.containsAll(DshContainerInstaller.Step.entries.take(5)))
         assertTrue(File(layout.rootfsDir, "bin/sh").exists())
         assertTrue(File(layout.containerDir, DshContainerInstaller.INSTALL_STATE_NAME).isFile)
+        assertEquals(
+            "proot asks the loader for the SONAME, so the packaged copy must exist under that name",
+            "talloc",
+            File(layout.libraryDir, DshContainerLayout.TALLOC_SONAME).readText()
+        )
         assertFalse(File(layout.containerDir, DshContainerInstaller.STAGING_DIR_NAME).exists())
         // Step 6 is the only unsatisfiable step off-device: the argv gate is deliberately
         // POSIX-only (Android paths start with "/"), so a Windows temp path is rejected before

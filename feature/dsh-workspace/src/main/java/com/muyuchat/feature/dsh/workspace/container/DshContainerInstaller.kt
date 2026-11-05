@@ -146,6 +146,39 @@ object DshContainerInstaller {
         if (!stagingDir.mkdirs()) {
             return failStep(Step.PREPARE_WORKSPACE, "无法创建临时解包目录", stagingDir.absolutePath, onEvent)
         }
+        // proot's ELF asks the loader for `libtalloc.so.2`, a name APK packaging cannot carry
+        // (only `*.so` is packaged), so the packaged copy is materialised under its SONAME here.
+        val libraryDir = File(layout.libraryDir)
+        if (layout.libraryDir.isNotBlank() && !libraryDir.isDirectory && !libraryDir.mkdirs()) {
+            return failStep(
+                Step.PREPARE_WORKSPACE,
+                "无法创建库目录",
+                libraryDir.absolutePath,
+                onEvent
+            )
+        }
+        if (layout.libraryDir.isNotBlank()) {
+            val nativeDir = File(prootPath).parentFile
+            val packagedTalloc = File(nativeDir, DshContainerLayout.PACKAGED_TALLOC_LIBRARY_NAME)
+            if (!packagedTalloc.isFile) {
+                return failStep(
+                    Step.PREPARE_WORKSPACE,
+                    "缺少 proot 依赖",
+                    "APK 里没有 ${DshContainerLayout.PACKAGED_TALLOC_LIBRARY_NAME}",
+                    onEvent
+                )
+            }
+            runCatching {
+                packagedTalloc.copyTo(File(libraryDir, DshContainerLayout.TALLOC_SONAME), overwrite = true)
+            }.onFailure {
+                return failStep(
+                    Step.PREPARE_WORKSPACE,
+                    "无法展开 proot 依赖",
+                    "复制 ${DshContainerLayout.TALLOC_SONAME} 失败：${it.message}",
+                    onEvent
+                )
+            }
+        }
         onEvent(Event.Succeeded(Step.PREPARE_WORKSPACE, stagingDir.absolutePath))
 
         // Step 3: unpack. The stream is reopened on purpose: step 1 consumed it for hashing.

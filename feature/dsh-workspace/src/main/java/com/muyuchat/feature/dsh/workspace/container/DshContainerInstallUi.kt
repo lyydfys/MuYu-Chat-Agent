@@ -96,8 +96,10 @@ private fun DshContainerInstaller.Step.speedFraction(): Float? = when (this) {
  * Adapts the module-internal process runner to the `(argv, timeout) -> run` seam the installer
  * takes. Kept separate so the installer itself has no dependency on Android's ProcessBuilder.
  */
-object DshContainerProcessRunnerBridge {
-    private val runner = DshContainerProcessRunner()
+class DshContainerProcessRunnerBridge(
+    private val extraLibraryDirectory: String? = null
+) {
+    private val runner = DshContainerProcessRunner(extraLibraryDirectory = extraLibraryDirectory)
 
     operator fun invoke(argv: List<String>, timeoutMillis: Long): DshContainerRun =
         runner.run(argv, timeoutMillis)

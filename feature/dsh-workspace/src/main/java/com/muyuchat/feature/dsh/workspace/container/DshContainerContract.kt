@@ -43,11 +43,26 @@ data class DshContainerLayout(
      */
     val nonExecutableProotCandidates: List<String>,
     /** Read-only bind of the app's own files (the container can see payload/config outputs). */
-    val appFilesMount: String
+    val appFilesMount: String,
+    /**
+     * App-private directory the installer fills with proot's SONAME dependencies.
+     *
+     * APK packaging only accepts `*.so`, but proot's ELF records `libtalloc.so.2` as DT_NEEDED, so
+     * the installer copies the packaged `libtalloc.so` here under the SONAME and the runner puts
+     * this directory on `LD_LIBRARY_PATH`.
+     */
+    val libraryDir: String = ""
 ) {
     companion object {
         const val CONTAINER_DIR_NAME: String = "dsh/container"
         const val ROOTFS_DIR_NAME: String = "rootfs"
+        const val LIBRARY_DIR_NAME: String = "lib"
+
+        /** Packaged file name of proot's talloc dependency (packaging requires a `.so` suffix). */
+        const val PACKAGED_TALLOC_LIBRARY_NAME: String = "libtalloc.so"
+
+        /** The name the loader is actually asked for by proot's DT_NEEDED entry. */
+        const val TALLOC_SONAME: String = "libtalloc.so.2"
         const val PROOT_FILE_NAME: String = "proot"
         const val PACKAGED_PROOT_LIBRARY_NAME: String = "libproot.so"
         /** Rootfs-relative path proot must find; `bin/sh` is the smallest honest rootfs proof. */
@@ -61,7 +76,8 @@ data class DshContainerLayout(
                 rootfsDir = join(containerDir, ROOTFS_DIR_NAME),
                 executableProotCandidates = listOf(join(nativeLibraryDir, PACKAGED_PROOT_LIBRARY_NAME)),
                 nonExecutableProotCandidates = listOf(join(containerDir, PROOT_FILE_NAME)),
-                appFilesMount = filesDir
+                appFilesMount = filesDir,
+                libraryDir = join(containerDir, LIBRARY_DIR_NAME)
             )
         }
 

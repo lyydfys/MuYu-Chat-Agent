@@ -356,8 +356,9 @@ android {
             // kept as-is in every build type, independent of -Pmca.keepNativeSymbols.
             keepDebugSymbols += setOf(
                 "**/libproot.so",
-                // proot's DT_NEEDED is the SONAME, so the packaged copy keeps the `.2` suffix.
-                "**/libtalloc.so.2",
+                // proot's DT_NEEDED is `libtalloc.so.2`; APK packaging only accepts `*.so`, so
+                // the installer copies this file to that SONAME name on device.
+                "**/libtalloc.so",
                 "**/libandroid-shmem.so"
             )
             // These native libraries come from the local llama.cpp/CMake stack or

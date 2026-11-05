@@ -32,7 +32,8 @@ class DshContainerHost internal constructor(
     private val layout: DshContainerLayout,
     private val safTreeUris: () -> List<String>,
     private val termuxInstalled: () -> Boolean,
-    private val runner: DshContainerRunner = DshContainerProcessRunner()
+    private val runner: DshContainerRunner =
+        DshContainerProcessRunner(extraLibraryDirectory = layout.libraryDir)
 ) {
 
     /** Current verdict + the spec to use when it is [DshContainerProbeState.SUPPORTED]. */
@@ -181,7 +182,9 @@ fun interface DshContainerRunner {
  * force-kills the process. A timeout is reported as `timedOut`, never as success.
  */
 internal class DshContainerProcessRunner(
-    private val maxOutputBytes: Int = 8 * 1024
+    private val maxOutputBytes: Int = 8 * 1024,
+    /** Directory holding proot's SONAME dependencies; see [DshContainerLayout.libraryDir]. */
+    private val extraLibraryDirectory: String? = null
 ) : DshContainerRunner {
 
     override fun run(argv: List<String>, timeoutMillis: Long): DshContainerRun {
@@ -192,11 +195,14 @@ internal class DshContainerProcessRunner(
             // path, but an exec()ed child does not inherit that by itself, so name it explicitly
             // and keep whatever the app already had.
             val executableDir = java.io.File(argv.first()).parent
-            if (!executableDir.isNullOrBlank()) {
+            val searchPath = listOfNotNull(executableDir, extraLibraryDirectory)
+                .filter { it.isNotBlank() }
+                .joinToString(":")
+            if (searchPath.isNotBlank()) {
                 val environment = builder.environment()
                 val existing = environment["LD_LIBRARY_PATH"]
                 environment["LD_LIBRARY_PATH"] =
-                    if (existing.isNullOrBlank()) executableDir else executableDir + ":" + existing
+                    if (existing.isNullOrBlank()) searchPath else searchPath + ":" + existing
             }
             builder.start()
         } catch (t: Throwable) {
