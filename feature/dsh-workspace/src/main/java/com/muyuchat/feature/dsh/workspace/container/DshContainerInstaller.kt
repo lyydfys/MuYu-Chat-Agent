@@ -183,7 +183,7 @@ object DshContainerInstaller {
 
         // Step 3: unpack. The stream is reopened on purpose: step 1 consumed it for hashing.
         onEvent(Event.Started(Step.EXTRACT_ROOTFS, 1))
-        val stats = extractTo(assets, stagingDir) { fraction ->
+        val extracted = extractTo(assets, stagingDir) { fraction ->
             onEvent(
                 Event.Progress(
                     Step.EXTRACT_ROOTFS,
@@ -192,12 +192,17 @@ object DshContainerInstaller {
                         "${manifest.rootfsBytes / (1024 * 1024)} MB"
                 )
             )
-        } ?: return failStep(
-            Step.EXTRACT_ROOTFS,
-            "解包失败",
-            "rootfs 归档无法解包（tar.gz 损坏或格式不受支持）",
-            onEvent
-        )
+        }
+        val stats = extracted.getOrElse { error ->
+            return failStep(
+                Step.EXTRACT_ROOTFS,
+                "解包失败",
+                // The extractor's rejection names the entry and the reason; a fixed sentence here
+                // made a device-side failure impossible to diagnose.
+                error.message ?: "rootfs 归档无法解包（tar.gz 损坏或格式不受支持）",
+                onEvent
+            )
+        }
         onEvent(Event.Succeeded(Step.EXTRACT_ROOTFS, "${stats.entries} 个条目 / ${stats.bytes} 字节"))
 
         // Step 4: the staged tree must prove itself before it replaces anything.
@@ -323,10 +328,11 @@ object DshContainerInstaller {
         assets: DshContainerAssetSource,
         destination: File,
         onFraction: (Float) -> Unit
-    ): DshContainerTarGz.Stats? {
-        val stream = assets.openRootfsArchive() ?: return null
+    ): kotlin.Result<DshContainerTarGz.Stats> {
+        val stream = assets.openRootfsArchive()
+            ?: return kotlin.Result.failure(IllegalStateException("APK 资产缺失：rootfs 归档打不开"))
         var lastReported = 0f
-        val result = stream.use { input ->
+        return stream.use { input ->
             DshContainerTarGz.extract(input, destination) { bytes ->
                 // The uncompressed total is unknown before the archive ends; the manifest's
                 // compressed size is the best available denominator, so the bar is capped at 0.99
@@ -338,7 +344,6 @@ object DshContainerInstaller {
                 }
             }
         }
-        return result.getOrElse { null }
     }
 
     private fun finishAssetsMissing(onEvent: (Event) -> Unit): Result {

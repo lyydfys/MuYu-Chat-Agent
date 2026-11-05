@@ -73,7 +73,13 @@ data class DshContainerInstallUi(
                 DshConsoleTone.NEGATIVE
             )
             is DshContainerInstaller.Result.Failed -> DshContainerInstallLine(
-                "安装未完成：${result.reason}",
+                // The owner's detail is the only way to tell *why* a step failed on a device, so it
+                // is shown verbatim instead of being collapsed into the step name.
+                if (result.detail.isBlank()) {
+                    "安装未完成：${result.reason}"
+                } else {
+                    "安装未完成：${result.reason} —— ${result.detail}"
+                },
                 DshConsoleTone.NEGATIVE
             )
         }
