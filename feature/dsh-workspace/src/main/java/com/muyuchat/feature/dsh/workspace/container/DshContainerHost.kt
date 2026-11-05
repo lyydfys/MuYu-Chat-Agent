@@ -24,8 +24,9 @@ import java.util.concurrent.TimeUnit
  *    feature-module host exists because this cut cannot change the `core` modules and must not open a
  *    second general-purpose exec surface. It exposes one fixed command, never a shell.
  *
- * What it never does: ship/auto-download proot or a rootfs, accept user input, elevate the uid, or
- * treat Termux / a SAF tree as a dependency.
+ * What it never does: download proot or a rootfs (they are packaged assets installed by
+ * [DshContainerInstaller]), accept user input, elevate the uid, or treat Termux / a SAF tree as a
+ * dependency.
  */
 class DshContainerHost internal constructor(
     private val layout: DshContainerLayout,

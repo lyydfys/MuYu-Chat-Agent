@@ -215,7 +215,10 @@ class DshContainerProbeTest {
         assertTrue(probe.reason.contains("proot"))
         assertTrue(probe.detail.contains("libproot.so"))
         assertTrue(probe.detail.contains("nativeLibraryDir"))
-        assertTrue("the detail must say nothing is bundled", probe.detail.contains("不内置"))
+        assertTrue(
+            "the detail must name the staging script, because the runtime ships with the release",
+            probe.detail.contains("stage-container.ps1")
+        )
     }
 
     @Test

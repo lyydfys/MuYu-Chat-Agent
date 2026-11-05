@@ -198,7 +198,7 @@ class DshAdbPairingConsoleTest {
         assertNull(state.pairingFailure)
     }
 
-'    /**
+    /**
      * Waits for the attempt to finish.
      *
      * `DshAdbChannel.pair` hops to `Dispatchers.IO`, so a test-dispatcher `advanceUntilIdle` alone can
@@ -215,7 +215,7 @@ class DshAdbPairingConsoleTest {
         error("pairing did not finish: " + viewModel.state.value.pairingFailure)
     }
 
-    private fun channel(device: FakeDevice): DshAdbChannel = DshAdbChannel('
+    private fun channel(device: FakeDevice): DshAdbChannel = DshAdbChannel(
         transport = FakeAdbTransport(),
         pairingPort = DshAdbPairingPort(
             assumptions = AdbPairingWireAssumptions.EXPERIMENTAL,

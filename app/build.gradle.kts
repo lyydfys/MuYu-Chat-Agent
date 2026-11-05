@@ -349,6 +349,16 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // The bundled container runtime ships as native libraries because that is the only
+            // directory the app may exec() from. proot is an executable wearing a lib*.so name and
+            // the two others are its exact SONAMEs, copied byte-for-byte from the pinned packages:
+            // stripping an executable is meaningless and can corrupt its entry point, so they are
+            // kept as-is in every build type, independent of -Pmca.keepNativeSymbols.
+            keepDebugSymbols += setOf(
+                "**/libproot.so",
+                "**/libtalloc.so",
+                "**/libandroid-shmem.so"
+            )
             // These native libraries come from the local llama.cpp/CMake stack or
             // AndroidX native graphics dependency. Some NDK strip toolchains cannot
             // strip them cleanly, and AGP would package them as-is anyway, so make

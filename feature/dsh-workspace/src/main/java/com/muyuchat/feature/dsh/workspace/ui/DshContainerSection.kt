@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -14,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -22,22 +24,27 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.feature.dsh.workspace.DshConsoleRow
 import com.muyuchat.feature.dsh.workspace.DshConsoleTone
+import com.muyuchat.feature.dsh.workspace.container.AndroidDshContainerAssets
 import com.muyuchat.feature.dsh.workspace.container.DshContainerHost
+import com.muyuchat.feature.dsh.workspace.container.DshContainerInstallUi
+import com.muyuchat.feature.dsh.workspace.container.DshContainerInstaller
+import com.muyuchat.feature.dsh.workspace.container.DshContainerLayout
+import com.muyuchat.feature.dsh.workspace.container.DshContainerProcessRunnerBridge
 import com.muyuchat.feature.dsh.workspace.container.DshContainerProbeRun
 import com.muyuchat.feature.dsh.workspace.container.DshContainerProbeState
 import com.muyuchat.feature.dsh.workspace.container.DshContainerState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * "免 root 容器（proot）" block of the read-only DSH console.
  *
- * An additive block of the existing console column: no destination, no tab, no layout reorder.
- * It reports whether this *particular* install can build a proot argv — proot binary present in
- * an executable location and a user-supplied rootfs with `bin/sh` — and, only in that case,
- * offers the single fixed probe command (`proot … -- /bin/sh -c 'echo ok'`).
- *
- * It never downloads or ships a rootfs, never accepts a command from the user and never treats
- * Termux or a SAF tree as a dependency: those only appear in the explanatory detail.
+ * The runtime itself (proot + an Ubuntu base rootfs) ships with the release as offline assets,
+ * staged outside Git by `scripts/dsh/stage-container.ps1`; this block installs those packaged
+ * bytes and reports exactly which step failed when it cannot. It never downloads anything, never
+ * accepts a command from the user, and never treats Termux or a SAF tree as a dependency.
  */
 @Composable
 fun DshContainerSection(modifier: Modifier = Modifier) {
@@ -47,6 +54,8 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
     var state by remember(host) { mutableStateOf<DshContainerState?>(null) }
     var probeRun by remember(host) { mutableStateOf<DshContainerProbeRun?>(null) }
     var busy by remember(host) { mutableStateOf(false) }
+    val installFlow = remember(host) { MutableStateFlow(DshContainerInstallUi()) }
+    val install by installFlow.collectAsState()
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(host) {
@@ -59,6 +68,7 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
         state = state,
         probeRun = probeRun,
         busy = busy,
+        install = install,
         onRefresh = {
             scope.launch {
                 busy = true
@@ -74,6 +84,25 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
                 busy = false
             }
         },
+        onInstall = {
+            scope.launch {
+                installFlow.value = DshContainerInstallUi.installing()
+                val layout = DshContainerLayout.forApp(
+                    filesDir = context.filesDir.absolutePath,
+                    nativeLibraryDir = context.applicationInfo.nativeLibraryDir
+                )
+                val assets = AndroidDshContainerAssets(context.assets)
+                val result = withContext(Dispatchers.IO) {
+                    DshContainerInstaller.install(assets, layout, DshContainerProcessRunnerBridge::invoke) { event ->
+                        // Events are emitted sequentially from this single IO coroutine, so a
+                        // read-modify-write on the flow cannot interleave.
+                        installFlow.value = installFlow.value.reduce(event)
+                    }
+                }
+                installFlow.value = installFlow.value.finished(result)
+                state = host.snapshot()
+            }
+        },
         modifier = modifier
     )
 }
@@ -84,8 +113,10 @@ internal fun DshContainerSectionContent(
     state: DshContainerState?,
     probeRun: DshContainerProbeRun?,
     busy: Boolean,
+    install: DshContainerInstallUi,
     onRefresh: () -> Unit,
     onRunProbe: () -> Unit,
+    onInstall: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val probe = state?.probe
@@ -102,7 +133,8 @@ internal fun DshContainerSectionContent(
         )
         Text(
             text = "proot 在应用自己的 uid 上运行，`-0` 只在容器内伪装 root，不会提权。" +
-                "本版不内置 rootfs，也不自动下载；proot 与 rootfs 由用户自备。",
+                "Ubuntu base rootfs 与 proot 随安装包附带（首次安装解包到应用私有目录），" +
+                "构建时由 scripts/dsh/stage-container.ps1 摆放，不进 Git。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -128,6 +160,9 @@ internal fun DshContainerSectionContent(
                 DshConsoleRowView(DshConsoleRow(label = "rootfs", value = spec.rootfsPath))
             }
         }
+        if (install.running || install.lines.isNotEmpty()) {
+            DshContainerInstallRows(install)
+        }
         probeRun?.let { run -> DshContainerProbeRunRows(run) }
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -136,7 +171,7 @@ internal fun DshContainerSectionContent(
         ) {
             McaButton(
                 style = McaButtonStyle.Outlined,
-                enabled = !busy,
+                enabled = !busy && !install.running,
                 onClick = onRefresh,
                 modifier = Modifier.weight(1f)
             ) {
@@ -144,18 +179,55 @@ internal fun DshContainerSectionContent(
             }
             McaButton(
                 style = McaButtonStyle.Primary,
-                enabled = !busy && probe?.state == DshContainerProbeState.SUPPORTED,
-                loading = busy,
-                onClick = onRunProbe,
+                enabled = !busy && !install.running,
+                loading = install.running,
+                onClick = onInstall,
                 modifier = Modifier.weight(1.4f)
+            ) {
+                Text(if (install.done) "重新安装" else "安装内置 Ubuntu")
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            McaButton(
+                style = McaButtonStyle.Outlined,
+                enabled = !busy && !install.running && probe?.state == DshContainerProbeState.SUPPORTED,
+                onClick = onRunProbe,
+                modifier = Modifier.weight(1f)
             ) {
                 Text("运行固定探针")
             }
         }
         Text(
-            text = "探针是唯一可执行的容器命令：固定为 /bin/sh -c 'echo ok'，不接受任何输入。",
+            text = "安装流水线六步：校验离线资产 → 准备目录 → 解包 rootfs → 校验结构 → 原子提交 → 自检探针。" +
+                "探针是唯一可执行的容器命令，固定为 /bin/sh -c 'echo ok'，不接受任何输入。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** Six-step progress of the install pipeline: one row per step that has something to say. */
+@Composable
+private fun DshContainerInstallRows(install: DshContainerInstallUi) {
+    if (install.running) {
+        LinearProgressIndicator(
+            progress = { install.fraction ?: 0f },
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+    install.lines.takeLast(6).forEach { line ->
+        Text(
+            text = line.text,
+            style = MaterialTheme.typography.labelSmall,
+            color = when (line.tone) {
+                DshConsoleTone.NEGATIVE -> MaterialTheme.colorScheme.error
+                DshConsoleTone.POSITIVE -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
         )
     }
 }

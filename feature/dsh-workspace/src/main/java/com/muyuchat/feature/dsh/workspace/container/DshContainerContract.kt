@@ -318,9 +318,10 @@ fun dshContainerProbeFor(facts: DshContainerFacts): DshContainerProbe {
         facts.prootPath == null -> DshContainerProbe(
             state = DshContainerProbeState.MISSING_PROOT,
             reason = "缺少 proot 可执行文件",
-            detail = "把 proot 打包成 APK 的 nativeLibraryDir/libproot.so 才有执行权限" +
-                "（Android 10+ 禁止执行应用可写目录里的 ELF；本版不内置该二进制、也不自动下载）。" +
-                "参考布局：files/dsh/container/rootfs。$safHint$termuxHint"
+            detail = "本次构建的 APK 里没有 nativeLibraryDir/libproot.so：容器运行时随发布附带、" +
+                "不进 Git，由 scripts/dsh/stage-container.ps1 在构建前摆放" +
+                "（Android 10+ 只允许执行 nativeLibraryDir 里的 ELF）。" +
+                "rootfs 布局：files/dsh/container/rootfs。$safHint$termuxHint"
         )
 
         !facts.prootExecutable -> DshContainerProbe(
@@ -337,8 +338,8 @@ fun dshContainerProbeFor(facts: DshContainerFacts): DshContainerProbe {
                 state = DshContainerProbeState.MISSING_ROOTFS,
                 reason = if (rootfsPath == null) "缺少 rootfs" else "rootfs 里没有可用的 bin/sh",
                 detail = if (rootfsPath == null) {
-                    "把含 bin/sh 的 Linux rootfs 解压到 files/dsh/container/rootfs" +
-                        "（目录布局：rootfs/bin/sh）。$safHint$termuxHint"
+                    "在控制台点「安装内置 Ubuntu」解包随包的 rootfs，或手工把含 bin/sh 的 rootfs " +
+                        "解压到 files/dsh/container/rootfs（目录布局：rootfs/bin/sh）。$safHint$termuxHint"
                 } else {
                     "$rootfsPath/bin/sh 不存在或不可执行，proot 会立即失败；请确认 rootfs " +
                         "解压完整（Ubuntu base rootfs 自带 /bin/sh）。$termuxHint"

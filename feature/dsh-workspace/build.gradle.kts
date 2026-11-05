@@ -67,5 +67,8 @@ dependencies {
     implementation(libs.bouncycastle.bcprov)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // The container manifest parser reads JSON with org.json. On the JVM that class is a throwing
+    // stub, so the parser tests use the real artifact instead of mocking the format.
+    testImplementation("org.json:json:20240303")
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
