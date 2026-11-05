@@ -43,6 +43,9 @@ object DshContainerTarGz {
      */
     class Rejection(reason: String) : Exception(reason)
 
+/** One symlink whose target may not exist yet when the entry is read. */
+private data class PendingSymlink(val target: File, val name: String, val linkName: String)
+
 /** One hardlink whose target had not been extracted yet. */
 private data class PendingHardLink(val target: File, val name: String, val linkName: String)
 
@@ -71,6 +74,7 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
         var pendingName: String? = null
         // Hardlinks whose target had not been extracted yet when the entry was read.
         val pendingHardLinks = mutableListOf<PendingHardLink>()
+        val pendingSymlinks = mutableListOf<PendingSymlink>()
         var pendingLink: String? = null
         var pendingPaxName: String? = null
         var pendingPaxLink: String? = null
@@ -151,35 +155,11 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                         skipFully(tar, entrySize)
                     }
                     '2' -> {
-                        // The link target is stored verbatim. An absolute target such as /run is
-                        // correct inside the guest: proot translates guest paths, so the kernel's
-                        // readlink result is what the guest should see. It is never followed here.
-                        target.delete()
-                        val linked = runCatching {
-                            Files.createSymbolicLink(target.toPath(), Paths.get(linkName))
-                        }.isSuccess
-                        if (!linked) {
-                            // Windows without SeCreateSymbolicLinkPrivilege cannot create links, and
-                            // a filesystem may not support them at all. Inside the container the
-                            // only property that matters is that the path resolves to the intended
-                            // file, so a same-directory relative target is materialised as a copy.
-                            // Anything else is refused: emulating it by guessing would be worse than
-                            // failing loudly.
-                            val resolved = File(target.parentFile, linkName).canonicalFile
-                            val sameDirectory = resolved.parentFile == target.parentFile?.canonicalFile
-                            if (!linkName.startsWith("/") && sameDirectory && resolved.isFile) {
-                                resolved.copyTo(target, overwrite = true)
-                            } else {
-                                throw Rejection("无法创建符号链接 $name -> $linkName")
-                            }
-                        }
-                        if (name == DshContainerLayout.ROOTFS_SHELL_RELATIVE ||
-                            name == "./" + DshContainerLayout.ROOTFS_SHELL_RELATIVE
-                        ) {
-                            // Ubuntu ships /bin/sh as a symlink to dash, so the shell proof has to
-                            // accept a link whose target exists inside the same rootfs.
-                            hasShell = true
-                        }
+                        // Symlinks are created after the whole archive is read. Ubuntu's merged-usr
+                        // layout links whole directories (`bin -> usr/bin`) whose target only exists
+                        // once its entries have been extracted; linking inline fails on a valid
+                        // archive.
+                        pendingSymlinks += PendingSymlink(target = target, name = name, linkName = linkName)
                         skipFully(tar, entrySize)
                     }
                     '1' -> {
@@ -218,6 +198,56 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
             }
         }
 
+        // Resolve symlinks first: merged-usr links point at directories that now exist, and the
+        // hardlink pass below may need those paths to resolve.
+        // Two passes: a link may point at another link (`etc/rmt -> /usr/sbin/rmt -> ...`) that the
+        // archive stores later, so the first pass creates what it can and the second finishes.
+        var remainingSymlinks: MutableList<PendingSymlink> = pendingSymlinks.toMutableList()
+        repeat(2) { pass ->
+            val deferred = mutableListOf<PendingSymlink>()
+            remainingSymlinks.forEach { link ->
+            link.target.delete()
+            val created = runCatching {
+                Files.createSymbolicLink(link.target.toPath(), Paths.get(link.linkName))
+            }.isSuccess
+            if (!created) {
+                // Windows without SeCreateSymbolicLinkPrivilege, or a filesystem without links.
+                // Inside the container only resolvability matters, so the referenced tree is
+                // materialised at the link's location.
+                // An absolute target is a *guest* path: inside the container `/usr/bin/mawk`
+                // means `<root>/usr/bin/mawk`. Resolving it against the host root would look like
+                // an escape on every platform, so it is re-rooted first.
+                val resolved = if (link.linkName.startsWith("/")) {
+                    File(root, link.linkName.trimStart('/')).canonicalFile
+                } else {
+                    File(link.target.parentFile, link.linkName).canonicalFile
+                }
+                val insideRoot = resolved.absolutePath.startsWith(rootPrefix) || resolved == root
+                when {
+                    !insideRoot ->
+                        throw Rejection("符号链接越出解压目录：${link.name} -> ${link.linkName}")
+                    resolved.isDirectory -> {
+                        resolved.copyRecursively(link.target, overwrite = true)
+                        link.target.setLastModified(resolved.lastModified())
+                    }
+                    resolved.isFile -> resolved.copyTo(link.target, overwrite = true)
+                    else -> {
+                        // Target not materialised yet; retry after the remaining links exist.
+                        deferred += link
+                    }
+                }
+            }
+            if (link.name == DshContainerLayout.ROOTFS_SHELL_RELATIVE ||
+                link.name == "./" + DshContainerLayout.ROOTFS_SHELL_RELATIVE
+            ) {
+                hasShell = true
+            }
+            }
+            // Nothing left to defer on the last pass; a missing target then is a real failure and
+            // the pass loop surfaces it through the rejection above.
+            if (pass == 0) remainingSymlinks = deferred
+        }
+
         // Resolve the deferred hardlinks now that every target exists somewhere in the tree.
         pendingHardLinks.forEach { link ->
             val source = File(root, link.linkName)
@@ -230,6 +260,14 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                     Files.createSymbolicLink(link.target.toPath(), Files.readSymbolicLink(source.toPath()))
                 else -> throw Rejection("硬链接目标不存在：${link.name} -> ${link.linkName}")
             }
+        }
+
+        // Ubuntu ships /bin/sh as a link into the merged-usr tree, and `bin` itself is a directory
+        // symlink, so the archive may contain no `bin/sh` entry at all. Ask the extracted tree.
+        if (!hasShell) {
+            hasShell = File(root, DshContainerLayout.ROOTFS_SHELL_RELATIVE).exists() ||
+                File(root, "usr/bin/sh").exists() ||
+                File(root, "usr/bin/dash").isFile
         }
 
         if (!hasShell) {
