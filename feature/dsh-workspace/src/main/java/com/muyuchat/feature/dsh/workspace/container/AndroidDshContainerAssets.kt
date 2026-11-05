@@ -33,6 +33,14 @@ class AndroidDshContainerAssets(
         /** Must match [DshContainerAssetManifest] of the same staging script. */
         const val MANIFEST_NAME: String = "container-manifest.json"
 
-        const val ROOTFS_ARCHIVE_NAME: String = "rootfs.tar.gz"
+        /**
+         * A gzipped tar with a neutral extension.
+         *
+         * The obvious name is `rootfs.tar.gz`, but APK packaging expands `.gz` assets (the built
+         * APK contained a 106 MB `rootfs.tar` whose digest no longer matched the staged archive),
+         * so the staged file must not end in a compression suffix. The installer detects gzip by
+         * its magic bytes, not by the name.
+         */
+        const val ROOTFS_ARCHIVE_NAME: String = "rootfs.img"
     }
 }

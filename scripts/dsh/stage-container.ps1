@@ -148,7 +148,7 @@ Expand-DebMember -DebPath $shmemDeb -Member $ShmemPackage.Member -Destination (J
 
 # 3) The rootfs archive.
 $rootfs = Get-Cached $RootfsImage
-Copy-Item -LiteralPath $rootfs -Destination (Join-Path $assets 'rootfs.tar.gz') -Force
+Copy-Item -LiteralPath $rootfs -Destination (Join-Path $assets 'rootfs.img') -Force
 
 # 4) The manifest the installer reads. It repeats every hash so a device can verify what it is
 #    about to unpack without trusting the build machine.
@@ -156,9 +156,9 @@ $manifest = [ordered]@{
     schema = 'mca.dsh.container.v1'
     createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     rootfs = [ordered]@{
-        archive = 'rootfs.tar.gz'
-        bytes = (Get-Item (Join-Path $assets 'rootfs.tar.gz')).Length
-        sha256 = (Get-Sha256 (Join-Path $assets 'rootfs.tar.gz'))
+        archive = 'rootfs.img'
+        bytes = (Get-Item (Join-Path $assets 'rootfs.img')).Length
+        sha256 = (Get-Sha256 (Join-Path $assets 'rootfs.img'))
         distribution = $RootfsImage.Distribution
         sourceUrl = $RootfsImage.Url
         license = $RootfsImage.License
@@ -198,7 +198,7 @@ $manifestText = $manifest | ConvertTo-Json -Depth 6
 
 Write-Host ''
 Write-Host 'container runtime staged:'
-foreach ($file in @($prootOut, (Join-Path $jniLibs 'libtalloc.so'), (Join-Path $jniLibs 'libandroid-shmem.so'), (Join-Path $assets 'rootfs.tar.gz'))) {
+foreach ($file in @($prootOut, (Join-Path $jniLibs 'libtalloc.so'), (Join-Path $jniLibs 'libandroid-shmem.so'), (Join-Path $assets 'rootfs.img'))) {
     $size = (Get-Item -LiteralPath $file).Length
     Write-Host ("  {0,-24} {1,12} bytes  sha256={2}" -f (Split-Path -Leaf $file), $size, (Get-Sha256 $file))
 }
