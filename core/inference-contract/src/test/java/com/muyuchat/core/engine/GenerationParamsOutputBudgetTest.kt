@@ -30,21 +30,24 @@ class GenerationParamsOutputBudgetTest {
     }
 
     @Test
-    fun `a preset output budget is ignored in favour of the local window`() {
-        val withMaxTokens = GenerationParams.fromJson(
+    fun `a preset that states a budget keeps it`() {
+        val fromJson = GenerationParams.fromJson(
             """{"n_ctx":65536,"max_tokens":1234}"""
         )
-        assertEquals(65_536, withMaxTokens.nCtx)
-        assertEquals(
-            "the window decides the budget, not the preset",
-            defaultOutputBudget(65_536),
-            withMaxTokens.nPredict
-        )
+        assertEquals(65_536, fromJson.nCtx)
+        assertEquals("the preset's own limit wins", 1_234, fromJson.nPredict)
 
-        val withNPredict = GenerationParams.fromJson(
+        val explicitNPredict = GenerationParams.fromJson(
             """{"n_ctx":32768,"n_predict":900}"""
         )
-        assertEquals(defaultOutputBudget(32_768), withNPredict.nPredict)
+        assertEquals(900, explicitNPredict.nPredict)
+    }
+
+    @Test
+    fun `an unstated budget follows the model window instead of 8192`() {
+        val onlyWindow = GenerationParams.fromJson("""{"n_ctx":32768}""")
+        assertEquals(defaultOutputBudget(32_768), onlyWindow.nPredict)
+        assertEquals(16_384, onlyWindow.nPredict)
     }
 
     @Test

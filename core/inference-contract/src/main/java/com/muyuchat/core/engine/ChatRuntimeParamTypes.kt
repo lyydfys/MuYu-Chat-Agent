@@ -119,16 +119,16 @@ data class GenerationParams(
                     "n_ctx",
                     root.optInt("max_num_tokens", root.optInt("maxNumTokens", defaults.nCtx))
                 ),
-                // The output budget always follows the local model window. A preset's
-                // `n_predict`/`max_tokens` is deliberately ignored: it used to pin every model to
-                // whatever the preset author wrote (or 8192), which is exactly the one-size-fits-all
-                // budget this project decided against.
-                nPredict = defaultOutputBudget(
-                    root.optInt(
-                        "n_ctx",
-                        root.optInt("max_num_tokens", root.optInt("maxNumTokens", defaults.nCtx))
-                    )
-                ),
+                // Preset first, model second: a preset that states a budget keeps it (the author's
+                // number is respected), and only an unstated budget falls back to the local model's
+                // window. Never a fixed 8192.
+                nPredict = root.optInt("n_predict", root.optInt("max_tokens", 0)).takeIf { it > 0 }
+                    ?: defaultOutputBudget(
+                        root.optInt(
+                            "n_ctx",
+                            root.optInt("max_num_tokens", root.optInt("maxNumTokens", defaults.nCtx))
+                        )
+                    ),
                 nThreads = root.optInt("n_threads", defaults.nThreads),
                 temperature = root.optDouble("temperature", defaults.temperature.toDouble()).toFloat(),
                 topK = root.optInt("top_k", defaults.topK),
