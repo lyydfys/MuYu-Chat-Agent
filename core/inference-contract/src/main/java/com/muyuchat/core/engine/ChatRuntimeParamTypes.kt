@@ -68,9 +68,25 @@ data class LoadParams(
     }
 }
 
+/** One third of the window, floored at 512 and capped at the profile ceiling. */
+fun defaultOutputBudget(nCtx: Int, ceiling: Int = MAX_OUTPUT_TOKENS): Int {
+    val window = if (nCtx > 0) nCtx else 8192
+    return (window / 2).coerceIn(MIN_OUTPUT_TOKENS, ceiling)
+}
+
+const val MIN_OUTPUT_TOKENS: Int = 512
+const val MAX_OUTPUT_TOKENS: Int = 65_536
+
 data class GenerationParams(
     val nCtx: Int = 8192,
-    val nPredict: Int = 8192,
+    /**
+     * Output budget when nobody specified one.
+     *
+     * It follows the context window instead of a fixed 8192: a long-context model should not be
+     * limited to a short answer, and a small window must never ask for more output than it can
+     * hold. An explicit `n_predict`/`max_tokens` always wins (see [fromJson]).
+     */
+    val nPredict: Int = defaultOutputBudget(nCtx),
     val nThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2) - 1,
     val temperature: Float = 0.6f,
     val topK: Int = 20,
@@ -103,7 +119,15 @@ data class GenerationParams(
                     "n_ctx",
                     root.optInt("max_num_tokens", root.optInt("maxNumTokens", defaults.nCtx))
                 ),
-                nPredict = root.optInt("n_predict", root.optInt("max_tokens", defaults.nPredict)).takeIf { it > 0 } ?: defaults.nPredict,
+                // An explicit budget always wins; otherwise derive from the *parsed* window, so a
+                // preset that only sets n_ctx still gets a proportional output budget.
+                nPredict = root.optInt("n_predict", root.optInt("max_tokens", 0)).takeIf { it > 0 }
+                    ?: defaultOutputBudget(
+                        root.optInt(
+                            "n_ctx",
+                            root.optInt("max_num_tokens", root.optInt("maxNumTokens", defaults.nCtx))
+                        )
+                    ),
                 nThreads = root.optInt("n_threads", defaults.nThreads),
                 temperature = root.optDouble("temperature", defaults.temperature.toDouble()).toFloat(),
                 topK = root.optInt("top_k", defaults.topK),
