@@ -92,7 +92,15 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
                     nativeLibraryDir = context.applicationInfo.nativeLibraryDir
                 )
                 val assets = AndroidDshContainerAssets(context.assets)
-                val runner = DshContainerProcessRunnerBridge(layout.libraryDir)
+                val runner = DshContainerProcessRunnerBridge(
+                    extraLibraryDirectory = layout.libraryDir,
+                    // The installer's probe is a real proot run, so it needs the same loader and
+                    // scratch directory the host uses; otherwise step 6 would fail where the
+                    // runtime would have succeeded.
+                    prootLoaderPath = "${layout.nativeLibraryDir}/" +
+                        DshContainerLayout.PACKAGED_PROOT_LOADER_NAME,
+                    prootTmpDirectory = "${layout.containerDir}/tmp"
+                )
                 val result = withContext(Dispatchers.IO) {
                     DshContainerInstaller.install(assets, layout, runner::invoke) { event ->
                         // Events are emitted sequentially from this single IO coroutine, so a

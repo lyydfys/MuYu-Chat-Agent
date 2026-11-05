@@ -10,6 +10,7 @@
     the two locations the app reads:
 
       core/dsh-runtime/src/main/jniLibs/arm64-v8a/libproot.so     (exec(), via nativeLibraryDir)
+core/dsh-runtime/src/main/jniLibs/arm64-v8a/libproot_loader.so (proot's own loader; PROOT_LOADER)
       core/dsh-runtime/src/main/jniLibs/arm64-v8a/libtalloc.so
       core/dsh-runtime/src/main/jniLibs/arm64-v8a/libandroid-shmem.so
       app/src/main/assets/offline/container/rootfs.tar.gz
@@ -137,6 +138,14 @@ New-Item -ItemType Directory -Force -Path $Cache | Out-Null
 $prootDeb = Get-Cached $ProotPackage
 $prootOut = Join-Path $jniLibs 'libproot.so'
 Expand-DebMember -DebPath $prootDeb -Member $ProotPackage.Member -Destination $prootOut
+
+# proot does NOT exec() the guest program itself: it exec()s a small "loader" that maps the guest
+# ELF and then runs it. When PROOT_LOADER is unset, proot writes that loader to a temp file and
+# execs it there -- which fails on targetSdk>=29 with the misleading
+# "execve("/usr/bin/dash"): Permission denied". Shipping the loader as a native library puts it in
+# the one directory this app may exec() from, so the whole chain works without touching targetSdk.
+# Verified on device (Android 15, targetSdk 36): Ubuntu 24.04.5 aarch64 boots and runs commands.
+Expand-DebMember -DebPath $prootDeb -Member './data/data/com.termux/files/usr/libexec/proot/loader' -Destination (Join-Path $jniLibs 'libproot_loader.so')
 
 # 2) proot's runtime dependencies. Their SONAMEs are `libtalloc.so` / `libandroid-shmem.so`, which
 #    is exactly the names the packaged copies carry, so the dynamic loader finds them through the

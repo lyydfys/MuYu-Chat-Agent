@@ -97,9 +97,17 @@ private fun DshContainerInstaller.Step.speedFraction(): Float? = when (this) {
  * takes. Kept separate so the installer itself has no dependency on Android's ProcessBuilder.
  */
 class DshContainerProcessRunnerBridge(
-    private val extraLibraryDirectory: String? = null
+    private val extraLibraryDirectory: String? = null,
+    /** See [DshContainerProcessRunner.prootLoaderPath]; null keeps proot's own extraction. */
+    private val prootLoaderPath: String? = null,
+    /** Scratch directory for proot's probes; never exec()-ed from. */
+    private val prootTmpDirectory: String? = null
 ) {
-    private val runner = DshContainerProcessRunner(extraLibraryDirectory = extraLibraryDirectory)
+    private val runner = DshContainerProcessRunner(
+        extraLibraryDirectory = extraLibraryDirectory,
+        prootLoaderPath = prootLoaderPath,
+        prootTmpDirectory = prootTmpDirectory
+    )
 
     operator fun invoke(argv: List<String>, timeoutMillis: Long): DshContainerRun =
         runner.run(argv, timeoutMillis)

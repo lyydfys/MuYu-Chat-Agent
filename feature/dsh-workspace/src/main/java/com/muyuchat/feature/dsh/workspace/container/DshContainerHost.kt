@@ -32,8 +32,17 @@ class DshContainerHost internal constructor(
     private val layout: DshContainerLayout,
     private val safTreeUris: () -> List<String>,
     private val termuxInstalled: () -> Boolean,
-    private val runner: DshContainerRunner =
-        DshContainerProcessRunner(extraLibraryDirectory = layout.libraryDir)
+    private val runner: DshContainerRunner = DshContainerProcessRunner(
+        extraLibraryDirectory = layout.libraryDir,
+        // proot exec()s its loader, not the guest program; the packaged copy lives where this app
+        // is allowed to execute from. Without it the probe fails with a misleading "Permission
+        // denied" even though every byte is in place.
+        prootLoaderPath = layout.nativeLibraryDir
+            .takeIf { it.isNotBlank() }
+            ?.let { "$it/${DshContainerLayout.PACKAGED_PROOT_LOADER_NAME}" },
+        // Scratch only: proot probes the filesystem here but never exec()s from it.
+        prootTmpDirectory = "${layout.containerDir}/tmp"
+    )
 ) {
 
     /** Current verdict + the spec to use when it is [DshContainerProbeState.SUPPORTED]. */
@@ -104,7 +113,13 @@ class DshContainerHost internal constructor(
             layout: DshContainerLayout,
             safTreeUris: () -> List<String> = { emptyList() },
             termuxInstalled: () -> Boolean = { false },
-            runner: DshContainerRunner = DshContainerProcessRunner()
+            runner: DshContainerRunner = DshContainerProcessRunner(
+                extraLibraryDirectory = layout.libraryDir,
+                prootLoaderPath = layout.nativeLibraryDir
+                    .takeIf { it.isNotBlank() }
+                    ?.let { "$it/${DshContainerLayout.PACKAGED_PROOT_LOADER_NAME}" },
+                prootTmpDirectory = "${layout.containerDir}/tmp"
+            )
         ): DshContainerHost = synchronized(lock) {
             instance ?: DshContainerHost(layout, safTreeUris, termuxInstalled, runner)
                 .also { instance = it }
@@ -184,7 +199,18 @@ fun interface DshContainerRunner {
 internal class DshContainerProcessRunner(
     private val maxOutputBytes: Int = 8 * 1024,
     /** Directory holding proot's SONAME dependencies; see [DshContainerLayout.libraryDir]. */
-    private val extraLibraryDirectory: String? = null
+    private val extraLibraryDirectory: String? = null,
+    /**
+     * proot's own EFI loader, shipped as `libproot_loader.so` in the native library directory.
+     *
+     * proot never exec()s the guest program: it exec()s this loader, which maps the guest ELF and
+     * jumps into it. Left unset, proot writes the loader to a temp file and exec()s it there, which
+     * Android denies for targetSdk>=29 ("execve(...): Permission denied"). Naming the packaged copy
+     * puts that one exec() into the only directory this app may execute from.
+     */
+    private val prootLoaderPath: String? = null,
+    /** Writable, non-executed scratch directory proot may use for its probes. */
+    private val prootTmpDirectory: String? = null
 ) : DshContainerRunner {
 
     override fun run(argv: List<String>, timeoutMillis: Long): DshContainerRun {
@@ -203,6 +229,13 @@ internal class DshContainerProcessRunner(
                 val existing = environment["LD_LIBRARY_PATH"]
                 environment["LD_LIBRARY_PATH"] =
                     if (existing.isNullOrBlank()) searchPath else searchPath + ":" + existing
+            }
+            builder.environment().apply {
+                // The loader must be exec()-able *at the path proot execs it from*; the native
+                // library directory is the only such place for a targetSdk>=29 app.
+                prootLoaderPath?.takeIf { it.isNotBlank() }?.let { put("PROOT_LOADER", it) }
+                // Scratch space only (proot never execs from here), so app-private is correct.
+                prootTmpDirectory?.takeIf { it.isNotBlank() }?.let { put("PROOT_TMP_DIR", it) }
             }
             builder.start()
         } catch (t: Throwable) {

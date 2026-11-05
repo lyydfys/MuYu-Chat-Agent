@@ -51,7 +51,9 @@ data class DshContainerLayout(
      * the installer copies the packaged `libtalloc.so` here under the SONAME and the runner puts
      * this directory on `LD_LIBRARY_PATH`.
      */
-    val libraryDir: String = ""
+    val libraryDir: String = "",
+    /** APK native library directory: the only place a targetSdk>=29 app may exec() from. */
+    val nativeLibraryDir: String = ""
 ) {
     companion object {
         const val CONTAINER_DIR_NAME: String = "dsh/container"
@@ -65,6 +67,15 @@ data class DshContainerLayout(
         const val TALLOC_SONAME: String = "libtalloc.so.2"
         const val PROOT_FILE_NAME: String = "proot"
         const val PACKAGED_PROOT_LIBRARY_NAME: String = "libproot.so"
+
+        /**
+         * proot's own loader, packaged as a native library.
+         *
+         * proot exec()s *this*, not the guest program: the loader maps the guest ELF and jumps into
+         * it. Unset, proot extracts the loader into a temp directory and exec()s it there, which
+         * Android denies for targetSdk>=29 with `execve("..."): Permission denied`.
+         */
+        const val PACKAGED_PROOT_LOADER_NAME: String = "libproot_loader.so"
         /** Rootfs-relative path proot must find; `bin/sh` is the smallest honest rootfs proof. */
         const val ROOTFS_SHELL_RELATIVE: String = "bin/sh"
 
@@ -77,7 +88,8 @@ data class DshContainerLayout(
                 executableProotCandidates = listOf(join(nativeLibraryDir, PACKAGED_PROOT_LIBRARY_NAME)),
                 nonExecutableProotCandidates = listOf(join(containerDir, PROOT_FILE_NAME)),
                 appFilesMount = filesDir,
-                libraryDir = join(containerDir, LIBRARY_DIR_NAME)
+                libraryDir = join(containerDir, LIBRARY_DIR_NAME),
+                nativeLibraryDir = nativeLibraryDir
             )
         }
 
