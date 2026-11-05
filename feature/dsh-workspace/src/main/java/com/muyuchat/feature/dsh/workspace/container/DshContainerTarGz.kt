@@ -43,6 +43,9 @@ object DshContainerTarGz {
      */
     class Rejection(reason: String) : Exception(reason)
 
+/** One hardlink whose target had not been extracted yet. */
+private data class PendingHardLink(val target: File, val name: String, val linkName: String)
+
     /**
      * Extracts [archive] into [destination], which must be empty (the installer always unpacks
      * into a fresh staging directory, so a half-written previous run can never be resumed).
@@ -66,6 +69,8 @@ object DshContainerTarGz {
         var hasShell = false
 
         var pendingName: String? = null
+        // Hardlinks whose target had not been extracted yet when the entry was read.
+        val pendingHardLinks = mutableListOf<PendingHardLink>()
         var pendingLink: String? = null
         var pendingPaxName: String? = null
         var pendingPaxLink: String? = null
@@ -179,10 +184,11 @@ object DshContainerTarGz {
                     }
                     '1' -> {
                         if (linkName.isBlank()) throw Rejection("硬链接缺少目标：$name")
-                        val source = File(root, linkName)
-                        if (!source.isFile) throw Rejection("硬链接目标不存在：$linkName")
-                        target.delete()
-                        Files.createLink(target.toPath(), source.toPath())
+                        // The target may appear later in the archive (Ubuntu extracts to a
+                        // deterministic order, not necessarily target-first). Linking now would
+                        // fail on a perfectly valid archive, so the link is deferred until the
+                        // whole archive has been read.
+                        pendingHardLinks += PendingHardLink(target = target, name = name, linkName = linkName)
                         skipFully(tar, entrySize)
                     }
                     '3', '4', '6' -> {
@@ -209,6 +215,20 @@ object DshContainerTarGz {
                         onBytes(total)
                     }
                 }
+            }
+        }
+
+        // Resolve the deferred hardlinks now that every target exists somewhere in the tree.
+        pendingHardLinks.forEach { link ->
+            val source = File(root, link.linkName)
+            link.target.delete()
+            when {
+                source.isFile -> Files.createLink(link.target.toPath(), source.toPath())
+                // A hardlink to a symlink is not representable; materialise the same link target so
+                // the path still resolves the way the archive intended.
+                Files.isSymbolicLink(source.toPath()) ->
+                    Files.createSymbolicLink(link.target.toPath(), Files.readSymbolicLink(source.toPath()))
+                else -> throw Rejection("硬链接目标不存在：${link.name} -> ${link.linkName}")
             }
         }
 
