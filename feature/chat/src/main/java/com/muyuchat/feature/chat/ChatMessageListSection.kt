@@ -179,6 +179,10 @@ internal fun ChatMessageListSection(
                 .fillMaxSize()
                 .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
                 .drawWithContent {
+                    // The offscreen layer is reused across content changes; clearing it first
+                    // guarantees no pixel of a previous frame (or a previous conversation) can
+                    // survive where the new content draws nothing.
+                    drawRect(Color.Black, blendMode = BlendMode.Clear)
                     drawContent()
                     if (canScrollBackward) {
                         val topFeatherPx = 20.dp.toPx().coerceAtMost(size.height * 0.1f)

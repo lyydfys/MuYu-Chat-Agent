@@ -26,6 +26,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -419,36 +420,45 @@ fun ChatScreen(
                     PromptContextUsageLine(usage)
                 }
 
-                ChatMessageListSection(
-                    listState = listState,
-                    state = state,
-                    composerOverlap = bottomChromeHeight,
-                    onOpenRecommendedModels = onOpenRecommendedModels,
-                    onImportChatModel = onImportChatModel,
-                    onOpenQuickStart = { showQuickStart = true },
-                    onOpenBrowserTask = onOpenBrowserTask,
-                    onRetryChatImageRequest = onRetryChatImageRequest,
-                    onCancelChatImageGeneration = onCancelChatImageGeneration,
-                    onApproveChatImageRequest = onApproveChatImageRequest,
-                    onRejectChatImageRequest = onRejectChatImageRequest,
-                    onContinueAssistantImageTurn = onContinueAssistantImageTurn,
-                    onOpenModels = onOpenModels,
-                    onUseImageAsset = onUseImageAsset,
-                    onDeleteImageAsset = onDeleteImageAsset,
-                    onRegenerate = onRegenerate,
-                    onDeleteMessage = { onDeleteMessage(it) },
-                    onTogglePinMessage = { onTogglePinMessage(it) },
-                    onDeleteLastTurn = onDeleteLastTurn,
-                    onMessageIntent = onMessageIntent,
-                    onEditAndResend = onEditAndResend,
-                    onQuoteMessage = onQuoteMessage,
-                    onBrowserTaskEvent = onBrowserTaskEvent,
-                    nestedScrollConnection = scrollNestedScrollConnection,
-                    onScrollToBottom = { scrollCoordinator.scrollToBottomNow() },
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                )
+                // A conversation switch replaces the whole message data set, so it must not be
+                // played as "every old row removed + every new row added": the item enter/remove
+                // animations (and the list's offscreen feather layer) kept the previous
+                // conversation's rows on screen as semi-transparent, misaligned layers that the
+                // next switch stacked on top of ("the old conversation as wallpaper"). Re-keying
+                // the list subtree by conversation disposes those layers with the old composition;
+                // animations inside one conversation are unchanged.
+                key(state.activeConversationId ?: "") {
+                    ChatMessageListSection(
+                        listState = listState,
+                        state = state,
+                        composerOverlap = bottomChromeHeight,
+                        onOpenRecommendedModels = onOpenRecommendedModels,
+                        onImportChatModel = onImportChatModel,
+                        onOpenQuickStart = { showQuickStart = true },
+                        onOpenBrowserTask = onOpenBrowserTask,
+                        onRetryChatImageRequest = onRetryChatImageRequest,
+                        onCancelChatImageGeneration = onCancelChatImageGeneration,
+                        onApproveChatImageRequest = onApproveChatImageRequest,
+                        onRejectChatImageRequest = onRejectChatImageRequest,
+                        onContinueAssistantImageTurn = onContinueAssistantImageTurn,
+                        onOpenModels = onOpenModels,
+                        onUseImageAsset = onUseImageAsset,
+                        onDeleteImageAsset = onDeleteImageAsset,
+                        onRegenerate = onRegenerate,
+                        onDeleteMessage = { onDeleteMessage(it) },
+                        onTogglePinMessage = { onTogglePinMessage(it) },
+                        onDeleteLastTurn = onDeleteLastTurn,
+                        onMessageIntent = onMessageIntent,
+                        onEditAndResend = onEditAndResend,
+                        onQuoteMessage = onQuoteMessage,
+                        onBrowserTaskEvent = onBrowserTaskEvent,
+                        nestedScrollConnection = scrollNestedScrollConnection,
+                        onScrollToBottom = { scrollCoordinator.scrollToBottomNow() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    )
+                }
             }
 
             if (state.conversationReadOnly) {

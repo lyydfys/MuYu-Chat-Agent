@@ -30,17 +30,21 @@ class GenerationParamsOutputBudgetTest {
     }
 
     @Test
-    fun `an explicit preset budget wins over the derived default`() {
-        val fromJson = GenerationParams.fromJson(
+    fun `a preset output budget is ignored in favour of the local window`() {
+        val withMaxTokens = GenerationParams.fromJson(
             """{"n_ctx":65536,"max_tokens":1234}"""
         )
-        assertEquals(65_536, fromJson.nCtx)
-        assertEquals(1_234, fromJson.nPredict)
+        assertEquals(65_536, withMaxTokens.nCtx)
+        assertEquals(
+            "the window decides the budget, not the preset",
+            defaultOutputBudget(65_536),
+            withMaxTokens.nPredict
+        )
 
-        val explicitNPredict = GenerationParams.fromJson(
+        val withNPredict = GenerationParams.fromJson(
             """{"n_ctx":32768,"n_predict":900}"""
         )
-        assertEquals(900, explicitNPredict.nPredict)
+        assertEquals(defaultOutputBudget(32_768), withNPredict.nPredict)
     }
 
     @Test
