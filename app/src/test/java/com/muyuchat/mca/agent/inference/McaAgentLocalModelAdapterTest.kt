@@ -80,7 +80,9 @@ class McaAgentLocalModelAdapterTest {
             assertEquals(listOf("m-user", "m-assistant", "m-user-2"), sent.messages.drop(1).map { it.id })
             // Local Agent now reuses the active profile's hot n_predict; the loop budget caps
             // generation and the engine would reject a request-scoped hot override.
-            assertEquals(8192, sent.params.nPredict)
+            // No preset budget and an 8192 window: the budget now follows the window (4096),
+        // instead of the old fixed 8192.
+        assertEquals(4096, sent.params.nPredict)
             assertEquals(ReasoningMode.OFF, sent.params.reasoningMode)
             assertTrue(sent.params.hideReasoning)
             assertTrue(sent.tools.isEmpty())

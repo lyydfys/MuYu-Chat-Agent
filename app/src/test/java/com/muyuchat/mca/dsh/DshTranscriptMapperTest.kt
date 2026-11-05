@@ -239,7 +239,8 @@ class DshTranscriptMapperTest {
             limits
         )
         assertEquals(0.25f, mapped.chatRequest.params.temperature, 0.0001f)
-        assertEquals(123, mapped.chatRequest.params.nPredict)
+        // The cloud budget has a 256-token floor, so a smaller request is raised to it.
+        assertEquals(256, mapped.chatRequest.params.nPredict)
 
         val clamped = DshTranscriptMapper.mapLocal(
             dshRequest(temperature = 9.0, maxTokens = 10_000_000),

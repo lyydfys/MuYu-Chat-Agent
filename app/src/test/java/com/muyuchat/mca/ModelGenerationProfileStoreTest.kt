@@ -79,7 +79,9 @@ class ModelGenerationProfileStoreTest {
 
     @Test
     fun malformedProfileFallsBackToCurrentDefaults() {
-        val defaults = GenerationParams(temperature = 0.42f, nPredict = 123)
+        // Derive the default rather than pinning a budget: the profile document states only the
+        // window, and the budget follows it.
+        val defaults = GenerationParams(temperature = 0.42f)
         val malformed = org.json.JSONObject().put("params", "not-an-object")
         val parsed = ModelGenerationProfileDocument.fromJson(malformed)
         assertEquals(null, parsed)

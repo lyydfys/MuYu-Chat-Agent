@@ -25,7 +25,9 @@ class RuntimeParameterPreferencesTest {
 
         assertEquals(8192, restored.nCtx)
         assertEquals(6, restored.nThreads)
-        assertEquals(1024, restored.nPredict)
+        // The runtime document states n_ctx but no output budget, so the budget follows the
+        // window (8192 / 2 = 4096) instead of the old fixed 8192.
+        assertEquals(4096, restored.nPredict)
         assertEquals(0.42f, restored.temperature)
         assertTrue(JSONObject(restored.advancedJson).getBoolean("perf"))
         assertEquals(1024, JSONObject(restored.advancedJson).getInt("n_batch"))
