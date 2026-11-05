@@ -21,6 +21,12 @@ import java.util.zip.GZIPInputStream
  * will not; see `docs/architecture/DSH_CONTAINER.md` §2).
  */
 object DshContainerTarGz {
+
+    /** Upper bound for one materialised directory tree; beyond it the archive is refused. */
+    const val MAX_MATERIALISED_ENTRIES: Int = 20_000
+
+    /** Depth bound of the materialisation walk. */
+    const val MAX_MATERIALISE_DEPTH: Int = 8
     /** A real Ubuntu base rootfs has ~20k entries; this is a runaway guard, not a target. */
     const val MAX_ENTRIES: Int = 400_000
 
@@ -226,15 +232,12 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                 when {
                     !insideRoot ->
                         throw Rejection("符号链接越出解压目录：${link.name} -> ${link.linkName}")
-                    resolved.isDirectory -> {
-                        resolved.copyRecursively(link.target, overwrite = true)
-                        link.target.setLastModified(resolved.lastModified())
-                    }
+                    resolved.isDirectory -> materialiseDirectory(resolved, link.target, link.name)
                     resolved.isFile -> resolved.copyTo(link.target, overwrite = true)
-                    else -> {
-                        // Target not materialised yet; retry after the remaining links exist.
-                        deferred += link
-                    }
+                    // A dangling symlink is normal in a real archive (docs linked to optional
+                    // files). If links cannot be created here, leaving the path unresolved has the
+                    // same meaning as the archive intended, so it is never a rejection.
+                    else -> Unit
                 }
             }
             if (link.name == DshContainerLayout.ROOTFS_SHELL_RELATIVE ||
@@ -274,6 +277,43 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
             throw Rejection("rootfs 里没有 ${DshContainerLayout.ROOTFS_SHELL_RELATIVE}")
         }
         Stats(entries = entries, files = files, bytes = total, hasShell = true)
+    }
+
+    /**
+     * Copies [source] to [target] without ever following a symlink.
+     *
+     * This is the fallback for platforms that cannot create symlinks. Ubuntu's merged-usr layout
+     * links whole directories (`bin -> usr/bin`), and a naive recursive copy both explodes in size
+     * and can loop when the tree links back into itself. The walk is therefore bounded in depth and
+     * in total entries, and it recreates inner links as links instead of expanding them.
+     */
+    private fun materialiseDirectory(source: File, target: File, entryName: String) {
+        var budget = MAX_MATERIALISED_ENTRIES
+        fun copy(from: File, to: File, depth: Int) {
+            if (depth > MAX_MATERIALISE_DEPTH) {
+                throw Rejection("符号链接物化层数过深：$entryName")
+            }
+            if (budget-- <= 0) throw Rejection("符号链接物化条目过多：$entryName")
+            val children = from.listFiles().orEmpty()
+            if (!to.isDirectory && !to.mkdirs()) throw Rejection("无法创建目录：$to")
+            children.forEach { child ->
+                val childTarget = File(to, child.name)
+                when {
+                    Files.isSymbolicLink(child.toPath()) -> {
+                        childTarget.delete()
+                        val linked = runCatching {
+                            Files.createSymbolicLink(childTarget.toPath(), Files.readSymbolicLink(child.toPath()))
+                        }.isSuccess
+                        if (!linked) throw Rejection("无法复制内部链接：${child.name}")
+                    }
+                    child.isDirectory -> copy(child, childTarget, depth + 1)
+                    child.isFile -> child.copyTo(childTarget, overwrite = true)
+                }
+            }
+        }
+        target.delete()
+        copy(source, target, 0)
+        target.setLastModified(source.lastModified())
     }
 
     private fun writeFile(tar: InputStream, target: File, size: Long, onWritten: (Long) -> Unit) {
