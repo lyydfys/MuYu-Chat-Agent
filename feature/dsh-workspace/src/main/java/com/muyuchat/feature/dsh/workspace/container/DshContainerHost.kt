@@ -45,6 +45,21 @@ class DshContainerHost internal constructor(
     )
 ) {
 
+    /**
+     * Install progress, owned by the process-level host.
+     *
+     * It lives here, not in the composable, because an install takes a minute and a recomposition
+     * (or a tab switch) must not cancel it or throw away the progress the user is watching.
+     */
+    internal val installState: kotlinx.coroutines.flow.MutableStateFlow<DshContainerInstallUi> =
+        kotlinx.coroutines.flow.MutableStateFlow(DshContainerInstallUi())
+
+    /** Scope for the install job; process-lifetime, never tied to a composition. */
+    internal val installScope: kotlinx.coroutines.CoroutineScope =
+        kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+        )
+
     /** Current verdict + the spec to use when it is [DshContainerProbeState.SUPPORTED]. */
     suspend fun snapshot(): DshContainerState = withContext(Dispatchers.IO) { snapshotNow() }
 

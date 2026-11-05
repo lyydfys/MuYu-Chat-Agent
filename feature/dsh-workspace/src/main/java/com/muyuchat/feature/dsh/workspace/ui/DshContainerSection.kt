@@ -54,8 +54,9 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
     var state by remember(host) { mutableStateOf<DshContainerState?>(null) }
     var probeRun by remember(host) { mutableStateOf<DshContainerProbeRun?>(null) }
     var busy by remember(host) { mutableStateOf(false) }
-    val installFlow = remember(host) { MutableStateFlow(DshContainerInstallUi()) }
-    val install by installFlow.collectAsState()
+    // Progress and the job itself belong to the process-level host: a recomposition or a tab
+    // switch must not cancel a running install or reset what the user is watching.
+    val install by host.installState.collectAsState()
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(host) {
@@ -85,8 +86,8 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
             }
         },
         onInstall = {
-            scope.launch {
-                installFlow.value = DshContainerInstallUi.installing()
+            host.installScope.launch {
+                host.installState.value = DshContainerInstallUi.installing()
                 val layout = DshContainerLayout.forApp(
                     filesDir = context.filesDir.absolutePath,
                     nativeLibraryDir = context.applicationInfo.nativeLibraryDir
@@ -105,10 +106,10 @@ fun DshContainerSection(modifier: Modifier = Modifier) {
                     DshContainerInstaller.install(assets, layout, runner::invoke) { event ->
                         // Events are emitted sequentially from this single IO coroutine, so a
                         // read-modify-write on the flow cannot interleave.
-                        installFlow.value = installFlow.value.reduce(event)
+                        host.installState.value = host.installState.value.reduce(event)
                     }
                 }
-                installFlow.value = installFlow.value.finished(result)
+                host.installState.value = host.installState.value.finished(result)
                 state = host.snapshot()
             }
         },
