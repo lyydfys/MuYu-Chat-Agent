@@ -124,7 +124,12 @@ data class CloudApiConfig(
     val imageApiFormat: CloudImageApiFormat = CloudImageApiFormat.OPENAI_IMAGES,
     val imageModel: String = "",
     val imageSize: String = "1024x1024",
-    val imageEndpointPath: String = ""
+    val imageEndpointPath: String = "",
+    /**
+     * Context window of this cloud model, used only by [CloudPromptBudget] before a request is sent.
+     * `0` means unknown and the budget falls back to [CloudPromptBudget.DEFAULT_WINDOW_TOKENS].
+     */
+    val contextWindowTokens: Int = 0
 ) {
     val configured: Boolean
         get() = enabled &&
@@ -196,7 +201,10 @@ data class CloudModelRecord(
             imageApiFormat = imageApiFormat,
             imageModel = imageApiFormat.defaultImageModel,
             imageSize = imageSize,
-            imageEndpointPath = imageEndpointPath
+            imageEndpointPath = imageEndpointPath,
+            // The request builder fits the prompt into this window before serializing it; unknown
+            // model names resolve to the documented 128 k fallback inside [CloudModelWindow].
+            contextWindowTokens = CloudModelWindow.windowTokens(modelName)
         )
 
     fun toImageConfig(): CloudApiConfig =

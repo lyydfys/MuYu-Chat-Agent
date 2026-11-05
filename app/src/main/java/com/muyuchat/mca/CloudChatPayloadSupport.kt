@@ -106,34 +106,52 @@ internal fun coalesceCloudChatMessagesByRole(messages: List<ChatMessage>): List<
     return result
 }
 
+/** Transport-level output ceilings kept from the pre-budget builders; a small window may be lower. */
+private const val OPENAI_COMPATIBLE_OUTPUT_CAP = 32_768
+private const val ANTHROPIC_OUTPUT_CAP = 8_192
+
 internal fun buildOpenAiChatJson(config: CloudApiConfig, request: ChatRequest): JSONObject {
-    val params = request.params
+    // Last hard boundary: estimate(prompt) + max_tokens <= window. Trimming is visible in the system
+    // prompt (`[mca:prompt_trimmed …]`), never silent and never fatal.
+    val fitted = CloudPromptBudget.fit(
+        request = request,
+        windowTokens = config.contextWindowTokens,
+        requestedOutputTokens = request.params.effectiveNPredict(),
+        outputCap = OPENAI_COMPATIBLE_OUTPUT_CAP
+    )
+    val params = fitted.request.params
     return JSONObject()
         .put("model", config.chatModel.trim())
-        .put("messages", JSONArray(request.messagesJson(multimodal = true)))
+        .put("messages", JSONArray(fitted.request.messagesJson(multimodal = true)))
         .put("stream", config.streaming)
         .also { root -> if (config.streaming) root.put("stream_options", JSONObject().put("include_usage", true)) }
         .put("temperature", params.temperature.toDouble())
         .put("top_p", params.topP.toDouble())
         .put("presence_penalty", params.presencePenalty.toDouble())
         .put("frequency_penalty", params.frequencyPenalty.toDouble())
-        .put("max_tokens", params.effectiveNPredict().coerceIn(1, 32768))
+        .put("max_tokens", fitted.outputTokens)
         .also { root ->
             if (params.stopWords.isNotEmpty()) {
                 root.put("stop", JSONArray(params.stopWords))
             }
             applyOpenAiCompatibleReasoning(root, config, params)
-            applyOpenAiPromptCacheKey(root, config, request)
+            applyOpenAiPromptCacheKey(root, config, fitted.request)
         }
 }
 
 internal fun buildAnthropicChatJson(config: CloudApiConfig, request: ChatRequest): JSONObject {
-    val split = splitCloudSystemMessages(request)
-    val params = request.params
+    val fitted = CloudPromptBudget.fit(
+        request = request,
+        windowTokens = config.contextWindowTokens,
+        requestedOutputTokens = request.params.effectiveNPredict(),
+        outputCap = ANTHROPIC_OUTPUT_CAP
+    )
+    val split = splitCloudSystemMessages(fitted.request)
+    val params = fitted.request.params
     return JSONObject()
         .put("model", config.chatModel.trim())
         .put("stream", true)
-        .put("max_tokens", params.effectiveNPredict().coerceIn(1, 8192))
+        .put("max_tokens", fitted.outputTokens)
         .put("temperature", params.temperature.toDouble())
         .put("top_p", params.topP.toDouble())
         .also { root ->

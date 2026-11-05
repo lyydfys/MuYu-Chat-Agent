@@ -4,6 +4,7 @@ import com.muyuchat.core.dsh.contract.DshGatewayModel
 import com.muyuchat.mca.CloudApiFormat
 import com.muyuchat.mca.CloudModelKind
 import com.muyuchat.mca.CloudModelRecord
+import com.muyuchat.mca.CloudModelWindow
 
 /**
  * Honest model catalog exposed through the gateway's `/v1/models`.
@@ -88,11 +89,15 @@ internal object DshModelCatalog {
             .filter { seen.add(it.id) }
             .map { record ->
                 val native = supportsNativeCloudTools(record)
+                // The advertised window is what lets DSH compact on its own and stops it from asking
+                // for an output budget the window cannot hold. Unknown gateways get the 128 k fallback;
+                // `CloudModelWindow` is the single place to add per-model overrides.
+                val window = CloudModelWindow.windowTokens(record.modelName)
                 DshGatewayModel(
                     id = cloudModelId(record.id),
                     displayName = displayNameOf(record),
-                    contextWindow = null,
-                    maxOutputTokens = null,
+                    contextWindow = window,
+                    maxOutputTokens = CloudModelWindow.outputTokens(window),
                     supportsTools = true,
                     nativeToolCalling = native,
                     toolProtocolLabel = if (native) null else DshPromptedToolProtocol.PROTOCOL_LABEL

@@ -14,6 +14,7 @@ import com.muyuchat.core.engine.ChatToolExchange
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
+import com.muyuchat.mca.CloudPromptBudget
 import org.json.JSONObject
 
 /** How the mapped call carries tool calls (or does not carry any). */
@@ -155,8 +156,6 @@ internal object DshTranscriptMapper {
             messages += ChatMessage(role = Role.SYSTEM, content = system, createdAt = 0L, id = "dsh-system")
         }
         messages += transcriptMessages(split.normalMessages, limits, idOffset = 0)
-        enforceTranscriptBudget(messages, limits)
-
         val tools = request.tools.map { definition ->
             ChatToolDefinition(
                 name = definition.name,
@@ -164,9 +163,10 @@ internal object DshTranscriptMapper {
                 parametersJson = normalizeNativeSchema(definition)
             )
         }
+        val chatRequest = baseChatRequest(messages, generationParams(GenerationParams(), request, limits))
+            .copy(tools = tools, toolExchanges = split.exchanges)
         return DshMappedRequest(
-            chatRequest = baseChatRequest(messages, generationParams(GenerationParams(), request, limits))
-                .copy(tools = tools, toolExchanges = split.exchanges),
+            chatRequest = fitCloudPromptBudget(chatRequest, limits),
             toolMode = DshToolMode.NATIVE_RESPONSES,
             offeredToolNames = tools.map { it.name }
         )
@@ -209,7 +209,6 @@ internal object DshTranscriptMapper {
             messages += ChatMessage(role = Role.SYSTEM, content = system, createdAt = 0L, id = "dsh-system")
         }
         messages += transcriptMessages(request.messages, limits, idOffset = 0)
-        enforceTranscriptBudget(messages, limits)
         val params = generationParams(base, request, limits)
         // A prompted tool turn needs enough room to emit the envelope. DSH's own budget
         // calculation sends max_tokens=1 when it has no advertised output budget; passing that
@@ -221,10 +220,36 @@ internal object DshTranscriptMapper {
             params
         }
         return DshMappedRequest(
-            chatRequest = baseChatRequest(messages, effectiveParams),
+            chatRequest = fitCloudPromptBudget(baseChatRequest(messages, effectiveParams), limits),
             toolMode = if (catalog.offeredNames.isEmpty()) DshToolMode.NONE else DshToolMode.PROMPTED,
             offeredToolNames = catalog.offeredNames
         )
+    }
+
+    /**
+     * The last hard boundary of a cloud call: `estimate(prompt) + output <= window`.
+     *
+     * The character ceiling in [enforceTranscriptBudget] is a process-protection guard, not a context
+     * budget: it is ~250 k tokens, far above any cloud window, and it *throws*. Running the token
+     * budget first turns an overflow into a visible trim instead of a provider rejection or an explicit
+     * mapping failure. Local calls never reach this helper.
+     */
+    private fun fitCloudPromptBudget(request: ChatRequest, limits: DshAdapterLimits): ChatRequest {
+        val requested = if (limits.cloudMaxOutputTokens > 0) {
+            limits.cloudMaxOutputTokens
+        } else {
+            request.params.nPredict
+        }
+        val fitted = CloudPromptBudget.fit(
+            request = request,
+            windowTokens = limits.cloudContextWindowTokens,
+            requestedOutputTokens = requested,
+            outputCap = limits.maxOutputTokens
+        )
+        // The fit guarantees the provider budget; this keeps the adapter's own character guard as a
+        // second, never-firing safety net for a caller that bypasses the budget.
+        enforceTranscriptBudget(fitted.request.messages, limits)
+        return fitted.request
     }
 
     private fun localPromptedOutputFloor(nCtx: Int): Int =

@@ -52,7 +52,16 @@ internal data class DshAdapterLimits(
      */
     val admissionTimeoutMillis: Long = 180_000L,
     /** Diagnostic/error text ceiling in a [com.muyuchat.core.dsh.contract.DshModelEvent.Failed]. */
-    val maxErrorMessageChars: Int = 400
+    val maxErrorMessageChars: Int = 400,
+    /**
+     * Context window a cloud prompt is fitted into by [com.muyuchat.mca.CloudPromptBudget].
+     *
+     * The DSH catalog advertises this per cloud model; 128 k is the documented fallback for a gateway
+     * whose real window is unknown. It is an adapter budget, never a capability claim.
+     */
+    val cloudContextWindowTokens: Int = 128_000,
+    /** Cloud output budget advertised/requested; 0 = derive it from the window (min(window/2, 65 536)). */
+    val cloudMaxOutputTokens: Int = 0
 ) {
     /**
      * Cloud models have a large context and must see the whole tool catalog (including MCP tools);
@@ -120,6 +129,12 @@ internal data class DshAdapterLimits(
             "admissionTimeoutMillis must be in 1000..600000."
         }
         require(maxErrorMessageChars in 64..4_096) { "maxErrorMessageChars must be in 64..4096." }
+        require(cloudContextWindowTokens in 1_024..4_000_000) {
+            "cloudContextWindowTokens must be in 1024..4000000."
+        }
+        require(cloudMaxOutputTokens in 0..1_000_000) {
+            "cloudMaxOutputTokens must be 0..1000000."
+        }
     }
 
     companion object {
