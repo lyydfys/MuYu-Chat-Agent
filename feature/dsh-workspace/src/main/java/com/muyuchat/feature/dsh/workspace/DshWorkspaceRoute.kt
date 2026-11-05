@@ -319,9 +319,8 @@ fun DshWorkspaceRoute(
                             onFirstFrameRendered = viewModel::onFirstFrameRendered,
                             modifier = Modifier.fillMaxSize()
                         )
-                        return@key
-                    }
-                    DshWebViewHost(
+                    } else {
+                        DshWebViewHost(
                         state = web,
                         callbacks = callbacks,
                         controller = controller,
@@ -347,6 +346,7 @@ fun DshWorkspaceRoute(
                         accountReplyProbeEnabled = accountReplyProbeEnabled,
                         modifier = Modifier.fillMaxSize()
                     )
+                    }
                 }
             }
         )
