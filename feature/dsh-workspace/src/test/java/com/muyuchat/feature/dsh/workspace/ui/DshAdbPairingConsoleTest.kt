@@ -144,7 +144,13 @@ class DshAdbPairingConsoleTest {
         assertNull(state.pairingResult)
         val failure = assertNotNull(state.pairingFailure).let { state.pairingFailure!! }
         assertTrue("expected a peer_info_rejected line, got $failure", failure.contains("peer_info_rejected"))
-        assertTrue("failure must list the unverified assumptions", failure.contains("未验证假设"))
+        // A device rejection is a *concrete* outcome: the console reports the reason code and must
+        // not fall back to the "unverified assumptions" wording, which belongs to the unsupported
+        // path only. Keeping the negative half here stops the two states from collapsing again.
+        assertTrue(
+            "a peer-info rejection must name the reason, not the assumption list: $failure",
+            failure.contains("peer_info_rejected") && !failure.contains("未验证假设")
+        )
         assertTrue("failure must not echo the code", !failure.contains(CODE))
         assertEquals("the endpoint must not be moved by a failure", originalEndpoint, state.adbEndpoint)
     }

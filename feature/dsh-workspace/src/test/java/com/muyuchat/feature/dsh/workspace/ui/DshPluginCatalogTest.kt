@@ -19,7 +19,7 @@ class DshPluginCatalogTest {
 
     private fun listed(text: String, maxPlugins: Int = DSH_PLUGIN_MAX_ROWS): DshPluginCatalog.Listed {
         val result = parseInstalledPlugins(text, maxPlugins)
-        assertTrue("expected Listed, was $result", result is DshPluginCatalog.Listed)
+        assertTrue("expected Listed, was $result for input <$text>", result is DshPluginCatalog.Listed)
         return result as DshPluginCatalog.Listed
     }
 

@@ -90,7 +90,13 @@ class DshAdbPairingPortTest {
 
     @Test
     fun `an unverified protocol surfaces the assumption names and nothing else`() {
-        val port = DshAdbPairingPort(transportFactory = { FakeDevice(CODE) })
+        // The unverified-assumptions path is reached by constructing the port with the unverified
+        // set; the shipped default is EXPERIMENTAL ("go ahead and try"), so relying on the default
+        // here would silently stop pinning this contract.
+        val port = DshAdbPairingPort(
+            assumptions = AdbPairingWireAssumptions.UNVERIFIED,
+            transportFactory = { FakeDevice(CODE) }
+        )
         port.setExperimentalEnabled(true)
 
         val result = port.pair("10.0.0.2", 43_521, CODE)

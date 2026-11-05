@@ -30,6 +30,14 @@ bouncycastle = "1.86"
 # Agent V1 strict model-output parser. Streaming Core parser only; no databind is introduced.
 # Exact version/source is verified in docs/proposals/agent-v1/evidence/5e912ff9/dependency-verification.md.
 jackson = "2.22.4"
+# GeckoView: the second web kernel of the DSH workspace. Published only on Mozilla's Maven.
+# The artifact is ABI-specific (91.5 MB AAR, `libxul.so` is 147 MB uncompressed), so the app ships
+# the arm64-v8a one and the kernel falls back to the system WebView whenever it cannot load.
+# Licensed MPL-2.0: file-level copyleft, no effect on MCA's Apache-2.0 sources.
+# Pinned to the newest build whose AAR metadata still allows this project's compileSdk 36:
+# 155.x and 157.x/159.x require compileSdk 37 (verified by reading their aar-metadata.properties),
+# while 153.0 and older declare minCompileSdk=1. Raise this pin together with compileSdk, not alone.
+geckoview = "153.0.20260810162159"
 # G00/Q01 measurement stack. `benchmark` is pinned to the current stable macrobenchmark line.
 # IMPORTANT: the androidx.benchmark artifacts are NOT in this machine's default Gradle cache, so
 # `:benchmark` is opt-in (-Pmca.includeBenchmark=true) and only that build needs network access
@@ -52,6 +60,7 @@ kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "ko
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 
 [libraries]
+geckoview-arm64-v8a = { module = "org.mozilla.geckoview:geckoview-arm64-v8a", version.ref = "geckoview" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }

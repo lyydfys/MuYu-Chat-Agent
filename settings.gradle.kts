@@ -34,6 +34,9 @@ dependencyResolutionManagement {
             google()
             mavenCentral()
         }
+        // GeckoView is published only on Mozilla's own Maven and is not mirrored anywhere else.
+        // It goes last so every other dependency still resolves from the mirrors first.
+        maven { url = uri("https://maven.mozilla.org/maven2") }
     }
 }
 

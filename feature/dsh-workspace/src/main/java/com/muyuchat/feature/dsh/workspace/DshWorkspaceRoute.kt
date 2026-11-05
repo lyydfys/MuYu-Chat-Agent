@@ -45,6 +45,10 @@ import com.muyuchat.feature.dsh.workspace.ui.DshWorkspaceScreen
 import com.muyuchat.feature.dsh.workspace.web.DshAccountReplyDeduper
 import com.muyuchat.feature.dsh.workspace.web.DshWebStorage
 import com.muyuchat.feature.dsh.workspace.web.DshWebViewController
+import com.muyuchat.feature.dsh.workspace.web.DshGeckoViewHost
+import com.muyuchat.feature.dsh.workspace.web.DshWebKernel
+import com.muyuchat.feature.dsh.workspace.web.DshWebKernelPolicy
+import com.muyuchat.feature.dsh.workspace.web.DshWebKernelStore
 import com.muyuchat.feature.dsh.workspace.web.DshWebViewHost
 import kotlinx.coroutines.launch
 
@@ -117,6 +121,15 @@ fun DshWorkspaceRoute(
     lastGatewayReplyAtMillis: (() -> Long?)? = null
 ) {
     val context = LocalContext.current
+    // Rendering kernel for the official page. The store holds the user's choice; the policy
+    // keeps the system WebView unless GeckoView can actually run on this build and device.
+    val webKernel = remember(context) {
+        DshWebKernelPolicy.effectiveKernel(
+            requested = DshWebKernelStore(context).read(),
+            supportedAbis = android.os.Build.SUPPORTED_ABIS.toList(),
+            geckoViewPresent = true
+        )
+    }
     val applicationContext = context.applicationContext
     val navigationStore = remember(applicationContext) {
         FileDshNavigationStore.forContext(applicationContext)
@@ -298,6 +311,16 @@ fun DshWorkspaceRoute(
             },
             webContent = { web ->
                 key(web.epoch, web.webGeneration) {
+                    if (webKernel == DshWebKernel.GECKOVIEW) {
+                        DshGeckoViewHost(
+                            state = web,
+                            callbacks = callbacks,
+                            controller = controller,
+                            onFirstFrameRendered = viewModel::onFirstFrameRendered,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        return@key
+                    }
                     DshWebViewHost(
                         state = web,
                         callbacks = callbacks,

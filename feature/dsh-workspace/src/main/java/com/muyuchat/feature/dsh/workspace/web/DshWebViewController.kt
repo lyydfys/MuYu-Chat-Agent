@@ -90,9 +90,21 @@ internal class DshFullscreenVideoController {
  * Stable handle the Route uses for back/reload while the AndroidView factory owns the actual
  * WebView instance.
  */
+/**
+ * Back/stop surface of a non-WebView kernel.
+ *
+ * The route only needs "can the engine go back" and "go back" to keep the system back hierarchy
+ * identical across kernels; everything else stays kernel-specific.
+ */
+internal interface DshWebEngineHandle {
+    fun canGoBack(): Boolean
+    fun goBack()
+}
+
 class DshWebViewController {
 
     private var webView: WebView? = null
+    private var engine: DshWebEngineHandle? = null
 
     internal val fullscreen = DshFullscreenVideoController()
 
@@ -114,12 +126,29 @@ class DshWebViewController {
         this.canGoBack = canGoBack
     }
 
+    /** A second kernel (GeckoView) took over rendering; it owns back from now on. */
+    internal fun attachEngine(handle: DshWebEngineHandle) {
+        engine = handle
+        canGoBack = handle.canGoBack()
+    }
+
+    internal fun detachEngine(handle: DshWebEngineHandle) {
+        if (engine === handle) engine = null
+        canGoBack = false
+        fullscreen.release()
+    }
+
     /**
      * System back hierarchy: fullscreen video, then WebView history, then the caller's onExit.
      * Called from the Route's BackHandler on the main thread.
      */
     fun handleBack(): Boolean {
         if (fullscreen.exitFromBack()) return true
+        val engineHandle = engine
+        if (engineHandle != null && engineHandle.canGoBack()) {
+            engineHandle.goBack()
+            return true
+        }
         val view = webView ?: return false
         return if (view.canGoBack()) {
             view.goBack()

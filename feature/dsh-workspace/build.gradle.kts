@@ -62,6 +62,10 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    // Second web kernel. The artifact is ABI-specific and large; the kernel is only used when
+    // GeckoView can actually initialise on this device, otherwise the host keeps the system
+    // WebView. See DshWebKernel.
+    implementation(libs.geckoview.arm64.v8a)
     // ADB wireless pairing needs certificate TLS plus the RFC 5705 exporter; JSSE offers neither.
     implementation(libs.bouncycastle.bctls)
     implementation(libs.bouncycastle.bcprov)

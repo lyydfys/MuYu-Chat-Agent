@@ -109,6 +109,9 @@ fun DshConsoleRoute(
                 // Additive container block (proot + user-supplied rootfs): read-only verdict plus
                 // the one fixed probe. It adds no destination and no layout change.
                 DshContainerSection()
+                // Web kernel choice: system WebView (default) or GeckoView, with the effective
+                // kernel reported so an unsupported ABI never looks like a silent failure.
+                DshWebKernelSection()
                 // Read-only plugin inventory. The official plugin manager owns installation, so this
                 // block only lists what is already there and links to the official page.
                 DshPluginsSection(
@@ -181,6 +184,15 @@ internal fun parseInstalledPlugins(
         return DshPluginCatalog.Unreadable("根节点不是 JSON 对象")
     }
     scanner.advance() // '{'
+    scanner.skipWhitespace()
+    if (scanner.peek() == '}') {
+        // `{}` is a well-formed document that simply has no dependencies key; reading a key here
+        // would report it as malformed JSON instead of MissingDependencies.
+        scanner.advance()
+        scanner.skipWhitespace()
+        if (!scanner.atEnd()) return DshPluginCatalog.Unreadable("JSON 之后存在多余内容")
+        return DshPluginCatalog.MissingDependencies
+    }
     var dependencies: List<DshInstalledPlugin>? = null
     var truncated = false
     while (true) {
@@ -193,9 +205,16 @@ internal fun parseInstalledPlugins(
             if (scanner.peek() != '{') return DshPluginCatalog.Unreadable("dependencies 不是对象")
             scanner.advance()
             val rows = mutableListOf<DshInstalledPlugin>()
+            // A trailing comma before the closing brace is malformed JSON, not an empty tail.
+            var trailingComma = false
             while (true) {
                 scanner.skipWhitespace()
-                if (scanner.peek() == '}') break
+                if (scanner.peek() == '}') {
+                    if (trailingComma) {
+                        return DshPluginCatalog.Unreadable("依赖列表末尾有多余逗号")
+                    }
+                    break
+                }
                 val name = scanner.readString()
                     ?: return DshPluginCatalog.Unreadable("依赖名不是合法字符串")
                 scanner.skipWhitespace()
@@ -212,12 +231,23 @@ internal fun parseInstalledPlugins(
                 } else {
                     truncated = true
                 }
+                trailingComma = false
                 scanner.skipWhitespace()
                 when (scanner.peek()) {
-                    ',' -> scanner.advance()
+                    ',' -> {
+                        scanner.advance()
+                        trailingComma = true
+                    }
                     '}' -> break
                     else -> return DshPluginCatalog.Unreadable("依赖列表缺少逗号或右括号")
                 }
+            }
+            // The inner loop stops *at* the closing brace of the dependencies object; consuming it
+            // here is what keeps the outer loop's own terminator in sync. Leaving it behind made
+            // every document look like it had trailing content.
+            scanner.skipWhitespace()
+            if (!scanner.consume('}')) {
+                return DshPluginCatalog.Unreadable("dependencies 对象没有闭合")
             }
             dependencies = rows
         } else if (!scanner.skipValue()) {
@@ -311,25 +341,58 @@ private class DshJsonScanner(private val text: String) {
         val char = peek() ?: return false
         return when {
             char == '"' -> readString() != null
-            char == '{' -> skipContainer('{', '}')
-            char == '[' -> skipContainer('[', ']')
+            char == '{' -> skipObject()
+            char == '[' -> skipArray()
             else -> skipScalar()
         }
     }
 
-    private fun skipContainer(open: Char, close: Char): Boolean {
-        if (!consume(open)) return false
+    /**
+     * Skips one complete JSON value, recursively.
+     *
+     * package.json carries nested objects and arrays, and a value may even be a string containing
+     * `}`; only a real recursive walk gets those right. The previous single-loop version could not
+     * tell a `key: value` colon from a separator, so any nested object (devDependencies, scripts,
+     * a dependency whose version is an object) aborted the whole document.
+     */
+    private fun skipObject(): Boolean {
+        if (!consume('{')) return false
+        skipWhitespace()
+        if (peek() == '}') {
+            advance()
+            return true
+        }
         while (true) {
             skipWhitespace()
-            if (peek() == close) {
-                advance()
-                return true
-            }
+            if (readString() == null) return false
+            skipWhitespace()
+            if (!consume(':')) return false
             if (!skipValue()) return false
             skipWhitespace()
             when (peek()) {
                 ',' -> advance()
-                close -> {
+                '}' -> {
+                    advance()
+                    return true
+                }
+                else -> return false
+            }
+        }
+    }
+
+    private fun skipArray(): Boolean {
+        if (!consume('[')) return false
+        skipWhitespace()
+        if (peek() == ']') {
+            advance()
+            return true
+        }
+        while (true) {
+            if (!skipValue()) return false
+            skipWhitespace()
+            when (peek()) {
+                ',' -> advance()
+                ']' -> {
                     advance()
                     return true
                 }
@@ -377,7 +440,15 @@ internal fun listInstalledPluginDirectories(appFilesDir: File): List<String> {
     val nodeModules = File(appFilesDir, DSH_PROFILE_NODE_MODULES_RELATIVE)
     val entries = runCatching { nodeModules.listFiles()?.toList() }.getOrNull().orEmpty()
     val names = mutableListOf<String>()
-    entries.sortedBy { it.name }.forEach { entry ->
+        // Order the rows the way the official install list reads: scoped packages first (their
+        // owner is the scope), then dot-directories such as `.bin`, then plain names. A raw name
+        // sort would put `.bin` above `@scope/name` because '.' < '@'.
+        entries.sortedWith(
+            compareBy(
+                { if (it.name.startsWith("@")) 0 else if (it.name.startsWith(".")) 1 else 2 },
+                { it.name }
+            )
+        ).forEach { entry ->
         if (!entry.isDirectory) return@forEach
         if (entry.name.startsWith("@")) {
             runCatching { entry.listFiles()?.toList() }.getOrNull()
