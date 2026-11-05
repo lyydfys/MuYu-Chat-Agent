@@ -230,8 +230,9 @@ class GenerationParamsTest {
 
         assertEquals(4096, canonical.nCtx)
         assertEquals(2048, camelCase.nCtx)
-        assertEquals(512, canonical.nPredict)
-        assertEquals(512, camelCase.nPredict)
+        // The budget follows each document's own window: 4096 -> 2048, 2048 -> 1024.
+        assertEquals(2048, canonical.nPredict)
+        assertEquals(1024, camelCase.nPredict)
     }
 
     @Test
