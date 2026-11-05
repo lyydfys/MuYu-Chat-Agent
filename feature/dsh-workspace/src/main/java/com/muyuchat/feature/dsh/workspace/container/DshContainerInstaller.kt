@@ -82,8 +82,20 @@ object DshContainerInstaller {
         assets: DshContainerAssetSource,
         layout: DshContainerLayout,
         probe: (List<String>, Long) -> DshContainerRun,
-        onEvent: (Event) -> Unit = {}
+        onEventRaw: (Event) -> Unit = {}
     ): Result {
+        // One timeline for the whole pipeline: every step's start/finish/failure is logged, so a
+        // device that stalls between two steps names the boundary instead of looking frozen.
+        val onEvent: (Event) -> Unit = { event ->
+            val text = when (event) {
+                is Event.Started -> "step ${event.step.position} start ${event.step.title}"
+                is Event.Progress -> "step ${event.step.position} progress ${event.detail}"
+                is Event.Succeeded -> "step ${event.step.position} ok ${event.detail}"
+                is Event.Failed -> "step ${event.step.position} FAILED ${event.reason} — ${event.detail}"
+            }
+            android.util.Log.i("MCA-CONTAINER", text)
+            onEventRaw(event)
+        }
         val containerDir = File(layout.containerDir)
         val rootfsDir = File(layout.rootfsDir)
         val stagingDir = File(containerDir, STAGING_DIR_NAME)
