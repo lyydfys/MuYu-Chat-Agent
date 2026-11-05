@@ -83,7 +83,23 @@ fun DshConsoleScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             when (val current = state) {
                 DshConsoleUiState.Loading -> DshConsoleLoading()
-                is DshConsoleUiState.Failure -> DshConsoleFailure(current, onIntent)
+                is DshConsoleUiState.Failure -> {
+                    DshConsoleFailure(current, onIntent)
+                    // Sections that do not depend on a live host stay reachable while the host
+                    // snapshot is unavailable: installing the container *needs* a stopped runtime,
+                    // the plugin block refuses on its own, and the web-kernel choice is local.
+                    // Hiding them behind a host failure made the container unreachable exactly
+                    // when it was usable.
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        maintenanceContent()
+                    }
+                }
                 is DshConsoleUiState.Ready -> DshConsoleContent(current, onIntent, maintenanceContent)
             }
         }
@@ -116,8 +132,8 @@ private fun DshConsoleFailure(
 ) {
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
+            .fillMaxWidth()
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
