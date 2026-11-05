@@ -332,6 +332,19 @@ object DshContainerInstaller {
         val stream = assets.openRootfsArchive()
             ?: return kotlin.Result.failure(IllegalStateException("APK 资产缺失：rootfs 归档打不开"))
         var lastReported = 0f
+        // A device-side stall must not look like "still working": a watchdog closes the stream
+        // after the deadline, which unblocks any read and turns the stall into a typed failure.
+        val startedAt = System.currentTimeMillis()
+        val watchdog = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "mca-container-watchdog").apply { isDaemon = true }
+        }
+        var closedByWatchdog = false
+        val future = watchdog.schedule({
+            closedByWatchdog = true
+            android.util.Log.w("MCA-CONTAINER", "extract watchdog fired, closing stream")
+            runCatching { stream.close() }
+        }, EXTRACT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+
         return stream.use { input ->
             DshContainerTarGz.extract(input, destination) { bytes ->
                 // The uncompressed total is unknown before the archive ends; the manifest's
@@ -340,11 +353,31 @@ object DshContainerInstaller {
                 val fraction = (bytes / 300f / 1024f / 1024f).coerceIn(0f, 0.99f)
                 if (fraction - lastReported >= 0.02f) {
                     lastReported = fraction
+                    android.util.Log.i(
+                        "MCA-CONTAINER",
+                        "extract " + (bytes / (1024 * 1024)) + " MB, " +
+                            ((System.currentTimeMillis() - startedAt) / 1000) + " s"
+                    )
                     onFraction(fraction)
                 }
             }
+        }.let { result ->
+            future.cancel(false)
+            watchdog.shutdownNow()
+            if (closedByWatchdog) {
+                kotlin.Result.failure(
+                    java.io.IOException(
+                        "解包超过 ${EXTRACT_TIMEOUT_SECONDS} 秒仍未完成（已处理 ${lastReported} 进度）"
+                    )
+                )
+            } else {
+                result
+            }
         }
     }
+
+    /** Hard ceiling for step 3; a real device needs seconds, so minutes mean a stall. */
+    private val EXTRACT_TIMEOUT_SECONDS: Long = 240L
 
     private fun finishAssetsMissing(onEvent: (Event) -> Unit): Result {
         val detail = "APK 没有打包容器资产：先运行 scripts/dsh/stage-container.ps1 再构建"
