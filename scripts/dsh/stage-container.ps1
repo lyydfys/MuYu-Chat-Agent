@@ -142,7 +142,9 @@ Expand-DebMember -DebPath $prootDeb -Member $ProotPackage.Member -Destination $p
 #    is exactly the names the packaged copies carry, so the dynamic loader finds them through the
 #    native library directory.
 $tallocDeb = Get-Cached $TallocPackage
-Expand-DebMember -DebPath $tallocDeb -Member $TallocPackage.Member -Destination (Join-Path $jniLibs 'libtalloc.so')
+# proot's ELF records `libtalloc.so.2` as its DT_NEEDED, so the packaged copy must carry the
+# SONAME verbatim; a file named libtalloc.so is found by the linker but never chosen.
+Expand-DebMember -DebPath $tallocDeb -Member $TallocPackage.Member -Destination (Join-Path $jniLibs 'libtalloc.so.2')
 $shmemDeb = Get-Cached $ShmemPackage
 Expand-DebMember -DebPath $shmemDeb -Member $ShmemPackage.Member -Destination (Join-Path $jniLibs 'libandroid-shmem.so')
 
@@ -174,9 +176,9 @@ $manifest = [ordered]@{
     }
     libraries = @(
         [ordered]@{
-            library = 'libtalloc.so'
-            bytes = (Get-Item (Join-Path $jniLibs 'libtalloc.so')).Length
-            sha256 = (Get-Sha256 (Join-Path $jniLibs 'libtalloc.so'))
+            library = 'libtalloc.so.2'
+            bytes = (Get-Item (Join-Path $jniLibs 'libtalloc.so.2')).Length
+            sha256 = (Get-Sha256 (Join-Path $jniLibs 'libtalloc.so.2'))
             version = $TallocPackage.Version
             sourceUrl = $TallocPackage.Url
             license = $TallocPackage.License
@@ -198,7 +200,7 @@ $manifestText = $manifest | ConvertTo-Json -Depth 6
 
 Write-Host ''
 Write-Host 'container runtime staged:'
-foreach ($file in @($prootOut, (Join-Path $jniLibs 'libtalloc.so'), (Join-Path $jniLibs 'libandroid-shmem.so'), (Join-Path $assets 'rootfs.img'))) {
+foreach ($file in @($prootOut, (Join-Path $jniLibs 'libtalloc.so.2'), (Join-Path $jniLibs 'libandroid-shmem.so'), (Join-Path $assets 'rootfs.img'))) {
     $size = (Get-Item -LiteralPath $file).Length
     Write-Host ("  {0,-24} {1,12} bytes  sha256={2}" -f (Split-Path -Leaf $file), $size, (Get-Sha256 $file))
 }

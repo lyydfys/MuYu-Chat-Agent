@@ -186,7 +186,19 @@ internal class DshContainerProcessRunner(
 
     override fun run(argv: List<String>, timeoutMillis: Long): DshContainerRun {
         val process = try {
-            ProcessBuilder(argv).redirectErrorStream(true).start()
+            val builder = ProcessBuilder(argv).redirectErrorStream(true)
+            // proot links against libtalloc.so.2 and libandroid-shmem.so that sit next to it in
+            // the APK native library directory. The app process has that directory on its search
+            // path, but an exec()ed child does not inherit that by itself, so name it explicitly
+            // and keep whatever the app already had.
+            val executableDir = java.io.File(argv.first()).parent
+            if (!executableDir.isNullOrBlank()) {
+                val environment = builder.environment()
+                val existing = environment["LD_LIBRARY_PATH"]
+                environment["LD_LIBRARY_PATH"] =
+                    if (existing.isNullOrBlank()) executableDir else executableDir + ":" + existing
+            }
+            builder.start()
         } catch (t: Throwable) {
             return DshContainerRun(
                 exitCode = null,
