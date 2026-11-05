@@ -597,6 +597,10 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${CMAKE_CURRENT_LIST_DIR}/llama_common_legacy_compat.cpp)
     find_package(Threads REQUIRED)
     set(MTMD_SRC ${LLAMA_SRC}/tools/mtmd)
+    # mca_mtmd links the clip graph implementations from an explicit list rather than
+    # globbing the directory, so every upstream revision that adds a model has to add it
+    # here as well - otherwise the vtables for the new clip_graph_* classes stay
+    # undefined at link time. The block below was added with the llama.cpp v0.9.0 bump.
     add_library(mca_mtmd STATIC
             ${MTMD_SRC}/mtmd.cpp
             ${MTMD_SRC}/mtmd-audio.cpp
@@ -647,7 +651,19 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${MTMD_SRC}/models/mobilenetv5.cpp
             ${MTMD_SRC}/models/youtuvl.cpp
             ${MTMD_SRC}/models/yasa2.cpp
-            ${MTMD_SRC}/models/parakeet.cpp)
+            ${MTMD_SRC}/models/parakeet.cpp
+            ${MTMD_SRC}/models/chatterbox-gen.cpp
+            ${MTMD_SRC}/models/chatterbox-spkenc.cpp
+            ${MTMD_SRC}/models/lfm3a.cpp
+            ${MTMD_SRC}/models/lfm3a-gen.cpp
+            ${MTMD_SRC}/models/lfm3vl.cpp
+            ${MTMD_SRC}/models/ling3vl.cpp
+            ${MTMD_SRC}/models/muse-spark-audio.cpp
+            ${MTMD_SRC}/models/nemotron-omni.cpp
+            ${MTMD_SRC}/models/nemotron-transcribe.cpp
+            ${MTMD_SRC}/models/sensenova-u1.cpp
+            ${MTMD_SRC}/models/soprano.cpp
+            ${MTMD_SRC}/models/voxtral-rt.cpp)
     target_include_directories(mca_mtmd PUBLIC ${MTMD_SRC})
     target_include_directories(mca_mtmd PRIVATE ${LLAMA_SRC} ${LLAMA_SRC}/vendor)
     target_link_libraries(mca_mtmd PUBLIC ggml llama)

@@ -244,7 +244,7 @@ class RuntimeIdentityFactoryTest {
             val replacedProjector = build(model)
             assertEquals("projector".length, projector.length().toInt())
             assertNotEquals(originalFingerprint, replacedProjector.identity.projectorFingerprint)
-            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@4ceb1719101f32637b841206c172f3f058ffc182+mca-stq1_0"))
+            assertTrue(result.identity.runtimeVersion.contains("llama.cpp@cd959bae99ff4bed22bef2604f45241c09bbb8c8+mca-stq1_0"))
             assertEquals("runtime-parameters-v2-sparse-moe-mmap", result.identity.parameterPolicyVersion)
             assertTrue(result.identity.evaluatorFingerprint.length == 64)
             assertTrue("local_chat" in result.identity.capabilities)

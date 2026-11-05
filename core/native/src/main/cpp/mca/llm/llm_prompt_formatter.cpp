@@ -55,7 +55,9 @@ std::string PromptFormatter::format_messages(
             inputs.messages.push_back(msg);
         }
 
-        const std::string prompt = common_chat_templates_apply(templates, inputs).prompt;
+        // llama.cpp v0.9.0 returns the rendered template as common_chat_prompt, which keeps the
+        // template text and the user input as separate parts. MCA only needs the flat text.
+        const std::string prompt = common_chat_templates_apply(templates, inputs).prompt.str();
         return prompt;
     }
 #endif

@@ -48,7 +48,7 @@ CORE_CONTRACT = {
     "onnxruntime": "1.17.1",
     "qairt-sdk": "2.45.0.260326",
     "alibaba-mnn": "3.6.1-mca-patched",
-    "llama-cpp": "b3800-mca-patched",
+    "llama-cpp": "v0.9.0-mca-patched",
     "stable-diffusion-cpp": "master-mca-pinned",
     "androidx-workmanager": "2.11.0",
     "androidx-room": "2.8.4",

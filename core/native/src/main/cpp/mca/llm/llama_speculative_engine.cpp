@@ -7,6 +7,31 @@
 #include <exception>
 #include <string>
 #include "sampling.h"
+#include "llama_batch_compat.hpp"
+
+namespace {
+
+// llama.cpp v0.9.0 changed common_speculative_process() to take a common_batch instead of the raw
+// llama_batch that MCA fills for llama_decode().  The speculative implementation only reads the
+// token entries of that batch, so mirror them and leave the embedding view empty: the draft-mtp
+// verification batches built here are token-only.
+common_batch to_common_batch(const llama_batch & batch) {
+    common_batch mirrored;
+    mirrored.tokens.reserve((size_t) batch.n_tokens);
+    for (int32_t i = 0; i < batch.n_tokens; ++i) {
+        common_batch::token token{};
+        token.id = batch.token != nullptr ? batch.token[i] : LLAMA_TOKEN_NULL;
+        token.pos[0] = batch.pos != nullptr ? batch.pos[i] : 0;
+        token.seq_id = (batch.n_seq_id != nullptr && batch.seq_id != nullptr && batch.n_seq_id[i] > 0)
+                ? batch.seq_id[i][0]
+                : 0;
+        token.output = batch.logits != nullptr && batch.logits[i] != 0;
+        mirrored.tokens.push_back(token);
+    }
+    return mirrored;
+}
+
+} // namespace
 
 namespace mca {
 namespace llm {
@@ -202,12 +227,12 @@ SpecStepResult LlamaSpeculativeEngine::speculative_step(SpeculativeEnvironment &
         return result;
     }
 
-    common_batch_clear(*env.batch);
+    mca::llama::batchClear(*env.batch);
     const llama_token pending_tok = env.spec_pending_token ? *env.spec_pending_token : LLAMA_TOKEN_NULL;
-    common_batch_add(*env.batch, pending_tok, base, {0}, true);
+    mca::llama::batchAdd(*env.batch, pending_tok, base, {0}, true);
     if (env.spec_draft_tokens) {
         for (size_t i = 0; i < env.spec_draft_tokens->size(); ++i) {
-            common_batch_add(*env.batch, (*env.spec_draft_tokens)[i], base + 1 + (llama_pos) i, {0}, true);
+            mca::llama::batchAdd(*env.batch, (*env.spec_draft_tokens)[i], base + 1 + (llama_pos) i, {0}, true);
         }
     }
     const int decode_rc = llama_decode(env.context, *env.batch);
@@ -221,7 +246,7 @@ SpecStepResult LlamaSpeculativeEngine::speculative_step(SpeculativeEnvironment &
     }
     if (env.record_gpu_execution) env.record_gpu_execution();
 
-    if (!common_speculative_process(env.speculative, *env.batch)) {
+    if (!common_speculative_process(env.speculative, to_common_batch(*env.batch))) {
         if (env.last_error) {
             *env.last_error = "common_speculative_process failed during draft-mtp verification.";
         }

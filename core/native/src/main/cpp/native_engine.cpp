@@ -32,6 +32,7 @@
 #include "common.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "llama_batch_compat.hpp"
 #else
 // Stub build: no llama.cpp headers on the include path.  The state helpers below only need the
 // forward declarations / baseline types of the types named by the surviving JNI entry points.
@@ -116,9 +117,9 @@ int decode_tokens(const llama_tokens &tokens, bool logits_last) {
     }
 
     // Chunk the token stream by the effective n_batch exactly like the pre-refactor engine did.
-    // common_batch_add aborts (ggml_abort) when a single batch exceeds the llama_batch capacity,
-    // so a long conversation prompt must be decoded in n_batch-sized slices (regression:
-    // GGUF long-context send crashed with SIGABRT in common_batch_add).
+    // mca::llama::batchAdd aborts (GGML_ASSERT) when a single batch exceeds the llama_batch
+    // capacity, so a long conversation prompt must be decoded in n_batch-sized slices
+    // (regression: GGUF long-context send crashed with SIGABRT in the batch append helper).
     const int total = (int) tokens.size();
     for (int offset = 0; offset < total; offset += g_n_batch) {
         if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
@@ -131,10 +132,10 @@ int decode_tokens(const llama_tokens &tokens, bool logits_last) {
             }
         }
 
-        common_batch_clear(g_batch);
+        mca::llama::batchClear(g_batch);
         for (int i = 0; i < batch_size; ++i) {
             const bool need_logits = logits_last && (offset + i + 1 == total);
-            common_batch_add(g_batch, tokens[offset + i], g_current_position + (llama_pos) i, {0}, need_logits);
+            mca::llama::batchAdd(g_batch, tokens[offset + i], g_current_position + (llama_pos) i, {0}, need_logits);
         }
 
         const int rc = llama_decode(g_context, g_batch);
@@ -611,8 +612,8 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk(JNIEnv *
         return nullptr;
     }
 
-    common_batch_clear(g_batch);
-    common_batch_add(g_batch, token, g_current_position, {0}, true);
+    mca::llama::batchClear(g_batch);
+    mca::llama::batchAdd(g_batch, token, g_current_position, {0}, true);
     const int decode_rc = llama_decode(g_context, g_batch);
     if (decode_rc != 0) {
         g_last_error = "llama_decode failed: " + std::to_string(decode_rc);

@@ -493,10 +493,11 @@ val mcaLlamaVulkanPatch = rootProject.file("vendor/llama/llama-vulkan-no-coopmat
 // fallback as a warning instead of a failure.
 val mcaLlamaKleidiaiPatch = rootProject.file("vendor/llama/llama-kleidiai-kquant-fallback.patch")
 val mcaLlamaPatches = listOf(mcaLlamaStqPatch, mcaLlamaVulkanPatch, mcaLlamaKleidiaiPatch)
+val mcaLlamaManifest = rootProject.file("vendor/llama/llama-vendor.properties")
 val applyMcaLlamaPatches = tasks.register("applyMcaLlamaPatches") {
     group = "verification"
     description = "Applies the audited MCA patches to the pinned llama.cpp checkout."
-    inputs.files(mcaLlamaPatches)
+    inputs.files(mcaLlamaPatches + mcaLlamaManifest)
     outputs.upToDateWhen { false }
     doLast {
         if (!mcaWithLlamaCpp) return@doLast
@@ -510,6 +511,22 @@ val applyMcaLlamaPatches = tasks.register("applyMcaLlamaPatches") {
         fun gitResult(vararg arguments: String): McaCommandResult = runMcaCommand(
             listOf(git, "-C", mcaLlamaSourceRoot.absolutePath) + arguments
         )
+        // The patches are rebased per upstream revision, so applying them to any other checkout
+        // would either fail obscurely or, worse, apply with shifted context. Pin the base commit
+        // the same way the tokenizers-cpp task does.
+        if (!mcaLlamaManifest.isFile) {
+            throw GradleException("llama.cpp provenance manifest is missing: ${mcaLlamaManifest.absolutePath}")
+        }
+        val llamaManifest = Properties().apply { mcaLlamaManifest.inputStream().use(::load) }
+        val expectedLlamaBase = llamaManifest.getProperty("baseCommit")?.trim()?.lowercase()
+            ?: throw GradleException("llama.cpp manifest is missing baseCommit.")
+        val llamaHead = String(gitResult("rev-parse", "HEAD").stdout, StandardCharsets.UTF_8)
+            .trim().lowercase()
+        if (llamaHead != expectedLlamaBase) {
+            throw GradleException(
+                "llama.cpp base commit mismatch. Expected $expectedLlamaBase, got $llamaHead."
+            )
+        }
         for (patchFile in mcaLlamaPatches) {
             if (!patchFile.isFile) {
                 throw GradleException("llama.cpp patch is missing: ${patchFile.absolutePath}")

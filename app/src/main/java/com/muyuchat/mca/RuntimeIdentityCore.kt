@@ -193,7 +193,7 @@ import java.io.File
 
     private fun runtimeVersion(runtime: LocalChatRuntime, platform: PlatformSnapshot): String {
         val implementation = when (runtime) {
-            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@4ceb1719101f32637b841206c172f3f058ffc182+mca-stq1_0"
+            LocalChatRuntime.LLAMA_CPP -> "llama.cpp@cd959bae99ff4bed22bef2604f45241c09bbb8c8+mca-stq1_0"
             LocalChatRuntime.MNN_CPU -> "mnn@3.6.1-d407447ed56c4121a11ccbd266dc184ca1ead0c2"
             LocalChatRuntime.GENIEX_LLAMA_CPP -> "geniex@0.10.0-mca1+llama.cpp"
             LocalChatRuntime.GENIEX_QAIRT -> "geniex-qairt@0.10.0-mca1"
