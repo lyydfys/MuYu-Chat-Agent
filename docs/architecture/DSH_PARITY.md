@@ -119,7 +119,7 @@
 | 安装修复页 | ✅ 已有 | 维护控制台的「运行自检」「修复托管文件」两类操作（`DshMaintenanceConsolePolicy` 第 219/232 行），后端为 `REPAIR_MANAGED_FILES` / `RUN_SELF_CHECK` |
 | 安全启动 profile | ✅ 已有 | 「进入/退出安全模式」（第 221/222 行）+ 适配器在停机态才广播该能力 |
 | 导出诊断 | ✅ 已有 | 「导出诊断」（第 231 行） |
-| 独立应急 DSH | 🟡 决策层已落地 | `DshEmergencyRecovery`：按失败码给出有序修复计划（移动家目录 → 重装内置负载 → 退回自带负载 → 仅导出诊断），9 个 JVM 测试；**执行层（真正移动家目录/重装）尚未接线** |
+| 独立应急 DSH | 🟡 决策层 + 执行器已落地 | `DshEmergencyRecovery` 按失败码给出有序计划（移动家目录 → 重装内置负载 → 退回自带负载 → 仅导出诊断）；`DshEmergencyRecoveryRunner` 按计划顺序执行、先停机、首个失败即停、汇总不泄漏路径。共 16 个 JVM 测试。**尚未接到 app 组合根**（真实效果 lambda 待注入） |
 | 脚本增量热更新 + 验签 | ❓ 未核实 | 只有 `DshOverlayComposer` 提到 signature；闭包升级（`RUN_CLOSURE_UPGRADE`）是否逐脚本验签未确认 |
 
 - **结构性缺口收敛为两类**：①容器运行时被 Android W^X 挡住（资产与流水线已就绪，见
