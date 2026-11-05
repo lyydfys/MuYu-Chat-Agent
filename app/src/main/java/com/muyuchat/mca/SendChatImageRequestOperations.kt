@@ -349,6 +349,16 @@ internal fun chatImageOptionsForCurrentSelectionFor(state: MainUiState): LocalIm
         ?.let(::File)
         ?.takeIf(File::isDirectory)
         ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+    if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        // The Neuron pipeline has no SD execution profile; its manifest declares whether a
+        // negative branch exists at all.
+        return base.copy(
+            negativePrompt = model.mediaTekImageProductContractOrNull()
+                ?.takeIf { contract -> contract.supportsNegativePrompt }
+                ?.let { chatImageFallbackNegativePromptForModel(model.family, model.runtime) },
+            loras = resolvedLoras
+        )
+    }
     val defaultNegative = runCatching {
         val profile = resolveLocalImageExecutionProfile(
             model = model,

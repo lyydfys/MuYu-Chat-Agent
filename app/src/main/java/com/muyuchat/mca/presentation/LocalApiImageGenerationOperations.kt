@@ -164,14 +164,20 @@ internal suspend fun generateLocalApiImageOperations(
         )
         val inputDraft = dispatch.inputDraft
         try {
-            val resolvedSampler = model.validateProductTaskSampler(
-                taskMode = inputDraft.taskMode,
-                sampleMethod = options.sampleMethod
-            )
-            // Persist the task-aware effective sampler before planning/dispatch. This keeps an
-            // omitted sampler usable for generic shared-QNN img2img (whose legacy profile default
-            // may be PNDM) while still returning a stable 422 for an explicit PNDM request.
-            options = options.copy(sampleMethod = imageSchedulerProductName(resolvedSampler))
+            options = if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+                // The Neuron pipeline is manifest-driven and has no SD execution profile. Validate
+                // the bundle's declared surface and drop the fixed Euler sampler before dispatch.
+                model.normalizedMediaTekImageOptions(options)
+            } else {
+                val resolvedSampler = model.validateProductTaskSampler(
+                    taskMode = inputDraft.taskMode,
+                    sampleMethod = options.sampleMethod
+                )
+                // Persist the task-aware effective sampler before planning/dispatch. This keeps an
+                // omitted sampler usable for generic shared-QNN img2img (whose legacy profile default
+                // may be PNDM) while still returning a stable 422 for an explicit PNDM request.
+                options.copy(sampleMethod = imageSchedulerProductName(resolvedSampler))
+            }
         } catch (error: Exception) {
             throw requireNotNull(error.toLocalImageApiProviderExceptionOrNull()) {
                 ImageGenerationProviderException(
@@ -340,6 +346,43 @@ internal suspend fun generateLocalApiImageOperations(
                         // API response. Paths and device-private runtime directories remain excluded;
                         // clients can now audit exactly which profile/scheduler bounds were applied.
                         runCatching {
+                            if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+                                // No SD execution profile exists for the Neuron pipeline; expose the
+                                // declared v3/v4 generation profile instead of a synthetic one.
+                                val contract = model.requireMediaTekImageProductContract()
+                                val profile = contract.profileFor(
+                                    effectiveOptions.width,
+                                    effectiveOptions.height,
+                                    effectiveOptions.steps
+                                ) ?: contract.defaultProfile
+                                execution.put(
+                                    "resolvedProfile",
+                                    JSONObject()
+                                        .put(
+                                            "profileId",
+                                            if (contract.schema.endsWith("/4")) {
+                                                "mediatek.anima.aot"
+                                            } else {
+                                                "mediatek.anima.v3"
+                                            }
+                                        )
+                                        .put("profileRevision", 1)
+                                        .put("runtime", model.runtime.name)
+                                        .put("family", model.family.name)
+                                        .put("scheduler", JSONObject()
+                                            .put("algorithm", "FLOW_MATCHING_EULER")
+                                            .put("predictionType", "FLOW")
+                                            .put("defaultSteps", profile.defaultSteps)
+                                            .put("minSteps", profile.minimumSteps)
+                                            .put("maxSteps", profile.maximumSteps))
+                                        .put("defaults", JSONObject()
+                                            .put("steps", profile.defaultSteps)
+                                            .put("width", profile.width)
+                                            .put("height", profile.height)
+                                            .put("cfgScale", profile.defaultCfgScale.toDouble()))
+                                        .put("supportedSchedulers", JSONArray().put("FLOW_MATCHING_EULER"))
+                                )
+                            } else {
                             val profileRoot = model.bundleRoot
                                 ?.takeIf(String::isNotBlank)
                                 ?.let(::File)
@@ -371,6 +414,7 @@ internal suspend fun generateLocalApiImageOperations(
                                     .put("supportedSchedulers", JSONArray(
                                         profile.capabilities.supportedSchedulers.map { it.name }))
                             )
+                            }
                         }
                         execution.put(
                             "responseOutputEvidence",

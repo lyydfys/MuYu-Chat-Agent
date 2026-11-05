@@ -314,21 +314,37 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
         }
         if (requestedBackend == ImageBackend.LOCAL) {
             try {
-                val resolvedSampler = requireNotNull(requestedLocalModel).validateProductTaskSampler(
-                    taskMode = queuedInputDraft.taskMode,
-                    sampleMethod = queuedOptions.sampleMethod
-                )
-                // Capture the effective task-aware sampler in the retryable job spec. In
-                // particular, an omitted sampler on a generic shared-QNN img2img request must
-                // not fall through to that profile's legacy PNDM default.
-                queuedOptions = queuedOptions.copy(
-                    sampleMethod = imageSchedulerProductName(resolvedSampler)
-                )
+                val model = requireNotNull(requestedLocalModel)
+                if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+                    // The Neuron pipeline is defined by the package's own v3/v4 manifest; it has no
+                    // SD execution profile and no selectable sampler. Validate the declared surface
+                    // and let the fixed manifest sampler run native.
+                    queuedOptions = model.normalizedMediaTekImageOptions(queuedOptions)
+                } else {
+                    val resolvedSampler = model.validateProductTaskSampler(
+                        taskMode = queuedInputDraft.taskMode,
+                        sampleMethod = queuedOptions.sampleMethod
+                    )
+                    // Capture the effective task-aware sampler in the retryable job spec. In
+                    // particular, an omitted sampler on a generic shared-QNN img2img request must
+                    // not fall through to that profile's legacy PNDM default.
+                    queuedOptions = queuedOptions.copy(
+                        sampleMethod = imageSchedulerProductName(resolvedSampler)
+                    )
+                }
             } catch (error: Exception) {
-                Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=sampler jobId=$jobId")
+                val mediaTek = requestedLocalModel?.runtime == LocalImageRuntime.MEDIATEK_NEURON
+                Log.i(
+                    IMAGE_COMMIT_LOG_TAG,
+                    "image_admit_reject code=${if (mediaTek) "mediatek_options" else "sampler"} jobId=$jobId"
+                )
                 host.updateUiState {
                     it.copy(
-                        statusMessage = "图片采样器不可用：${error.message ?: "请重新选择采样器"}"
+                        statusMessage = if (mediaTek) {
+                            mediaTekAdmissionFailureStatus(error)
+                        } else {
+                            "图片采样器不可用：${error.message ?: "请重新选择采样器"}"
+                        }
                     )
                 }
                 return false

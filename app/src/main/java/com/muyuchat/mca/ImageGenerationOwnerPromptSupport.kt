@@ -29,6 +29,9 @@ internal fun resolveCurrentLocalImageTextualInversionIdsFor(
 internal fun chatImageNegativePromptSupportedFor(state: MainUiState): Boolean {
     if (state.selectedImageBackend != ImageBackend.LOCAL) return true
     val model = state.selectedLocalImageModel() ?: return false
+    if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        return model.mediaTekImageProductContractOrNull()?.supportsNegativePrompt == true
+    }
     val bundleRoot = model.bundleRoot
         ?.takeIf(String::isNotBlank)
         ?.let(::File)

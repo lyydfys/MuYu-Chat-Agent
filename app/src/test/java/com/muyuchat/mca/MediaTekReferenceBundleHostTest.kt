@@ -3,6 +3,8 @@ package com.muyuchat.mca
 import com.muyuchat.core.mediatek.MediaTekAotConditioningMode
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -57,5 +59,38 @@ class MediaTekReferenceBundleHostTest {
                 File(root, component.relativePath).isFile,
             )
         }
+        val primary = File(root, manifest.declaredPrimaryPath ?: error("bundle has no declared primary"))
+        val record = LocalImageModelRecord(
+            displayName = "v4",
+            path = primary.absolutePath,
+            fileName = primary.name,
+            sizeBytes = primary.length(),
+            sha256 = observedLocalImageFileSha256(primary),
+            runtime = LocalImageRuntime.MEDIATEK_NEURON,
+            family = LocalImageModelFamily.ANIMA,
+            bundleRoot = root.absolutePath,
+        )
+        val contract = requireNotNull(record.mediaTekImageProductContractOrNull()) {
+            "the real v4 bundle must expose its declared product contract"
+        }
+        assertFalse(contract.supportsNegativePrompt)
+        assertEquals(512, contract.defaultProfile.width)
+        assertEquals(512, contract.defaultProfile.height)
+        assertEquals(setOf(6), contract.defaultProfile.supportedSteps)
+        assertEquals(1.0f, contract.defaultProfile.fixedCfgScale)
+        val defaults = record.legacyExecutionDefaultsForUi()
+        assertEquals(6, defaults.steps)
+        assertEquals(1.0, defaults.cfgScale, 0.0)
+        assertEquals("euler", defaults.sampler)
+        val normalized = record.normalizedMediaTekImageOptions(
+            LocalImageGenerationOptions(
+                width = 512,
+                height = 512,
+                steps = 6,
+                cfgScale = 1.0,
+                sampleMethod = "euler",
+            )
+        )
+        assertNull(normalized.sampleMethod)
     }
 }

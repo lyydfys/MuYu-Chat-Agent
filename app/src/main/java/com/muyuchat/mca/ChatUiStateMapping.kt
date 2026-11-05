@@ -267,6 +267,8 @@ internal fun buildChatUiState(
                                         imageMinSteps = imageDefaults.minSteps,
                                         imageMaxSteps = imageDefaults.maxSteps,
                                         imageDefaultCfgScale = imageDefaults.cfgScale,
+                                        imageMinCfgScale = imageDefaults.minCfgScale,
+                                        imageMaxCfgScale = imageDefaults.maxCfgScale,
                                         imageDefaultSeed = imageDefaults.seed,
                                         imageDefaultSampler = imageDefaults.sampler,
                                         imageMinWidth = imageDefaults.minWidth,

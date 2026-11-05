@@ -187,6 +187,28 @@ internal fun normalizedImageGenerationStepsText(
         .toString()
 }
 
+/**
+ * Clamps a persisted CFG value to the selected package's declared range. A package that only
+ * honours one value (for example a `cfgMode=NONE` NPU graph) publishes min == max, so the field is
+ * normalized to that exact value instead of letting a stale draft reach admission.
+ */
+internal fun normalizedImageGenerationCfgText(
+    rawValue: String,
+    defaultValue: Double,
+    minValue: Double,
+    maxValue: Double
+): String {
+    val safeMin = minValue.coerceAtLeast(0.0)
+    val safeMax = maxValue.coerceAtLeast(safeMin)
+    val safeDefault = defaultValue.takeIf(Double::isFinite)?.coerceIn(safeMin, safeMax) ?: safeMin
+    if (safeMin == safeMax) return formatImageGenerationCfg(safeDefault)
+    val parsed = rawValue.trim().toDoubleOrNull()?.takeIf(Double::isFinite) ?: safeDefault
+    return formatImageGenerationCfg(parsed.coerceIn(safeMin, safeMax))
+}
+
+private fun formatImageGenerationCfg(value: Double): String =
+    value.toString().trimEnd('0').trimEnd('.').ifEmpty { "0" }
+
 internal fun ImageGenerationUiParameterSnapshot.normalizedForImageModel(
     model: ChatModelChoice
 ): ImageGenerationUiParameterSnapshot {
@@ -327,6 +349,12 @@ internal fun ImageGenerationUiParameterSnapshot.normalizedForImageModel(
             defaultValue = model.imageDefaultSteps,
             minValue = model.imageMinSteps,
             maxValue = model.imageMaxSteps
+        ),
+        cfgScaleText = normalizedImageGenerationCfgText(
+            rawValue = cfgScaleText,
+            defaultValue = model.imageDefaultCfgScale,
+            minValue = model.imageMinCfgScale,
+            maxValue = model.imageMaxCfgScale
         ),
         sampler = normalizedImageSamplerForCapabilities(
             current = sampler,

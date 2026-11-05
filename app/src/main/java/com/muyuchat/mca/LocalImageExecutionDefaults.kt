@@ -55,46 +55,13 @@ internal fun executionDefaultsFromResolutionForUi(
     )
 }
 
-internal fun LocalImageModelRecord.legacyExecutionDefaultsForUi(): LocalImageUiExecutionDefaults {
+internal fun LocalImageModelRecord.legacyExecutionDefaultsForUi(
+    mediaTekContract: MediaTekImageProductContract? = mediaTekImageProductContractOrNull()
+): LocalImageUiExecutionDefaults {
     if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
-        val root = installedImageBundleRootForUi()
-        val bundle = root?.let { runCatching { localImageBundleManifestFromRoot(it) }.getOrNull() }
-        val manifest = bundle?.mediatekAnimaManifest
-        val selected = manifest?.sampling?.generationProfiles?.firstOrNull { profile ->
-            profile.widthPixels == bundle.smokeWidth && profile.heightPixels == bundle.smokeHeight &&
-                profile.defaultSteps == bundle.smokeSteps
-        } ?: manifest?.sampling?.generationProfiles?.firstOrNull()
-        if (bundle != null && selected != null) {
-            val supportedSteps = selected.sigmaSchedules.keys.sorted()
-            val allowsContinuousStepRange = supportedSteps == (supportedSteps.first()..supportedSteps.last()).toList()
-            val minSteps = if (allowsContinuousStepRange) supportedSteps.first() else selected.defaultSteps
-            val maxSteps = if (allowsContinuousStepRange) supportedSteps.last() else selected.defaultSteps
-            return LocalImageUiExecutionDefaults(
-                width = selected.widthPixels,
-                height = selected.heightPixels,
-                steps = selected.defaultSteps,
-                minSteps = minSteps,
-                maxSteps = maxSteps,
-                cfgScale = selected.defaultCfgScale.toDouble(),
-                seed = 42,
-                sampler = "euler",
-                minWidth = selected.widthPixels,
-                maxWidth = selected.widthPixels,
-                minHeight = selected.heightPixels,
-                maxHeight = selected.heightPixels,
-                widthMultiple = 16,
-                heightMultiple = 16,
-                ultraFixMinWidth = 0,
-                ultraFixMaxWidth = 0,
-                ultraFixMinHeight = 0,
-                ultraFixMaxHeight = 0,
-                ultraFixWidthMultiple = 0,
-                ultraFixHeightMultiple = 0,
-                ultraFixRequiredTileSize = 0,
-                supportedSamplers = listOf("euler"),
-                img2ImgSupportedSamplers = listOf("euler")
-            )
-        }
+        // The v3/v4 bundle manifest owns the canvas, step count, CFG and sampler. Never fall back
+        // to the generic SD defaults here: the package would reject them at execution time.
+        mediaTekContract?.let { contract -> return mediaTekImageExecutionDefaultsForUi(contract) }
     }
     val profile = readInstalledImageManifest()?.optJSONObject("executionProfile")
     val defaults = profile?.optJSONObject("defaults")

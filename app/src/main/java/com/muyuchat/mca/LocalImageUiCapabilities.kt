@@ -29,7 +29,9 @@ internal data class LocalImageUiExecutionDefaults(
     val ultraFixHeightMultiple: Int,
     val ultraFixRequiredTileSize: Int,
     val supportedSamplers: List<String>,
-    val img2ImgSupportedSamplers: List<String>
+    val img2ImgSupportedSamplers: List<String>,
+    val minCfgScale: Double = 0.0,
+    val maxCfgScale: Double = 30.0
 ) {
     val supportsCustomSize: Boolean
         get() = minWidth != maxWidth || minHeight != maxHeight
@@ -117,6 +119,13 @@ internal fun localImagePreviewTopologyForUi(
 internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabilitiesSnapshot {
     val outcome = resolveExecutionProfileOutcomeForUi()
     val resolution = outcome.resolution
+    // The Neuron pipeline has no ImageExecutionProfile; its declared v3/v4 surface is the only
+    // authoritative capability source for the panel, the defaults and the negative-prompt field.
+    val mediaTekContract = if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        mediaTekImageProductContractOrNull()
+    } else {
+        null
+    }
     val declaredTask = readInstalledImageTask()
     val supportedTaskModes = if (resolution != null) {
         val resolvedTaskIsPackageBacked = resolution.sourceChain.any { source ->
@@ -136,6 +145,7 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         ?.profile
         ?.capabilities
         ?.supportsNegativePrompt
+        ?: mediaTekContract?.supportsNegativePrompt
         ?: legacySupportsNegativePromptForUi()
     val resolvedCapabilities = resolution?.profile?.capabilities
     val legacyStableDiffusionCpp = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP
@@ -193,6 +203,7 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
     // Normalising here keeps every consumer of this snapshot self-consistent.
     val executionDefaults = (
         resolution?.let(::executionDefaultsFromResolutionForUi)
+            ?: mediaTekContract?.let(::mediaTekImageExecutionDefaultsForUi)
             ?: legacyExecutionDefaultsForUi()
         ).let { defaults ->
         if (supportsUltraFix) defaults else defaults.copy(ultraFixRequiredTileSize = 0)

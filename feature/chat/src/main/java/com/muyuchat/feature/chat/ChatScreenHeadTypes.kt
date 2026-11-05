@@ -189,6 +189,9 @@ data class ChatModelChoice(
     val imageMinSteps: Int = 1,
     val imageMaxSteps: Int = 1_000,
     val imageDefaultCfgScale: Double = 7.0,
+    /** Inclusive CFG range the selected package actually honours. min == max means fixed. */
+    val imageMinCfgScale: Double = 0.0,
+    val imageMaxCfgScale: Double = 30.0,
     val imageDefaultSeed: Int = 42,
     val imageDefaultSampler: String = "euler",
     val imageMinWidth: Int = 512,
@@ -226,6 +229,11 @@ data class ChatModelChoice(
         require(imageDefaultSteps in imageMinSteps..imageMaxSteps) {
             "Default image steps must be inside the supported range."
         }
+        require(imageMinCfgScale.isFinite() && imageMaxCfgScale.isFinite() &&
+            imageMinCfgScale >= 0.0 && imageMaxCfgScale >= imageMinCfgScale &&
+            imageDefaultCfgScale.isFinite() &&
+            imageDefaultCfgScale in imageMinCfgScale..imageMaxCfgScale
+        ) { "CFG defaults and bounds must form a finite, ordered range." }
         require(imageDefaultVaeTileSize in 64..4_096 && imageDefaultVaeTileSize % 8 == 0 &&
             imageDefaultVaeTileOverlap.isFinite() && imageDefaultVaeTileOverlap in 0.0..0.5
         ) { "Default VAE tiling controls must satisfy the native product contract." }

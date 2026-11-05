@@ -56,6 +56,12 @@ internal suspend fun prepareLocalImagePromptExecution(
                 message = "图片提示词超过 ${LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS} 字符上限。"
             )
         }
+        // The Neuron runtime executes the bundle's own v3/v4 manifest and owns its tokenizer and
+        // text-conditioning graph. It has no ImageExecutionProfile, so it must not be forced
+        // through the stable-diffusion prompt/profile machinery.
+        if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+            return prepareMediaTekImagePromptExecution(model, prompt, options)
+        }
         val profileOptions = options.normalizedForPromptExecutionProfile(model.runtime)
         val bundleRoot = model.bundleRoot
             ?.takeIf(String::isNotBlank)

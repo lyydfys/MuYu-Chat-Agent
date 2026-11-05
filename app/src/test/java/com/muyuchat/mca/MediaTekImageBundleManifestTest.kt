@@ -27,6 +27,9 @@ import java.io.File
 import java.nio.file.Files
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -207,6 +210,80 @@ class MediaTekImageBundleManifestTest {
             assertTrue(inspection is LocalImageBundleManifestInspection.Invalid)
             val message = (inspection as LocalImageBundleManifestInspection.Invalid).message
             assertTrue(message, message.contains("exactly one required MCA v1 component"))
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun v4BundleDrivesProductDefaultsAdmissionAndPromptEvidence() {
+        val fixture = v4Bundle()
+        try {
+            val record = LocalImageModelRecord(
+                displayName = "v4",
+                path = fixture.stub.absolutePath,
+                fileName = fixture.stub.name,
+                sizeBytes = fixture.stub.length(),
+                sha256 = observedLocalImageFileSha256(fixture.stub),
+                runtime = LocalImageRuntime.MEDIATEK_NEURON,
+                family = LocalImageModelFamily.ANIMA,
+                bundleRoot = fixture.root.absolutePath,
+            )
+            val contract = requireNotNull(record.mediaTekImageProductContractOrNull())
+            assertEquals(MediaTekAotManifest.SCHEMA, contract.schema)
+            assertFalse(contract.supportsNegativePrompt)
+            assertEquals(512, contract.defaultProfile.width)
+            assertEquals(512, contract.defaultProfile.height)
+            assertEquals(setOf(6), contract.defaultProfile.supportedSteps)
+            assertEquals(1.0f, contract.defaultProfile.fixedCfgScale)
+
+            val defaults = record.legacyExecutionDefaultsForUi()
+            assertEquals(6, defaults.steps)
+            assertEquals(6, defaults.minSteps)
+            assertEquals(6, defaults.maxSteps)
+            assertEquals(1.0, defaults.cfgScale, 0.0)
+            assertEquals("euler", defaults.sampler)
+            assertEquals(listOf("euler"), defaults.supportedSamplers)
+
+            val capabilities = record.imageCapabilitiesForUi()
+            assertFalse(capabilities.supportsNegativePrompt)
+            assertEquals(6, capabilities.executionDefaults.steps)
+
+            val normalized = record.normalizedMediaTekImageOptions(
+                LocalImageGenerationOptions(
+                    width = 512,
+                    height = 512,
+                    steps = 6,
+                    cfgScale = 1.0,
+                    sampleMethod = "euler"
+                )
+            )
+            assertNull(normalized.sampleMethod)
+
+            val stale = runCatching {
+                record.normalizedMediaTekImageOptions(
+                    LocalImageGenerationOptions(width = 512, height = 512, steps = 20, cfgScale = 7.0)
+                )
+            }.exceptionOrNull() as? LocalImageProductContractException
+            assertEquals("unsupported_mediatek_anima_steps", stale?.code)
+
+            val execution = prepareMediaTekImagePromptExecution(
+                record,
+                "a glass city",
+                LocalImageGenerationOptions()
+            )
+            assertEquals(LocalImagePromptTransformationMethod.DIRECT, execution.method)
+            assertEquals("a glass city", execution.effectivePrompt)
+            assertEquals("", execution.effectiveNegativePrompt)
+
+            val han = runCatching {
+                prepareMediaTekImagePromptExecution(
+                    record,
+                    "一只红色的鸟",
+                    LocalImageGenerationOptions()
+                )
+            }.exceptionOrNull() as? LocalImageProductContractException
+            assertEquals("unsupported_mediatek_anima_prompt_language", han?.code)
         } finally {
             fixture.root.deleteRecursively()
         }

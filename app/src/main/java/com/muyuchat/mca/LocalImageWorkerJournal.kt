@@ -10,20 +10,77 @@ internal fun LocalImageWorkerService.prepareExecutionJournal(
         effectiveOptions: LocalImageGenerationOptions,
         inputDirectory: File
     ) {
+        replaceTerminalExecutionJournal(request.requestId)
+        val now = System.currentTimeMillis().coerceAtLeast(1L)
+        if (request.model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+            // The Neuron pipeline has no SD execution profile. Its journal provenance is the
+            // bundle's pinned v3/v4 component manifest and the declared generation profile.
+            val contract = request.model.mediaTekImageProductContractOrNull()
+                ?: error("MediaTek image bundle manifest is unavailable to the worker journal.")
+            val profile = contract.profileFor(
+                effectiveOptions.width,
+                effectiveOptions.height,
+                effectiveOptions.steps
+            ) ?: contract.defaultProfile
+            val steps = effectiveOptions.steps ?: profile.defaultSteps
+            executionJournal.create(
+                ImageExecutionJournalEntry(
+                    requestId = request.requestId,
+                    modelId = request.model.id,
+                    modelName = request.model.displayName,
+                    recommendationId = contract.recommendationId.orEmpty(),
+                    recommendationRevision = contract.recommendationRevision.orEmpty(),
+                    modelFingerprint = request.model.sha256
+                        .trim()
+                        .lowercase()
+                        .takeIf(JOURNAL_SHA256::matches)
+                        ?: contract.manifestSha256,
+                    profileFingerprint = contract.manifestSha256,
+                    requestedSummaryJson = effectiveOptions.toJson()
+                        .apply {
+                            remove("inputImage")
+                            remove("maskImage")
+                            remove("controlImage")
+                            put("productInput", effectiveOptions.inputAuditJson())
+                            request.batchLineage?.let { put("batchLineage", it.toJson()) }
+                        }
+                        .put("runtime", request.model.runtime.name)
+                        .put("family", request.model.family.name)
+                        .toString(),
+                    resolvedSummaryJson = JSONObject()
+                        .put("runtime", LocalImageRuntime.MEDIATEK_NEURON.name)
+                        .put("backend", LocalImageRuntime.MEDIATEK_NEURON.name)
+                        .put("profileSchema", contract.schema)
+                        .put("width", effectiveOptions.width ?: profile.width)
+                        .put("height", effectiveOptions.height ?: profile.height)
+                        .put("steps", steps)
+                        .put("sampler", MEDIA_TEK_FIXED_SAMPLER)
+                        .put(
+                            "cfgScale",
+                            effectiveOptions.cfgScale ?: profile.defaultCfgScale.toDouble()
+                        )
+                        .put("productInput", effectiveOptions.inputAuditJson())
+                        .toString(),
+                    phase = ImageExecutionPhase.PREPARING,
+                    step = 0,
+                    steps = steps,
+                    workerPid = Process.myPid(),
+                    createdAtMs = now,
+                    inputTempPaths = listOfNotNull(
+                        effectiveOptions.inputImage?.path,
+                        effectiveOptions.maskImage?.path,
+                        effectiveOptions.controlImage?.path,
+                        inputDirectory.canonicalPath
+                    )
+                )
+            )
+            return
+        }
         val resolution = resolveLocalImageExecutionProfile(
             model = request.model,
             options = effectiveOptions,
             bundleRoot = request.model.workerBundleRoot()
         )
-        executionJournal.read(request.requestId)?.let { existing ->
-            require(existing.phase.terminal) {
-                "A non-terminal image request already uses id ${request.requestId}."
-            }
-            check(executionJournal.deleteTerminal(request.requestId)) {
-                "Unable to replace terminal image journal ${request.requestId}."
-            }
-        }
-        val now = System.currentTimeMillis().coerceAtLeast(1L)
         executionJournal.create(
             ImageExecutionJournalEntry(
                 requestId = request.requestId,
@@ -63,18 +120,22 @@ internal fun LocalImageWorkerService.prepareExecutionJournal(
         )
     }
 
+private fun LocalImageWorkerService.replaceTerminalExecutionJournal(requestId: String) {
+    executionJournal.read(requestId)?.let { existing ->
+        require(existing.phase.terminal) {
+            "A non-terminal image request already uses id $requestId."
+        }
+        check(executionJournal.deleteTerminal(requestId)) {
+            "Unable to replace terminal image journal $requestId."
+        }
+    }
+}
+
 internal fun LocalImageWorkerService.prepareUpscaleExecutionJournal(
         request: LocalImageWorkerProtocol.UpscaleRequest,
         inputs: LocalImageWorkerUpscaleInputs
     ) {
-        executionJournal.read(request.requestId)?.let { existing ->
-            require(existing.phase.terminal) {
-                "A non-terminal image request already uses id ${request.requestId}."
-            }
-            check(executionJournal.deleteTerminal(request.requestId)) {
-                "Unable to replace terminal image journal ${request.requestId}."
-            }
-        }
+        replaceTerminalExecutionJournal(request.requestId)
         val now = System.currentTimeMillis().coerceAtLeast(1L)
         val requested = JSONObject()
             .put("operation", "ESRGAN_UPSCALE")
@@ -331,3 +392,5 @@ internal fun LocalImageWorkerService.markJournalTerminal(
         val upper = if (steps > 0) steps else observedStep.coerceAtLeast(0)
         return maxOf(step, observedStep.coerceIn(0, upper))
     }
+
+private val JOURNAL_SHA256 = Regex("^[0-9a-f]{64}$")

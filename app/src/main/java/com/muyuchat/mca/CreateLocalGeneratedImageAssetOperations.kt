@@ -157,11 +157,6 @@ internal object CreateLocalGeneratedImageAssetOperations {
             ?.let(::File)
             ?.takeIf(File::isDirectory)
             ?: File(model.path).parentFile?.takeIf(File::isDirectory)
-        val effectiveProfile = resolveLocalImageExecutionProfile(
-            model = model,
-            options = options.normalizedForPromptExecutionProfile(model.runtime),
-            bundleRoot = effectiveBundleRoot
-        ).profile
         val preparedPromptExecution = requireNotNull(generationMetadata.promptExecution) {
             "Local image generation is missing prepared prompt execution evidence."
         }
@@ -169,13 +164,24 @@ internal object CreateLocalGeneratedImageAssetOperations {
             prompt == preparedPromptExecution.effectivePrompt &&
                 options.negativePrompt == preparedPromptExecution.effectiveNegativePrompt
         ) { "Local image worker inputs do not match prepared prompt execution evidence." }
-        val effectivePromptExecution = preparedPromptExecution
-            .bindToEffectiveExecutionProfile(effectiveProfile)
-        validateLocalImagePromptExecutionBinding(
-            promptExecution = effectivePromptExecution,
-            expectedProfile = effectiveProfile,
-            executionMetadataJson = result.executionMetadataJson
-        )
+        val effectivePromptExecution = if (model.runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+            // The Neuron worker proves its own v3/v4 manifest evidence; there is no SD execution
+            // profile to rebind prompt evidence to.
+            preparedPromptExecution
+        } else {
+            val effectiveProfile = resolveLocalImageExecutionProfile(
+                model = model,
+                options = options.normalizedForPromptExecutionProfile(model.runtime),
+                bundleRoot = effectiveBundleRoot
+            ).profile
+            preparedPromptExecution.bindToEffectiveExecutionProfile(effectiveProfile).also { bound ->
+                validateLocalImagePromptExecutionBinding(
+                    promptExecution = bound,
+                    expectedProfile = effectiveProfile,
+                    executionMetadataJson = result.executionMetadataJson
+                )
+            }
+        }
         port.recordLocalImageExecutionOutcome(model, failureMessage = null)
         require(outputLineages.size == result.outputs.size) {
             "Image batch lineage count does not match worker outputs."

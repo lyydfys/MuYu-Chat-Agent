@@ -85,6 +85,44 @@ class ImageGenerationUiParameterSnapshotTest {
     }
 
     @Test
+    fun `cfg text normalization follows refreshed profile bounds and fixed values`() {
+        assertEquals("1", normalizedImageGenerationCfgText("7", 1.0, 1.0, 1.0))
+        assertEquals("7", normalizedImageGenerationCfgText("not-a-number", 7.0, 0.0, 30.0))
+        assertEquals("7", normalizedImageGenerationCfgText("0.5", 7.0, 7.0, 30.0))
+        assertEquals("30", normalizedImageGenerationCfgText("99", 7.0, 0.0, 30.0))
+
+        val mediaTek = ChatModelChoice(
+            id = "mediatek",
+            displayName = "MediaTek",
+            imageDefaultSteps = 6,
+            imageMinSteps = 6,
+            imageMaxSteps = 6,
+            imageDefaultCfgScale = 1.0,
+            imageMinCfgScale = 1.0,
+            imageMaxCfgScale = 1.0
+        )
+        val normalized = ImageGenerationUiParameterSnapshot(
+            taskModeName = ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name,
+            strengthText = "0.5",
+            controlStrengthText = "1.0",
+            negativePrompt = "",
+            disableModelNegativePrompt = false,
+            clipSkipText = "",
+            vaeTilingEnabled = false,
+            batchCount = 1,
+            widthText = "512",
+            heightText = "512",
+            stepsText = "20",
+            cfgScaleText = "7",
+            seedText = "",
+            sampler = "euler"
+        ).normalizedForImageModel(mediaTek)
+
+        assertEquals("6", normalized.stepsText)
+        assertEquals("1", normalized.cfgScaleText)
+    }
+
+    @Test
     fun `versions one through three keep the legacy live preview behavior`() {
         for (version in 1..3) {
             val json = JSONObject()

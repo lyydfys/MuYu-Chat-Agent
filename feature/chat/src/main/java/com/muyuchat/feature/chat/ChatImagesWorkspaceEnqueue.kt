@@ -145,14 +145,27 @@ internal fun imagesWorkspaceEnqueueImagePrompt(
                     stepsValue !in localControls.imageMinSteps..localControls.imageMaxSteps
                 )
         ) {
-            notify("采样步数必须为 ${localControls.imageMinSteps}-${localControls.imageMaxSteps}")
+            notify(
+                if (localControls.imageMinSteps == localControls.imageMaxSteps) {
+                    "当前模型只支持 ${localControls.imageMinSteps} 步采样"
+                } else {
+                    "采样步数必须为 ${localControls.imageMinSteps}-${localControls.imageMaxSteps}"
+                }
+            )
             return
         }
         val cfgScaleValue = localControls?.let { imageCfgScaleText.toDoubleOrNull() }
         if (localControls != null &&
-            (cfgScaleValue == null || !cfgScaleValue.isFinite() || cfgScaleValue !in 0.0..30.0)
+            (cfgScaleValue == null || !cfgScaleValue.isFinite() ||
+                cfgScaleValue < localControls.imageMinCfgScale ||
+                cfgScaleValue > localControls.imageMaxCfgScale)
         ) {
-            imageValidationError = "CFG 必须为 0-30 的有限数值"
+            imageValidationError = if (localControls.imageMinCfgScale == localControls.imageMaxCfgScale) {
+                "当前模型只支持 CFG ${imageCfgBoundText(localControls.imageMinCfgScale)}"
+            } else {
+                "CFG 必须为 ${imageCfgBoundText(localControls.imageMinCfgScale)}-" +
+                    "${imageCfgBoundText(localControls.imageMaxCfgScale)} 的有限数值"
+            }
             return
         }
         val seedValue = localControls?.let {
@@ -367,3 +380,6 @@ internal fun clearFailedGenerationInputRoles(
         if (ImageInputRole.CONTROL in roles) imageControlUri = null
     }
 }
+
+private fun imageCfgBoundText(value: Double): String =
+    value.toString().trimEnd('0').trimEnd('.').ifEmpty { "0" }
