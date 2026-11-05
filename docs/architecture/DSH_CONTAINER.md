@@ -38,8 +38,26 @@
   `libtalloc.so` / `libandroid-shmem.so` 用**原始 SONAME**随包，动态加载器按名字即可找到。
 - 这三个文件在 `app/build.gradle.kts` 的 `packaging.jniLibs.keepDebugSymbols` 中**无条件**保留：
   对一个可执行文件做 strip 没有意义，且可能破坏其入口。
-- rootfs 是**数据**，不是可执行文件：它被解包到 `files/dsh/container/rootfs`，
-  由 proot 以 `-r` 读取。容器内执行 `/bin/sh` 走 proot 自己的加载路径，不需要宿主 exec 它。
+- rootfs 是**数据**：解包到 `files/dsh/container/rootfs`，由 proot 以 `-r` 读取。
+
+### 2.1 已实测的平台墙（v0.3.9 真机结论）
+
+真机上 proot 本身能跑（`libproot.so --version` 输出 `5.1.107.102`），但**guest 程序起不来**：
+
+```
+proot error: execve("/usr/bin/sh"): Permission denied
+proot warning: can't canonicalize /data/data/com.termux/files/usr/tmp/: Permission denied
+```
+
+原因不是配置错误，而是 Android 的 W^X 策略：`targetSdk 36` 的 `untrusted_app` 域**不允许
+execve 应用可写存储里的 ELF**，而 rootfs 只能落在可写的应用私有目录里。允许执行的
+`nativeLibraryDir` 是只读且随 APK 打包的，装不下一棵可变的 rootfs。
+
+Termux / proot-distro 之所以能用，是因为 Termux 长期把 `targetSdk` 停在 28，从而保留了
+exec 豁免。MCA 不会为了这个特性把 `targetSdk` 降回 28——那会丢掉整个平台的兼容性要求。
+
+因此：**六步流水线可以完整跑完并把 rootfs 装好，但第 6 步探针会在 targetSdk 36 的设备上
+失败**，失败原因会如实显示为"execve ... Permission denied"，不会被伪装成成功。
 
 ## 3. 六步安装流水线
 
@@ -98,7 +116,8 @@ proot -r <rootfsPath> -0 -w /root \
 - tar：普通文件/目录/符号链接/模式位、绝对路径与 `..` 拒绝、经符号链接父目录越界拒绝、缺 `bin/sh` 拒绝；
 - manifest：schema 不符、SHA 形状不符、`matchesArchive` 的字节数与哈希两条路径。
 
-真机已验证（v0.3.9，`98a37aa7`，见发布说明）：安装流水线六步全绿，探针输出 `ok`。
+真机已验证（v0.3.9，`98a37aa7`）：proot 二进制可从 `nativeLibraryDir` 执行（`--version` 通过）；
+rootfs 归档可从 APK 资产读出并按官方 SHA-256 校验；**第 6 步探针因上述 W^X 限制失败**。
 
 未验证（NOT_RUN）：
 
