@@ -278,5 +278,14 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/agent_accessibility_service" />
         </service>
+        <!-- Iteration-only: runs the fixed container install from one adb broadcast.
+             It refuses to act unless the build was made with -PmcaIteration=true. -->
+        <receiver
+            android:name=".ContainerInstallReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.muyuchat.mca.RUN_CONTAINER_INSTALL" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

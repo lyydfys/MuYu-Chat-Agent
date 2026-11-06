@@ -219,6 +219,12 @@ android {
     }
 
     defaultConfig {
+        // Iteration-only entry points read this and refuse to act in a real release.
+        buildConfigField(
+            "boolean",
+            "MCA_ITERATION",
+            ((project.findProperty("mcaIteration") as String?)?.toBoolean() == true).toString()
+        )
         applicationId = "com.muyuchat.mca"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
@@ -248,14 +254,20 @@ android {
             // reuse the release keystore for a testable artifact.
         }
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Iteration switch: `-PmcaIteration=true` keeps the *release signing key* (so the
+            // artifact still replaces the installed build with `adb install -r`) but skips the
+            // three slow steps — R8, resource shrinking and full native symbol extraction — that
+            // together dominate a release build. Never ship such an artifact: `scripts/release.ps1`
+            // never passes this property, so a published APK is always the fully optimised one.
+            val iteration = (project.findProperty("mcaIteration") as String?)?.toBoolean() == true
+            isMinifyEnabled = !iteration
+            isShrinkResources = !iteration
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
             ndk {
-                debugSymbolLevel = "FULL"
+                debugSymbolLevel = if (iteration) "NONE" else "FULL"
             }
             if (releaseSigningEnabled) {
                 signingConfig = signingConfigs.getByName("release")
@@ -652,4 +664,9 @@ dependencies {
 // This changes no schema and no runtime behaviour; it only writes JSON during compilation.
 ksp {
     arg("room.schemaLocation", file("schemas").absolutePath)
+}
+
+if ((project.findProperty("mcaIteration") as String?)?.toBoolean() == true) {
+    // Lint-vital is a release gate, not part of the iteration loop.
+    tasks.matching { it.name.startsWith("lintVital") }.configureEach { enabled = false }
 }

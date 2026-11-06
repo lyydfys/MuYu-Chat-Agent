@@ -1,5 +1,7 @@
 package com.muyuchat.feature.dsh.workspace.container
 
+import kotlinx.coroutines.launch
+
 import android.content.Context
 import android.provider.DocumentsContract
 import kotlinx.coroutines.Dispatchers
@@ -59,6 +61,32 @@ class DshContainerHost internal constructor(
         kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
         )
+
+    /**
+     * Runs the six-step install on the host's own scope and publishes progress to
+     * [installState].
+     *
+     * One entry point for the console UI and for the iteration broadcast, so both exercise the same
+     * ownership model (progress and cancellation belong to the process-level host, never to a
+     * composition).
+     */
+    fun startInstall(assets: DshContainerAssetSource, layout: DshContainerLayout) {
+        val runner = DshContainerProcessRunner(
+            extraLibraryDirectory = layout.libraryDir,
+            prootLoaderPath = layout.nativeLibraryDir
+                .takeIf { it.isNotBlank() }
+                ?.let { "$it/${DshContainerLayout.PACKAGED_PROOT_LOADER_NAME}" },
+            prootTmpDirectory = "${layout.containerDir}/tmp"
+        )
+        installScope.launch {
+            installState.value = DshContainerInstallUi.installing()
+            val result = DshContainerInstaller.install(assets, layout, runner::run) { event ->
+                installState.value = installState.value.reduce(event)
+            }
+            installState.value = installState.value.finished(result)
+            android.util.Log.i("MCA-CONTAINER", "install finished: $result")
+        }
+    }
 
     /** Current verdict + the spec to use when it is [DshContainerProbeState.SUPPORTED]. */
     suspend fun snapshot(): DshContainerState = withContext(Dispatchers.IO) { snapshotNow() }
