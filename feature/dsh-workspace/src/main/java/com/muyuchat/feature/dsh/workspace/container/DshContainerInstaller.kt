@@ -28,6 +28,9 @@ import java.util.UUID
 object DshContainerInstaller {
     /** Staging/marker names; all of them live under [DshContainerLayout.containerDir]. */
     const val STAGING_DIR_NAME: String = ".staging"
+
+    /** Scratch directory proot is pointed at; only ever holds temp files. */
+    const val PROOT_TMP_DIR_NAME: String = "tmp"
     const val PREVIOUS_ROOTFS_NAME: String = "rootfs.previous"
     const val INSTALL_STATE_NAME: String = ".install-state.json"
 
@@ -100,6 +103,9 @@ object DshContainerInstaller {
         val containerDir = File(layout.containerDir)
         val rootfsDir = File(layout.rootfsDir)
         val stagingDir = File(containerDir, STAGING_DIR_NAME)
+        // proot warns "can't canonicalize <dir>" when PROOT_TMP_DIR does not exist yet. Creating it
+        // here keeps the probe output clean without changing what the probe proves.
+        File(containerDir, PROOT_TMP_DIR_NAME).mkdirs()
         val previousDir = File(containerDir, PREVIOUS_ROOTFS_NAME)
 
         // Step 1: verify the packaged bytes before writing anything.
