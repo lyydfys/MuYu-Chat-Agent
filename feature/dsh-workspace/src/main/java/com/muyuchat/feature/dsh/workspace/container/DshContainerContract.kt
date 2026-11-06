@@ -236,7 +236,9 @@ object DshContainerCommand {
                 add("-b")
                 add(mount.bindSpec)
             }
-            add("--")
+            // No `--` separator: Termux's proot build rejects it as an unknown option
+            // ("proot error: unknown option '--'"), which is exactly what the device probe hit.
+            // The guest command is a fixed absolute path, so there is nothing for `--` to protect.
             add(CONTAINER_SHELL)
             add("-c")
             add(spec.entryCommand)

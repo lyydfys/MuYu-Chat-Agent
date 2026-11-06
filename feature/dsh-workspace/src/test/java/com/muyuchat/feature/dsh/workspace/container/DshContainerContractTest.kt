@@ -41,14 +41,15 @@ class DshContainerCommandTest {
                 "-b", "/proc",
                 "-b", "/sys",
                 "-b", appFiles,
-                "--",
+                // No `--`: Termux's proot rejects it ("unknown option '--'"). The guest command
+                // is a fixed absolute path, so the separator never protected anything.
                 "/bin/sh",
                 "-c",
                 DshContainerCommand.PROBE_ENTRY_COMMAND
             ),
             argv
         )
-        assertEquals("probe is the constant entry command", 18, argv.size)
+        assertEquals("probe is the constant entry command", 17, argv.size)
     }
 
     @Test
@@ -83,7 +84,7 @@ class DshContainerCommandTest {
 
         assertEquals("-c", argv[argv.size - 2])
         assertEquals(command, argv.last())
-        assertEquals("--", argv[argv.size - 4])
+        assertEquals("/bin/sh", argv[argv.size - 3])
     }
 
     @Test
