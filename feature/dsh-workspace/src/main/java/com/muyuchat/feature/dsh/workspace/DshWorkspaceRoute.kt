@@ -95,6 +95,8 @@ fun DshWorkspaceRoute(
     pluginAdminPort: DshPluginAdminPort? = null,
     /** Native terminal page; null hides the entry and keeps the tab byte-for-byte as before. */
     terminalPort: DshTerminalUiPort? = null,
+    /** Emergency recovery seam; null hides the block. */
+    emergencyRecovery: com.muyuchat.core.dsh.contract.console.DshEmergencyRecoveryPort? = null,
     maintenanceConsolePort: DshMaintenanceConsolePort? = null,
     externalBrowserPort: DshExternalBrowserPort? = null,
     accountAuthUrlMatcher: DshAccountAuthUrlMatcher = DshAccountAuthUrlMatcher { false },
@@ -395,6 +397,7 @@ fun DshWorkspaceRoute(
                 pluginAdminPort = pluginAdminPort,
                 // Only offered when the runtime actually injected a terminal owner.
                 onOpenTerminal = terminalPort?.let { { destination = DshWorkspaceDestination.TERMINAL } },
+                emergencyRecovery = emergencyRecovery,
                 onBack = {
                     destination = DshWorkspaceDestinationPolicy.backDestination(destination)
                 }

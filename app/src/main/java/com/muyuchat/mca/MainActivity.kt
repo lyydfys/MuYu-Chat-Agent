@@ -554,6 +554,7 @@ private fun McaApp(
                     consolePort = viewModel.dshConsolePort,
                     pluginAdminPort = viewModel.dshPluginAdminPort,
                     terminalPort = viewModel.dshTerminalUiPort,
+                    emergencyRecovery = viewModel.dshEmergencyRecovery,
                     maintenanceConsolePort = viewModel.dshMaintenanceConsolePort,
                     externalBrowserPort = viewModel.dshExternalBrowserPort,
                     accountAuthUrlMatcher = viewModel.dshAccountAuthUrlMatcher,

@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.core.dsh.contract.DshRuntimeClient
+import com.muyuchat.mca.composition.DshEmergencyRecoveryAdapter
 import com.muyuchat.core.dsh.contract.auth.DshAccountLoginPort
 import com.muyuchat.core.dsh.contract.console.DshAccountAuthUrlMatcher
 import com.muyuchat.core.dsh.contract.console.DshConsolePort
@@ -40,6 +41,9 @@ internal val MainViewModel.dshPluginAdminPort: DshPluginAdminPort
 
 internal val MainViewModel.dshTerminalUiPort: DshTerminalUiPort
     get() = runtimeAssembly.dshHost.terminalUi
+
+internal val MainViewModel.dshEmergencyRecovery: DshEmergencyRecoveryAdapter
+    get() = runtimeAssembly.dshHost.emergencyRecovery
 
 internal val MainViewModel.dshMaintenanceConsolePort: DshMaintenanceConsolePort
     get() = runtimeAssembly.dshHost.maintenanceConsolePort

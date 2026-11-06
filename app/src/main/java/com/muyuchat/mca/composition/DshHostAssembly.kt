@@ -242,6 +242,14 @@ internal class DshHostAssembly(
     /** Console-facing seam for the plugin block; the owner above stays the only mutator. */
     val pluginAdmin: DshPluginAdminPort get() = pluginAdminPort
 
+    /** Emergency recovery: pure planner + this app's four real effects. */
+    val emergencyRecovery: DshEmergencyRecoveryAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        DshEmergencyRecoveryAdapter(
+            client = runtimeClient,
+            config = DshRuntimeConfig(dataRoot = File(application.filesDir, DSH_DATA_ROOT_NAME))
+        )
+    }
+
     /** Native terminal page seam; the page renders, the runtime owns every process. */
     val terminalUi: DshTerminalUiPort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         DshTerminalUiAdapter(service = { capabilityAssembly.terminalService })

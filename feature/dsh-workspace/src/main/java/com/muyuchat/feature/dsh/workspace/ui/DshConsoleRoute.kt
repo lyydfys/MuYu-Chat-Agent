@@ -42,6 +42,8 @@ import com.muyuchat.feature.dsh.workspace.DshConsoleTone
 import com.muyuchat.feature.dsh.workspace.DshConsoleUiState
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.muyuchat.core.dsh.contract.console.DshConsolePort
+import com.muyuchat.core.dsh.contract.console.DshEmergencyRecoveryPort
+import com.muyuchat.core.dsh.contract.console.DshRecoveryAdvice
 import com.muyuchat.core.dsh.contract.console.DshPluginAdminPort
 import com.muyuchat.core.dsh.contract.console.DshPluginAdminResult
 import com.muyuchat.core.dsh.contract.console.DshPluginName
@@ -74,7 +76,9 @@ fun DshConsoleRoute(
     /** In-app plugin administration; null keeps the plugin block read-only. */
     pluginAdminPort: DshPluginAdminPort? = null,
     /** Opens the native terminal page; null hides the entry entirely. */
-    onOpenTerminal: (() -> Unit)? = null
+    onOpenTerminal: (() -> Unit)? = null,
+    /** Emergency recovery; null hides the block. */
+    emergencyRecovery: DshEmergencyRecoveryPort? = null
 ) {
     val viewModel: DshConsoleViewModel = viewModel(
         key = "dsh-console",
@@ -123,6 +127,9 @@ fun DshConsoleRoute(
                 // the one fixed probe. It adds no destination and no layout change.
                 if (onOpenTerminal != null) {
                     DshTerminalEntry(onOpenTerminal)
+                }
+                if (emergencyRecovery != null) {
+                    DshEmergencyRecoveryBlock(emergencyRecovery)
                 }
                 DshContainerSection()
                 // Web kernel choice: system WebView (default) or GeckoView, with the effective
@@ -804,5 +811,93 @@ private fun DshTerminalEntry(onOpen: () -> Unit) {
         ) {
             Text("打开终端")
         }
+    }
+}
+
+/**
+ * Emergency recovery block.
+ *
+ * The plan comes from the owner (pure policy + this install's facts); the console only renders it
+ * and asks for confirmation when the plan moves the DSH home aside.
+ */
+@Composable
+private fun DshEmergencyRecoveryBlock(port: DshEmergencyRecoveryPort) {
+    val scope = rememberCoroutineScope()
+    var advice by remember { mutableStateOf<DshRecoveryAdvice?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var confirm by remember { mutableStateOf(false) }
+
+    LaunchedEffect(port) { advice = runCatching { port.advice() }.getOrNull() }
+    val current = advice
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = "应急恢复",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+        when (current) {
+            null -> Text("正在评估…", style = MaterialTheme.typography.bodySmall)
+            is DshRecoveryAdvice.Unavailable -> Text(
+                text = current.reason,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            is DshRecoveryAdvice.Actionable -> {
+                Text(current.reason, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    text = "计划：" + current.steps.joinToString(" → "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                McaButton(
+                    style = McaButtonStyle.Outlined,
+                    enabled = !busy,
+                    onClick = {
+                        if (current.needsConfirmation) {
+                            confirm = true
+                        } else {
+                            busy = true
+                            scope.launch {
+                                message = runCatching { port.run(false) }
+                                    .getOrElse { it.message ?: "执行失败" }
+                                busy = false
+                                advice = runCatching { port.advice() }.getOrNull()
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (busy) "恢复中…" else "执行应急恢复")
+                }
+            }
+        }
+        message?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("确认应急恢复") },
+            text = { Text("该计划会把当前 DSH 家目录移到一旁（不会删除），然后重新播种。配置与插件状态需要重新建立。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirm = false
+                    busy = true
+                    scope.launch {
+                        message = runCatching { port.run(true) }.getOrElse { it.message ?: "执行失败" }
+                        busy = false
+                        advice = runCatching { port.advice() }.getOrNull()
+                    }
+                }) { Text("执行") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("取消") } }
+        )
     }
 }
