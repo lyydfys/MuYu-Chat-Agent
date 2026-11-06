@@ -197,7 +197,7 @@ class DshEcosystemOverlayRowTest {
   "name": "dsh-profile-web",
   "private": true,
   "dependencies": {
-    "@deepseek-ai/dsh-mcp-client": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-mcp-client": "0.2.2-rc.1"
   },
   "dsh": {
     "profile": {

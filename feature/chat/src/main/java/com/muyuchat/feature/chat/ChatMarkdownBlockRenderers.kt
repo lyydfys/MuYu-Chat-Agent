@@ -237,7 +237,10 @@ private fun ParagraphBlock(text: String, isStreamingTail: Boolean = false) {
         color = baseColor,
         style = MaterialTheme.typography.bodyMedium.copy(
             fontSize = 15.sp,
-            lineHeight = 23.sp
+            // 19sp ≈ 1.27× the font size: normal reading density. The previous 23sp opened a
+            // full extra line between wrapped rows, so multi-line answers looked double-spaced.
+            // Lists and code blocks keep their own spacing.
+            lineHeight = 19.sp
         ),
         modifier = Modifier.fillMaxWidth().streamingTailFade(inlineText.text, isStreamingTail) { layout.value },
         onTextLayout = { layout.value = it },

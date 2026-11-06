@@ -400,7 +400,9 @@ private fun UserMessageBubble(
                         // colour here also wins over the Surface contentColor above, which is why
                         // that pair on its own did not fix it. Light keeps 0xFF202124 exactly.
                         color = if (darkTheme) MaterialTheme.colorScheme.onPrimaryContainer else Color(0xFF202124),
-                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp)
+                        // 20sp ≈ 1.25× the 16sp body size, matching the assistant paragraph
+                        // density instead of the old 24sp (1.5×) that read as double-spaced.
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 20.sp)
                     )
                 }
             }

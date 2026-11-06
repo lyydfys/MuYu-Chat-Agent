@@ -167,6 +167,42 @@ class McaGenerationForegroundService : Service() {
     }
 
     companion object {
+
+        private const val WAKE_LOCK_TAG = "mca:generation"
+
+        private var wakeLock: android.os.PowerManager.WakeLock? = null
+
+        /**
+         * Partial wake lock held for the whole generation lease.
+         *
+         * Generation is a long running CPU/GPU task; without this the device can suspend as soon as
+         * the screen turns off, which is exactly the "切后台就断了" report. It is a partial lock, so
+         * the screen still turns off normally.
+         */
+        private fun acquireWakeLock(context: Context) {
+            runCatching {
+                if (wakeLock?.isHeld == true) return
+                val manager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                wakeLock = manager.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                    WAKE_LOCK_TAG
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire(MAX_WAKE_LOCK_MILLIS)
+                }
+            }.onFailure { error -> Log.w(TAG, "Unable to acquire generation wake lock", error) }
+        }
+
+        private fun releaseWakeLock() {
+            runCatching {
+                wakeLock?.let { if (it.isHeld) it.release() }
+            }
+            wakeLock = null
+        }
+
+        /** Safety ceiling: a leaked lease can never pin the CPU forever. */
+        private const val MAX_WAKE_LOCK_MILLIS: Long = 4 * 60 * 60 * 1000L
+
         private const val TAG = "McaGenerationService"
         private const val CHANNEL_ID = "mca_generation"
         // Package-wide IDs must not collide with the isolated chat worker (11436),
@@ -192,18 +228,23 @@ class McaGenerationForegroundService : Service() {
             kind: String = KIND_CHAT,
             agentStopAction: com.muyuchat.mca.agent.platform.AgentStopAction? = null
         ): GenerationForegroundLease? = runCatching {
-            leases.acquire(kind, agentStopAction) {
+            val lease = leases.acquire(kind, agentStopAction) {
                 ContextCompat.startForegroundService(
                     context.applicationContext,
                     Intent(context.applicationContext, McaGenerationForegroundService::class.java)
                 )
             }
+            // A foreground service keeps the process alive but does not keep the CPU awake: with
+            // the screen off the device can still suspend and the generation stalls mid-stream.
+            acquireWakeLock(context.applicationContext)
+            lease
         }.onFailure { error ->
             Log.e(TAG, "Unable to start generation foreground service", error)
         }.getOrNull()
 
         internal fun release(context: Context, lease: GenerationForegroundLease?) {
             if (lease == null) return
+            runCatching { releaseWakeLock() }
             runCatching {
                 leases.release(lease) {
                     context.applicationContext.stopService(

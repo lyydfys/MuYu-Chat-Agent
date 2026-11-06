@@ -36,10 +36,10 @@ enum class DshMcpCapabilitySupport {
  * The MCP surface the pinned DSH payload actually ships, read from the packaged payload (not from
  * documentation):
  *
- * - `@deepseek-ai/dsh-mcp-client` 0.2.1-rc.2 connects to one server and registers its tools on
+ * - `@deepseek-ai/dsh-mcp-client` 0.2.2-rc.1 connects to one server and registers its tools on
  *   `ctx.tools` as `mcp__<serverName>__<rawName>` (payload
  *   `.../dsh-mcp-client/lib/index.js`, `syncTools` / `publicToolName`).
- * - `@deepseek-ai/dsh-mcp-resources` 0.2.1-rc.2 is inserted by the shipped `dsh-base` bundle row
+ * - `@deepseek-ai/dsh-mcp-resources` 0.2.2-rc.1 is inserted by the shipped `dsh-base` bundle row
  *   `mcp-resources` and registers three model tools: `list_mcp_resources` (`resources/list`),
  *   `list_mcp_resource_templates` (`resources/templates/list`) and `read_mcp_resource`
  *   (`resources/read`). The client registers each connection's resource operations through

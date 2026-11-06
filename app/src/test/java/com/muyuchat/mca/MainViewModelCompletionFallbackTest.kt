@@ -340,7 +340,15 @@ class MainViewModelCompletionFallbackTest {
         // on MainViewModel, the body's own handle and its five markPhase calls on the execution
         // owner. The assertions are otherwise unchanged.
         val launcher = functionBody(mainViewModelSource(), "fun startGeneration(")
-        assertTrue(launcher.contains("val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY)"))
+        // Generation now runs on the process-level runtime, not on viewModelScope: leaving the chat
+        // page (character-card screen, tab switch, Activity recreation) must not cancel a running
+        // generation. The scope itself is the contract this test pins.
+        assertTrue(
+            launcher.contains(
+                "val ownedGenerationJob = McaGenerationRuntime.scope.launch(start = CoroutineStart.LAZY)"
+            )
+        )
+        assertFalse(launcher.contains("viewModelScope.launch(start = CoroutineStart.LAZY)"))
         assertFalse(launcher.contains("lateinit var ownedGenerationJob"))
         val body = functionBody(chatExecutionOperationsSource(), "fun ChatGenerationExecutionPort.runChatGeneration(")
         assertTrue(body.contains("val selfJob = requireNotNull(coroutineContext[Job])"))

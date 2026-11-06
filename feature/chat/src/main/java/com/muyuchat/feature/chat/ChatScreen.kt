@@ -236,6 +236,48 @@ fun ChatScreen(
             }
         }
     }
+    // Image-generation submits take a different app path than a text send: nothing told the
+    // tail-following owner that the user sent a turn, so a new image turn could land while the
+    // list stayed where it was, and the composer kept the prompt. Track one submit and clear it
+    // exactly when the image turn is published; a rejected submit appends no message, so the
+    // user's draft stays untouched.
+    var pendingImagePromptSubmit by remember { mutableStateOf<PendingImagePromptSubmit?>(null) }
+    val submitImagePrompt = {
+        haptics.confirm()
+        // Same contract as a text send: an explicit product action resumes tail-following.
+        scrollCoordinator.onUserSentMessage()
+        pendingImagePromptSubmit = PendingImagePromptSubmit(
+            text = state.input,
+            conversationId = state.activeConversationId,
+            messageCount = state.messages.size,
+            jobIds = state.imageJobs.mapTo(HashSet()) { job -> job.id }
+        )
+        onSendImagePrompt()
+    }
+    LaunchedEffect(
+        pendingImagePromptSubmit,
+        state.input,
+        state.activeConversationId,
+        state.messages.size,
+        state.imageJobs.size
+    ) {
+        val pending = pendingImagePromptSubmit ?: return@LaunchedEffect
+        // A null id means the submit created a brand-new conversation, so any id is that turn.
+        val sameConversation = pending.conversationId == null ||
+            state.activeConversationId == pending.conversationId
+        val imageTurnPublished = state.messages.size > pending.messageCount ||
+            state.imageJobs.any { job -> job.id !in pending.jobIds }
+        when {
+            // The user switched conversations: never clear the new conversation's draft.
+            !sameConversation -> pendingImagePromptSubmit = null
+            // The app cleared the draft or the user edited it: nothing left to do.
+            state.input != pending.text -> pendingImagePromptSubmit = null
+            imageTurnPublished -> {
+                onInputChange("")
+                pendingImagePromptSubmit = null
+            }
+        }
+    }
     val imageParameterPreferences = remember(context) {
         context.applicationContext.getSharedPreferences(
             IMAGE_GENERATION_UI_PARAMETER_PREFS,
@@ -486,10 +528,7 @@ fun ChatScreen(
                 onInputChange = onInputChange,
                 onDismissStatusMessage = onDismissStatusMessage,
                 onSend = submitChatMessage,
-                onSendImagePrompt = {
-                    haptics.confirm()
-                    onSendImagePrompt()
-                },
+                onSendImagePrompt = submitImagePrompt,
                 attachmentPreflightRunning = chatAttachmentPreflightRunning,
                 onSetAssistantImageToolAutoApproval = onSetAssistantImageToolAutoApproval,
                 onStop = {
@@ -662,3 +701,12 @@ fun ChatScreen(
         onDismiss = { showNewConversationPicker = false }
     )
 }
+
+/** One image-prompt submit waiting for its image turn to be published. */
+private data class PendingImagePromptSubmit(
+    val text: String,
+    /** Null when the submit is the first turn of a brand-new conversation. */
+    val conversationId: String?,
+    val messageCount: Int,
+    val jobIds: Set<String>
+)

@@ -602,7 +602,7 @@ MCA_RULES = {
 OFFICIAL_REASONS = {
     "required": (
         "Reviewed profile for android-mca: official required row ships in the pinned payload "
-        "(kernel 0.2.1-rc.2); implementation not assessed per row. profiles=[official-web, android-mca]"
+        "(kernel 0.2.2-rc.1); implementation not assessed per row. profiles=[official-web, android-mca]"
     ),
     "android-adaptation": (
         "Reviewed profile for android-mca: android-adaptation required; a host seam exists but no "

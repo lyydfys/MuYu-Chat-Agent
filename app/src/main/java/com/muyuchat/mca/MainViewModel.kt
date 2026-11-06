@@ -733,7 +733,10 @@ class MainViewModel @JvmOverloads internal constructor(
         val admittedReservation = reservation ?: reserveUiGenerationStart() ?: return false
         val generationRunId = admittedReservation.runId
         val replyMetrics = ReplyGenerationMetrics(generationRunId)
-        val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+        // Generation must survive leaving the chat page: the character-card screen and any tab
+        // switch can dispose this ViewModel, and a viewModelScope job would be cancelled mid-stream.
+        // It runs on the generation runtime instead and is stopped only by an explicit stop.
+        val ownedGenerationJob = McaGenerationRuntime.scope.launch(start = CoroutineStart.LAZY) {
             chatExecutionPort.runChatGeneration(
                 requestMessages = requestMessages, reservation = admittedReservation, replyMetrics = replyMetrics, toolExchanges = toolExchanges,
                 paramsOverride = paramsOverride, offerAssistantImageTool = offerAssistantImageTool, chatModelIdOverride = chatModelIdOverride,
