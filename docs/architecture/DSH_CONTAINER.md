@@ -75,6 +75,24 @@ aarch64
 
 同类先例：UserLAnd（Play 在架、targetSdk 37）同样把 proot 当作假 `.so` 打包执行。
 
+### 2.2 真机验收（v0.4.0，`98a37aa7`）
+
+六步流水线在真机上完整通过（由 `am broadcast` 触发，无手动导航）：
+
+```
+step 1 ok Ubuntu 24.04.5 LTS (noble) base, arm64 · 29936675 字节 · SHA-256 匹配
+step 2 ok 复用已有 rootfs / 全新安装时创建 .staging
+step 3 ok 3413 个条目 / 100784109 字节
+step 4 ok bin/sh 存在
+step 5 ok 已提交；旧 rootfs 保留为 rootfs.previous
+step 6 ok 探针通过
+install finished: Installed(...)
+```
+
+排查中修掉的真实缺陷（都有对应提交）：硬链接目标后置、目录符号链接无界物化、
+绝对符号链接误判越界、`canonicalFile` 在环上不返回、悬空链接被当失败、
+探针 argv 多了一个 Termux proot 不接受的 `--`。
+
 
 ## 3. 六步安装流水线
 
