@@ -1,6 +1,11 @@
 # DSH 与 DSHA 对齐状态
 
 对照基准：<https://github.com/DSH-APP/DSHA> 的 README（v0.2.1-rc.2 · build190）。
+
+**内核已升级到官方 `0.2.2-rc.1`**（2026-11-04）：官方闭包 329 个包 + 从参考载荷移植的
+4 个 Android 工具包（`dsh-tool-android/shizuku/accessibility/vscreen@0.1.0`）。
+工具注册由 `scripts/dsh/probe-android-tools.mjs` 复现：18 个工具注册成功，
+vscreen 的 6 个在无 root/Shizuku 时按设计不注册。载荷 153.4 MB，APK 体积不变。
 本文只记录**可核对的事实**：每一条都指向本仓库的代码或明确写「未做」。
 
 图例：✅ 已具备 ｜ 🟡 部分（能力在、接线/资产缺） ｜ ❌ 未做 ｜ ⛔ 需要决策（资产/依赖）
