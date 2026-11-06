@@ -3,8 +3,8 @@
     "apkUrl": "npm:@deepseek-ai/dsh@0.2.2-rc.1",
     "apkSize": 0,
     "apkSha256": null,
-    "payloadSize": 160882484,
-    "payloadSha256": "3a179ff03d19087a3411a671e0139d96e3ac904cbf11cef8aed16016fa61e419",
+    "payloadSize": 181233369,
+    "payloadSha256": "b34b79bd12be1bd3a8bc72b2ab406bb75c8d923dc1206a0a16d9c9cd0fdb13c4",
     "kernelVersion": "0.2.2-rc.1",
     "kernelRevision": "npm-0.2.2-rc.1",
     "executables": [

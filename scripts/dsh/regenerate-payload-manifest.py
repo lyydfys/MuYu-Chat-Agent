@@ -11,9 +11,14 @@ import os
 import sys
 import zipfile
 
-MANIFEST = r"E:\MAC\core\dsh-runtime\src\main\assets\dsh\MANIFEST.json"
-PAYLOAD_ZIP = r"E:\tmp\dsh-upgrade\payload-new.zip"
-PAYLOAD_DIR = r"E:\tmp\dsh-upgrade\payload-new"
+import sys as _sys
+
+# Default to the packaged asset so a forgotten argument can never pin a staging archive.
+PAYLOAD_ZIP = _sys.argv[1] if len(_sys.argv) > 1 else (
+    r"E:\MAC\core\dsh-runtime\src\main\assets\dsh\payload.zip")
+PAYLOAD_DIR = _sys.argv[2] if len(_sys.argv) > 2 else r"E:\tmp\dsh-upgrade\payload-new"
+MANIFEST = _sys.argv[3] if len(_sys.argv) > 3 else (
+    r"E:\MAC\core\dsh-runtime\src\main\assets\dsh\MANIFEST.json")
 NEW_KERNEL_VERSION = "0.2.2-rc.1"
 NEW_PAYLOAD_VERSION = "dsh-0.2.2-rc.1+mca-android-tools"
 OFFICIAL_COMMIT = None  # filled from the release tag below when known
