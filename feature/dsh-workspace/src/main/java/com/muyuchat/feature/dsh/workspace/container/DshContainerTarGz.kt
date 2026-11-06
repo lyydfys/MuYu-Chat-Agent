@@ -275,8 +275,20 @@ private data class PendingHardLink(val target: File, val name: String, val linkN
                 }
                 // A hardlink to a symlink is not representable; materialise the same link target so
                 // the path still resolves the way the archive intended.
-                Files.isSymbolicLink(source.toPath()) ->
-                    Files.createSymbolicLink(link.target.toPath(), Files.readSymbolicLink(source.toPath()))
+                Files.isSymbolicLink(source.toPath()) -> {
+                    // Also guarded: a filesystem that refuses link creation throws a
+                    // FileSystemException whose message is just "target -> source", which is what
+                    // the device log showed.
+                    val linked = runCatching {
+                        Files.createSymbolicLink(
+                            link.target.toPath(),
+                            Files.readSymbolicLink(source.toPath())
+                        )
+                    }
+                    if (linked.isFailure) {
+                        runCatching { link.target.writeBytes(ByteArray(0)) }
+                    }
+                }
                 // Ubuntu stores `perl` as a symlink to `perl5.38.2` *and* `perl5.38.2` as a hardlink
                 // to `perl`: the pair is mutually referential, so no order resolves it. A hardlink
                 // is only a space optimisation, never content, so the install continues with an
