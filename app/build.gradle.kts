@@ -229,8 +229,8 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 21
-        versionName = "0.4.2"
+        versionCode = 22
+        versionName = "0.4.3"
 
         ndk {
             abiFilters += mcaAbiFilters
