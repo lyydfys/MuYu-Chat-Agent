@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaIconButton
 
 import android.annotation.SuppressLint
@@ -34,7 +35,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -289,7 +289,10 @@ private fun InternalBrowserContent(
         if (searchExpanded) {
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                TextField(value = searchQuery, onValueChange = { searchQuery = it.take(512) },
+                // Shared field so the browser search bar carries the one-tap clear affordance used
+                // everywhere else; the adjacent search button keeps its own icon, which is why this
+                // did not need a separate trailing-icon decision.
+                McaTextField(value = searchQuery, onValueChange = { searchQuery = it.take(512) },
                     modifier = Modifier.weight(1f).onFocusChanged { searchFocused = it.isFocused },
                     singleLine = true, label = { Text("搜索关键词") },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
