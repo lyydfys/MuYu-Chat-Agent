@@ -67,6 +67,20 @@ class RichBlockSanitizerTest {
     }
 
     @Test
+    fun `valueless attributes do not crash the sanitizer`() {
+        // Regression: ATTRIBUTE has five capture groups, but the value fallback chain also read
+        // group 6. Any tag whose attribute carried no value (<details open>, <div data-x>)
+        // therefore threw IndexOutOfBoundsException("No group 6") while a message was being
+        // rendered, which reached the user as an instant crash on opening the conversation.
+        val result = sanitizeRichBlocks(
+            "<details open><summary>summary text</summary>body one</details><div data-x>body two</div>"
+        )
+        val text = richBlocksPlainText(result.blocks)
+        assertTrue(text.contains("body one"))
+        assertTrue(text.contains("body two"))
+    }
+
+    @Test
     fun `event attributes are dropped and cannot produce interaction`() {
         val result = sanitizeRichBlocks(
             """<div onclick="alert(1)" onmouseover="alert(2)">安全文字</div>"""

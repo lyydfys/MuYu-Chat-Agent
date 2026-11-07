@@ -372,7 +372,7 @@ private class RichBlockParser(private val limits: RichBlockLimits) {
             val value = match.groupValues[3]
                 .ifBlank { match.groupValues[4] }
                 .ifBlank { match.groupValues[5] }
-                .ifBlank { match.groupValues[6] }
+                .ifBlank { "" }  // 没有第 6 组，直接返回空字符串
             when (name) {
                 "title", "name" -> attributes[name] = decodeEntities(value).trim()
                 "open" -> attributes["open"] = "true"
