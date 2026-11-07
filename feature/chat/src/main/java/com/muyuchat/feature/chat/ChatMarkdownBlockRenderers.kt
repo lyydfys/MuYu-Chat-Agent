@@ -237,10 +237,12 @@ private fun ParagraphBlock(text: String, isStreamingTail: Boolean = false) {
         color = baseColor,
         style = MaterialTheme.typography.bodyMedium.copy(
             fontSize = 15.sp,
-            // 19sp ≈ 1.27× the font size: normal reading density. The previous 23sp opened a
-            // full extra line between wrapped rows, so multi-line answers looked double-spaced.
-            // Lists and code blocks keep their own spacing.
-            lineHeight = 19.sp
+            // 22sp ≈ 1.47× the font size. Reference points: ChatGPT message prose runs at 1.75×
+            // (16/28), Gemini at ~1.5× (16/24), Material 3 bodyLarge is 16/24. The previous 19sp
+            // (1.27×) was too tight — CJK glyphs fill the full em box, so a ratio that reads fine
+            // for Latin looks cramped for Chinese. 1.47× sits next to Gemini without the
+            // "double-spaced" look the older 1.53× produced. Lists and code keep their own spacing.
+            lineHeight = 22.sp
         ),
         modifier = Modifier.fillMaxWidth().streamingTailFade(inlineText.text, isStreamingTail) { layout.value },
         onTextLayout = { layout.value = it },

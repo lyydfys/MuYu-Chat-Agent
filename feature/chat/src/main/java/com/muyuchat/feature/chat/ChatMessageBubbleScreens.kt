@@ -400,9 +400,12 @@ private fun UserMessageBubble(
                         // colour here also wins over the Surface contentColor above, which is why
                         // that pair on its own did not fix it. Light keeps 0xFF202124 exactly.
                         color = if (darkTheme) MaterialTheme.colorScheme.onPrimaryContainer else Color(0xFF202124),
-                        // 20sp ≈ 1.25× the 16sp body size, matching the assistant paragraph
-                        // density instead of the old 24sp (1.5×) that read as double-spaced.
-                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 20.sp)
+                        // 24sp = 1.5× the 16sp body size, matching Gemini's message density
+                        // (16/24) and the assistant paragraph ratio of ~1.47×. The 20sp (1.25×)
+                        // attempt was too tight: CJK glyphs fill the em box, so Chinese text at
+                        // 1.25× collides visually. The old 24sp was never the problem — the
+                        // assistant body at 1.53× was.
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp)
                     )
                 }
             }
