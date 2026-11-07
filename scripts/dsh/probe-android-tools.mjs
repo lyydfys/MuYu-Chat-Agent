@@ -20,6 +20,9 @@ const PACKAGES = [
   "dsh-tool-shizuku",
   "dsh-tool-accessibility",
   "dsh-tool-vscreen",
+  // Carried over from the reference payload like the four above; the overlay seeds a
+  // `tool-browser` row, so a missing package would silently drop the browser tools.
+  "dsh-tool-browser",
 ];
 
 function makeContext(registered) {
