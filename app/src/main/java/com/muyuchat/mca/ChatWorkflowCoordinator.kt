@@ -334,10 +334,23 @@ internal class ChatWorkflowCoordinator(
         } else ""
         // Tavern preset pipeline: regex_scripts(placement=1) first, then macro expansion. It is a
         // no-op unless the current model is bound to a preset carrying tavern_regex_scripts.
-        val modelInputText = TavernPromptPipeline.transformUserInput(state, preparedInput.text)
+        // A blank result is only a refusal when the user's own macros produced it. When a preset
+        // script is what emptied the text, the transform keeps the typed text (see
+        // TavernPromptPipeline) and reports the cause so this turn still sends with an explanation
+        // instead of a dead end.
+        val userInputTransform = TavernPromptPipeline.transformUserInputFor(state, preparedInput.text)
+        val modelInputText = userInputTransform.text
+        if (userInputTransform.clearedByPreset) {
+            store.update {
+                it.copy(
+                    statusMessage = "当前预设的输入正则把这段文字改写成了空，已按原文发送。" +
+                        "如需保留改写效果，请到预设管理里调整该正则。"
+                )
+            }
+        }
         if (modelInputText.isBlank() && preparedInput.imageAttachments.isEmpty()) {
             store.update {
-                it.copy(statusMessage = "酒馆宏展开后消息为空，请修改输入后再发送。")
+                it.copy(statusMessage = "这条消息经预设处理后为空，请修改输入后再发送。")
             }
             return
         }

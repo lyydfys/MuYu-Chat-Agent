@@ -18,12 +18,43 @@ import com.muyuchat.feature.chat.tavern.TavernRegexPostProcessor
  * The macro engine is process-scoped so `setvar`/`getvar` survive later turns in the same session;
  * the variable store itself is in-memory and is cleared by an app restart (documented in
  * [com.muyuchat.feature.chat.tavern.InMemoryTavernVariableStore]).
+ *
+ * Fail-open on a destroyed message: an imported preset can carry a `placement=1` script whose
+ * pattern matches ordinary typed text and whose replacement is empty (`/^\d+$/ -> ""` is a common
+ * "strip bare numbers" rule). Applying it literally deletes what the user just typed, and the old
+ * send guard then refused the turn with "消息为空" — the user cannot send and cannot tell why. When
+ * the *regex* stage alone empties a non-empty input, the original text is kept and the turn still
+ * sends, with [TavernUserInputTransform.clearedByPreset] so the UI can say what happened. A blank
+ * result that survives the regex stage (a pure `{{setvar::…}}` command) is left blank: that one is
+ * the requested behavior, not damage.
  */
 internal object TavernPromptPipeline {
     private val macroEngine = TavernMacroEngine()
 
     fun transformUserInput(state: MainUiState, text: String): String =
-        transform(state, text, userInput = true)
+        transformUserInputFor(state, text).text
+
+    /**
+     * Same transform as [transformUserInput], plus whether a preset script — not the user's
+     * macros — is what emptied the text.
+     */
+    fun transformUserInputFor(state: MainUiState, text: String): TavernUserInputTransform {
+        if (text.isEmpty()) return TavernUserInputTransform(text, clearedByPreset = false)
+        val preset = activePreset(state)
+            ?: return TavernUserInputTransform(text, clearedByPreset = false)
+        val processor = TavernRegexPostProcessor.fromPresetParams(preset.paramsJson)
+        if (!processor.hasPresetKey) return TavernUserInputTransform(text, clearedByPreset = false)
+        val context = macroContext(state)
+        val regexed = processor.applyToUserInput(text)
+        if (regexed.isBlank() && text.isNotBlank()) {
+            // Keep what the user typed rather than refusing to send.
+            return TavernUserInputTransform(text, clearedByPreset = true)
+        }
+        return TavernUserInputTransform(
+            text = macroEngine.expand(regexed, context),
+            clearedByPreset = false
+        )
+    }
 
     fun transformAssistantOutput(state: MainUiState, text: String): String =
         transform(state, text, userInput = false)
@@ -53,7 +84,11 @@ internal object TavernPromptPipeline {
             macroEngine.expand(regexed, context)
         } else {
             val macroed = macroEngine.expand(text, context)
-            processor.applyToAssistantOutput(macroed)
+            val contract = processor.applyToAssistantOutput(macroed)
+            // A reply is never deleted on the model's behalf: an output script that matches the
+            // whole reply and replaces it with nothing would otherwise persist an empty assistant
+            // message and wipe the answer the user just waited for.
+            if (contract.isBlank() && macroed.isNotBlank()) macroed else contract
         }
     }
 
@@ -84,3 +119,10 @@ internal object TavernPromptPipeline {
 
     private const val DEFAULT_USER_NAME = "User"
 }
+
+/** Result of the user-input transform: the text to send and where a blank came from. */
+internal data class TavernUserInputTransform(
+    val text: String,
+    /** True when a preset `placement=1` script emptied the typed text and it was kept as-is. */
+    val clearedByPreset: Boolean
+)
