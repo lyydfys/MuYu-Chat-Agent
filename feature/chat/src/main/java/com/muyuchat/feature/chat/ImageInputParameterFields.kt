@@ -3,6 +3,7 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaIconButton
 
 import android.net.Uri
@@ -195,7 +196,7 @@ internal fun ImageStrengthField(
     value: String,
     onValueChange: (String) -> Unit
 ) {
-    OutlinedTextField(
+    McaTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },

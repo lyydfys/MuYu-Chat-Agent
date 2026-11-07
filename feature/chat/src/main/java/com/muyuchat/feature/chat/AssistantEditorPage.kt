@@ -4,6 +4,7 @@ import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
 import com.muyuchat.core.designsystem.McaDialog
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -294,14 +295,14 @@ internal fun AssistantEditorPage(
                 item {
                     Text("基础信息", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedTextField(
+                        McaTextField(
                             value = avatar,
                             onValueChange = { avatar = it.take(4) },
                             label = { Text("头像") },
                             singleLine = true,
                             modifier = Modifier.weight(0.72f)
                         )
-                        OutlinedTextField(
+                        McaTextField(
                             value = name,
                             onValueChange = { name = it },
                             label = { Text("助手名称") },
@@ -310,7 +311,7 @@ internal fun AssistantEditorPage(
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
+                    McaTextField(
                         value = tag,
                         onValueChange = { tag = it.take(24) },
                         label = { Text("标签") },
@@ -365,7 +366,7 @@ internal fun AssistantEditorPage(
                             }
                         }
                     }
-                    OutlinedTextField(
+                    McaTextField(
                         value = prompt,
                         onValueChange = {
                             prompt = it.take(MAX_ASSISTANT_SYSTEM_PROMPT_CHARS)
@@ -449,7 +450,7 @@ internal fun AssistantEditorPage(
                     }
                     if (memoryEnabled) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
+                        McaTextField(
                             value = memorySummaryIntervalText,
                             onValueChange = { value -> memorySummaryIntervalText = value.filter(Char::isDigit).take(3) },
                             label = { Text("每几轮总结一次") },
@@ -509,14 +510,14 @@ internal fun AssistantEditorPage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedTextField(
+                        McaTextField(
                             value = temperatureText,
                             onValueChange = { temperatureText = it },
                             label = { Text("温度") },
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
-                        OutlinedTextField(
+                        McaTextField(
                             value = topPText,
                             onValueChange = { topPText = it },
                             label = { Text("top_p") },
@@ -525,7 +526,7 @@ internal fun AssistantEditorPage(
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
+                    McaTextField(
                         value = nPredictText,
                         onValueChange = { nPredictText = it },
                         label = { Text("输出长度") },
@@ -537,14 +538,14 @@ internal fun AssistantEditorPage(
                     }
                     if (advancedSamplingExpanded) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            OutlinedTextField(
+                            McaTextField(
                                 value = topKText,
                                 onValueChange = { topKText = it },
                                 label = { Text("top_k") },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
-                            OutlinedTextField(
+                            McaTextField(
                                 value = minPText,
                                 onValueChange = { minPText = it },
                                 label = { Text("min_p") },
@@ -553,14 +554,14 @@ internal fun AssistantEditorPage(
                             )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            OutlinedTextField(
+                            McaTextField(
                                 value = repeatPenaltyText,
                                 onValueChange = { repeatPenaltyText = it },
                                 label = { Text("重复惩罚") },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
-                            OutlinedTextField(
+                            McaTextField(
                                 value = presencePenaltyText,
                                 onValueChange = { presencePenaltyText = it },
                                 label = { Text("presence") },
@@ -569,14 +570,14 @@ internal fun AssistantEditorPage(
                             )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            OutlinedTextField(
+                            McaTextField(
                                 value = frequencyPenaltyText,
                                 onValueChange = { frequencyPenaltyText = it },
                                 label = { Text("frequency") },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
-                            OutlinedTextField(
+                            McaTextField(
                                 value = stopWordsText,
                                 onValueChange = { stopWordsText = it.take(4096) },
                                 label = { Text("停止词 JSON 数组") },

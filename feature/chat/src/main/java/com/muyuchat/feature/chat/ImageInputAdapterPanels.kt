@@ -3,6 +3,7 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaIconButton
 
 import android.net.Uri
@@ -258,7 +259,7 @@ internal fun ImageInputAdapterOptionsPanel(
                                 val multiplier = selection.multiplierText.toDoubleOrNull()
                                 val multiplierValid = multiplier != null && multiplier.isFinite() &&
                                     multiplier in -4.0..4.0 && kotlin.math.abs(multiplier) >= 0.01
-                                OutlinedTextField(
+                                McaTextField(
                                     value = selection.multiplierText,
                                     onValueChange = { onLoraMultiplierChange(adapter.id, it) },
                                     label = { Text("倍率") },

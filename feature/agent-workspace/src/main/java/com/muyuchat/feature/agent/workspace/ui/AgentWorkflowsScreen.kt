@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.feature.agent.workspace.AgentWorkflowDraftUi
@@ -268,7 +269,7 @@ private fun WorkflowCreateDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
+                McaTextField(
                     value = draft.name,
                     onValueChange = onNameChange,
                     label = { Text("配方名称") },
@@ -279,7 +280,7 @@ private fun WorkflowCreateDialog(
                         .testTag("workflows.name")
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
+                McaTextField(
                     value = draft.goalTemplate,
                     onValueChange = onGoalChange,
                     label = { Text("任务目标") },

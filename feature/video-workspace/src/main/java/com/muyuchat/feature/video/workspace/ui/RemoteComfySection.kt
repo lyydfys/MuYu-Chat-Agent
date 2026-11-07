@@ -21,6 +21,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.feature.video.workspace.RemoteUiState
 
 /**
@@ -47,23 +48,21 @@ internal fun RemoteComfySection(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
         )
-        OutlinedTextField(
+        McaTextField(
             value = baseUrl,
             onValueChange = { baseUrl = it },
             label = { Text("Endpoint（例如 http://192.168.1.10:8188）") },
             singleLine = true,
             enabled = wired,
-            modifier = Modifier.fillMaxWidth().testTag("video.remote_endpoint"),
-        )
-        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth().testTag("video.remote_endpoint"))
+        McaTextField(
             value = apiKey,
             onValueChange = { apiKey = it },
             label = { Text("API Key（可选，仅本次会话）") },
             singleLine = true,
             enabled = wired,
             visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp).testTag("video.remote_api_key"),
-        )
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp).testTag("video.remote_api_key"))
         val status = when (state) {
             RemoteUiState.Idle -> if (wired) "未连接" else "远端端口未装配"
             RemoteUiState.Probing -> "正在探测…"

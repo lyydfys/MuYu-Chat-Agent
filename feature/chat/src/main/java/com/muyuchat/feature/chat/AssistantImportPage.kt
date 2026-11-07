@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 
 import android.content.ContentValues
 import android.content.Context
@@ -299,7 +300,7 @@ internal fun AssistantImportPage(
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(24.dp)
         ) {
-            OutlinedTextField(
+            McaTextField(
                 value = rawJson,
                 onValueChange = { rawJson = it },
                 label = { Text("角色卡 JSON") },

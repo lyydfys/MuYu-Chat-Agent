@@ -3,6 +3,7 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
@@ -264,7 +265,7 @@ internal fun ImageInputGenerationParametersPanel(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    OutlinedTextField(
+                    McaTextField(
                         value = widthText,
                         onValueChange = { value -> if (!fixedWidth) onWidthTextChange(value) },
                         label = { Text("宽度") },
@@ -283,7 +284,7 @@ internal fun ImageInputGenerationParametersPanel(
                         readOnly = fixedWidth,
                         modifier = Modifier.weight(1f).testTag("image.width")
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = heightText,
                         onValueChange = { value -> if (!fixedHeight) onHeightTextChange(value) },
                         label = { Text("高度") },
@@ -307,7 +308,7 @@ internal fun ImageInputGenerationParametersPanel(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    OutlinedTextField(
+                    McaTextField(
                         value = stepsText,
                         onValueChange = onStepsTextChange,
                         label = { Text("步数") },
@@ -317,14 +318,14 @@ internal fun ImageInputGenerationParametersPanel(
                         singleLine = true,
                         modifier = Modifier.weight(1f).testTag("image.steps")
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = cfgScaleText,
                         onValueChange = onCfgScaleTextChange,
                         label = { Text("CFG") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = seedText,
                         onValueChange = onSeedTextChange,
                         label = { Text("Seed") },
@@ -407,7 +408,7 @@ internal fun ImageInputUltraFixPanel(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (supportsClipSkip) {
-                        OutlinedTextField(
+                        McaTextField(
                             value = clipSkipText,
                             onValueChange = onClipSkipTextChange,
                             label = { Text("CLIP skip") },
@@ -454,7 +455,7 @@ internal fun ImageInputUltraFixPanel(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            OutlinedTextField(
+                            McaTextField(
                                 value = ultraFixRefinementStepsText,
                                 onValueChange = onUltraFixRefinementStepsTextChange,
                                 label = { Text("总精修步数") },
@@ -462,7 +463,7 @@ internal fun ImageInputUltraFixPanel(
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
-                            OutlinedTextField(
+                            McaTextField(
                                 value = ultraFixInversionStepsText,
                                 onValueChange = onUltraFixDenoisingStepsTextChange,
                                 label = { Text("实际去噪步数") },
@@ -486,7 +487,7 @@ internal fun ImageInputUltraFixPanel(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            OutlinedTextField(
+                            McaTextField(
                                 value = ultraFixTileSizeText,
                                 onValueChange = onUltraFixTileSizeTextChange,
                                 label = { Text("分块尺寸") },
@@ -503,7 +504,7 @@ internal fun ImageInputUltraFixPanel(
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
-                            OutlinedTextField(
+                            McaTextField(
                                 value = ultraFixOverlapText,
                                 onValueChange = onUltraFixOverlapTextChange,
                                 label = { Text("重叠比例") },

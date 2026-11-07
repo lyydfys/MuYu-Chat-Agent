@@ -3,6 +3,7 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaIconButton
 
 import androidx.compose.foundation.layout.Arrangement
@@ -112,7 +113,7 @@ internal fun ImageLibraryToolbar(
         query.takeIf(String::isNotBlank)
     ).size
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedTextField(
+        McaTextField(
             value = query,
             onValueChange = onQueryChange,
             label = { Text("搜索图片、提示词或模型") },

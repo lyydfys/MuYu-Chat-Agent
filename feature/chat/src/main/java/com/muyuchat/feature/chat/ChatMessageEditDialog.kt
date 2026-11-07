@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaTextField
 
 /**
  * Edits the text of one already-sent user message and re-submits it.
@@ -50,7 +51,7 @@ internal fun ChatMessageEditDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                OutlinedTextField(
+                McaTextField(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier

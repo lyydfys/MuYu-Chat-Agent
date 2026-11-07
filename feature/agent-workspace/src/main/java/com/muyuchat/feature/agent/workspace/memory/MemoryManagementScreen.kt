@@ -38,6 +38,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaSwitch
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.feature.agent.workspace.ui.AgentInlineBanner
 import com.muyuchat.feature.agent.workspace.ui.AgentPrimaryButton
@@ -394,7 +395,7 @@ private fun SearchRow(state: MemoryManagementState, actions: MemoryManagementAct
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        OutlinedTextField(
+        McaTextField(
             value = state.query,
             onValueChange = actions.onQueryChange,
             modifier = Modifier
@@ -542,7 +543,7 @@ private fun EditorSection(editor: MemoryEditorUi, actions: MemoryManagementActio
             )
             return@Column
         }
-        OutlinedTextField(
+        McaTextField(
             value = editor.title,
             onValueChange = actions.onEditorTitleChange,
             modifier = Modifier.fillMaxWidth().testTag("memory.management.editor.title"),
@@ -551,7 +552,7 @@ private fun EditorSection(editor: MemoryEditorUi, actions: MemoryManagementActio
             enabled = !editor.saving
         )
         Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
+        McaTextField(
             value = editor.text,
             onValueChange = actions.onEditorTextChange,
             modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp).testTag("memory.management.editor.text"),
@@ -591,7 +592,7 @@ private fun EditorSection(editor: MemoryEditorUi, actions: MemoryManagementActio
 private fun ExtractionSection(state: MemoryManagementState, actions: MemoryManagementActions) {
     Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         AgentSectionHeader(title = "从文本提取记忆", trailing = "候选需人工接受")
-        OutlinedTextField(
+        McaTextField(
             value = state.extractionInput,
             onValueChange = actions.onExtractionInputChange,
             modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp).testTag("memory.management.extraction.input"),

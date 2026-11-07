@@ -34,6 +34,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LlamaAdvancedParams
 import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.McaIconSize
+import com.muyuchat.core.designsystem.McaTextField
 
 @Composable
 internal fun AdvancedParamsCard(
@@ -237,7 +238,7 @@ internal fun AdvancedParamsCard(
                 title = "模板与执行正确性 gate",
                 description = "模板/Jinja 会改变 role、prompt 与特殊 token。每次变化必须重跑完整正确性验证，不能进入纯性能搜索。"
             )
-            OutlinedTextField(
+            McaTextField(
                 value = params.chatTemplateMode,
                 onValueChange = { onParamsChange(params.copy(chatTemplateMode = it.ifBlank { "auto" })) },
                 modifier = Modifier.fillMaxWidth(),
@@ -266,7 +267,7 @@ internal fun AdvancedParamsCard(
                     )
                 }
             }
-            OutlinedTextField(
+            McaTextField(
                 value = params.advancedJson,
                 onValueChange = { onParamsChange(params.copy(advancedJson = it.ifBlank { "{}" })) },
                 modifier = Modifier.fillMaxWidth(),
@@ -408,7 +409,7 @@ private fun ContextLengthEditor(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        OutlinedTextField(
+        McaTextField(
             value = exactText,
             onValueChange = { input ->
                 exactText = input

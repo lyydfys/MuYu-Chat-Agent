@@ -3,6 +3,7 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaIcons
 import com.muyuchat.core.designsystem.McaSwitch
+import com.muyuchat.core.designsystem.McaTextField
 
 import android.content.ContentValues
 import android.content.Context
@@ -443,7 +444,7 @@ internal fun ContextLibraryPage(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
+                    McaTextField(
                         value = knowledgeBaseName,
                         onValueChange = { knowledgeBaseName = it.take(96) },
                         label = { Text("知识库名称") },

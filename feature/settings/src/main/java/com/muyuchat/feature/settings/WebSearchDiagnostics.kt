@@ -1,6 +1,7 @@
 package com.muyuchat.feature.settings
 
 import com.muyuchat.core.designsystem.*
+import com.muyuchat.core.designsystem.McaTextField
 
 import android.content.ClipData
 import android.content.Context
@@ -176,7 +177,7 @@ internal fun BackupProviderEditor(
                     )
                 }
             }
-            OutlinedTextField(
+            McaTextField(
                 value = endpoint,
                 onValueChange = onEndpointChange,
                 label = { Text("接口地址") },
@@ -184,7 +185,7 @@ internal fun BackupProviderEditor(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
-            OutlinedTextField(
+            McaTextField(
                 value = apiKey,
                 onValueChange = onApiKeyChange,
                 label = { Text(if (needsApiKey) "API Key" else "API Key（可选）") },

@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -19,6 +18,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.feature.agent.workspace.AgentWorkflowLaunchCheckUi
 import com.muyuchat.feature.agent.workspace.AgentWorkflowLaunchInputUi
 import com.muyuchat.feature.agent.workspace.AgentWorkflowLaunchUiState
@@ -169,7 +169,7 @@ private fun WorkflowInputField(
     onValueChange: (String) -> Unit
 ) {
     if (input.editable) {
-        OutlinedTextField(
+        McaTextField(
             value = value,
             onValueChange = onValueChange,
             label = {

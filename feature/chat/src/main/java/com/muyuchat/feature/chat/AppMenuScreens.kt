@@ -1,6 +1,7 @@
 package com.muyuchat.feature.chat
 
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 // The application menu pages, moved verbatim out of ChatScreen.kt.
 //
 // ChatScreen.kt held four unrelated page domains. The image workspace and the assistant auxiliary
@@ -380,7 +381,7 @@ internal fun McaAppMenuPage(
                     modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    OutlinedTextField(
+                    McaTextField(
                         value = summarySourceQuery,
                         onValueChange = { summarySourceQuery = it },
                         label = { Text("查找摘要事实或来源") },

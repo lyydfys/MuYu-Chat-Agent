@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.dsh.contract.console.DshTerminalOpenResult
 import com.muyuchat.core.dsh.contract.console.DshTerminalRead
 import com.muyuchat.core.dsh.contract.console.DshTerminalUiPort
@@ -180,7 +181,7 @@ fun DshTerminalPage(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
+            McaTextField(
                 value = input,
                 onValueChange = { input = it },
                 singleLine = true,

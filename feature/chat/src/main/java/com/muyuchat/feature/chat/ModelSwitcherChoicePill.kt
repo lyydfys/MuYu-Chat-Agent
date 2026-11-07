@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 
 import com.muyuchat.core.designsystem.McaIconSize
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
@@ -75,7 +76,7 @@ internal fun ModelChoicePill(
                             "设备或显存不足时，加载会给出具体错误，不会静默假装使用 GPU。",
                         style = MaterialTheme.typography.bodySmall
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = customGpuLayersText,
                         onValueChange = {
                             customGpuLayersText = it.filter(Char::isDigit).take(4)

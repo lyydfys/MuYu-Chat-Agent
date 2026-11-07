@@ -3,6 +3,7 @@ package com.muyuchat.feature.dsh.workspace.web
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaTextField
 
 import android.app.Activity
 import android.content.Context
@@ -478,7 +479,7 @@ private fun DshJsDialogHost(dialogs: DshJsDialogController) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(request.message, style = MaterialTheme.typography.bodyMedium)
                 if (request.kind == DshJsDialogKind.PROMPT) {
-                    OutlinedTextField(
+                    McaTextField(
                         value = text,
                         onValueChange = { text = it },
                         label = { Text("输入内容") },

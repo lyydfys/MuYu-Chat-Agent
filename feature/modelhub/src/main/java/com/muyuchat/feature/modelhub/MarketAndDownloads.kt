@@ -62,6 +62,7 @@ import com.muyuchat.core.download.isLiteRtLmModelCandidate
 import com.muyuchat.core.download.isVisionModelCandidate
 import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
@@ -79,7 +80,7 @@ internal fun MarketSection(
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
+                McaTextField(
                     value = state.hubQuery,
                     onValueChange = onHubQueryChange,
                     modifier = Modifier.weight(1f),
@@ -167,7 +168,7 @@ internal fun RemoteFilesSection(
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
+                McaTextField(
                     value = state.repoInput,
                     onValueChange = onRepoInputChange,
                     modifier = Modifier.weight(1f),
@@ -186,7 +187,7 @@ internal fun RemoteFilesSection(
         }
         if (state.remoteFiles.isNotEmpty()) {
             item {
-                OutlinedTextField(
+                McaTextField(
                     value = fileFilter,
                     onValueChange = { fileFilter = it },
                     modifier = Modifier.fillMaxWidth(),

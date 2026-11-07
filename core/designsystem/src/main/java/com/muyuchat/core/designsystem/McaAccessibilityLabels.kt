@@ -35,4 +35,13 @@ public object McaActionLabels {
 
     /** Open the overflow menu of the current surface. */
     public const val OPEN_MORE: String = "打开更多操作"
+
+    /**
+     * Empty a text field in one tap.
+     *
+     * Used by [McaTextField]'s clear affordance and by the few search bars that already carry their
+     * own variant, so the same action is not announced as "清空搜索" in one place and "清除" in
+     * another. Context-specific names may extend it ("清空搜索") but must start from this verb.
+     */
+    public const val CLEAR: String = "清空输入"
 }

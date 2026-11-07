@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.feature.agent.workspace.AgentWorkflowScheduleDraftUi
 import com.muyuchat.feature.agent.workspace.AgentWorkflowScheduleKind
 import com.muyuchat.feature.agent.workspace.AgentWorkflowScheduleUiState
@@ -213,7 +214,7 @@ private fun ScheduleDraftFields(
         }
         Spacer(Modifier.height(12.dp))
         when (draft.kind) {
-            AgentWorkflowScheduleKind.INTERVAL -> OutlinedTextField(
+            AgentWorkflowScheduleKind.INTERVAL -> McaTextField(
                 value = draft.everyMinutesText,
                 onValueChange = settings.onWorkflowScheduleMinutesChange,
                 label = { Text("间隔（分钟）") },
@@ -224,7 +225,7 @@ private fun ScheduleDraftFields(
                     .testTag("workflows.schedule.minutes")
             )
 
-            AgentWorkflowScheduleKind.DAILY, AgentWorkflowScheduleKind.WEEKLY -> OutlinedTextField(
+            AgentWorkflowScheduleKind.DAILY, AgentWorkflowScheduleKind.WEEKLY -> McaTextField(
                 value = draft.timeText,
                 onValueChange = settings.onWorkflowScheduleTimeChange,
                 label = { Text("时间（HH:mm）") },

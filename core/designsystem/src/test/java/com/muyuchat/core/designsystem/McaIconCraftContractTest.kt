@@ -93,13 +93,70 @@ class McaIconCraftContractTest {
     }
 
     private fun packagePrecedesImports(source: String): Boolean {
-        // Valid BOM and file annotations are preserved; comment/example directives are not code.
-        val code = source.removePrefix("\uFEFF").replace(
-            Regex("(?s)/\\*.*?\\*/|//[^\\r\\n]*|\"\"\".*?\"\"\"|\"(?:\\\\.|[^\"\\\\])*\""),
-        ) { match -> match.value.map { if (it == '\n') '\n' else ' ' }.joinToString("") }
-        val packageStatement = Regex("(?m)^[\\t ]*package[\\t ]+[\\w.]+").find(code) ?: return false
-        return Regex("(?m)^[\\t ]*import[\\t ]+").findAll(code)
-            .all { it.range.first > packageStatement.range.first }
+        // Hand-rolled scan instead of one whole-file regex: the previous pattern combined
+        // `"""(?s).*?"""` with `"(?:\\.|[^"\\])*"`, and on a large file the JVM matcher recursed
+        // until StackOverflowError. A lexer is linear, has no backtracking and states the intent
+        // ("skip comments and string literals, then look at real code") directly.
+        val body = source.removePrefix("\uFEFF")
+        val firstPackage = firstCodeLine(body, "package ")
+        if (firstPackage == null) return false
+        val firstImport = firstCodeLine(body, "import ")
+        return firstImport == null || firstImport > firstPackage
+    }
+
+    /**
+     * Index of the first real-code line starting with [keyword], skipping block comments, line
+     * comments, character literals and triple/plain string literals. Returns null when absent.
+     */
+    private fun firstCodeLine(source: String, keyword: String): Int? {
+        var index = 0
+        while (index < source.length) {
+            when {
+                source.startsWith("/*", index) -> {
+                    val close = source.indexOf("*/", index + 2)
+                    if (close < 0) return null
+                    index = close + 2
+                }
+
+                source.startsWith("//", index) -> {
+                    val newline = source.indexOf('\n', index + 2)
+                    if (newline < 0) return null
+                    index = newline + 1
+                }
+
+                source.startsWith("\"\"\"", index) -> {
+                    val close = source.indexOf("\"\"\"", index + 3)
+                    if (close < 0) return null
+                    index = close + 3
+                }
+
+                source[index] == '"' || source[index] == '\'' -> {
+                    val quote = source[index]
+                    var cursor = index + 1
+                    while (cursor < source.length) {
+                        if (source[cursor] == '\\') {
+                            cursor += 2
+                            continue
+                        }
+                        if (source[cursor] == quote) break
+                        cursor += 1
+                    }
+                    index = cursor + 1
+                }
+
+                isLineStart(source, index) && source.startsWith(keyword, index) ->
+                    return index
+
+                else -> index += 1
+            }
+        }
+        return null
+    }
+
+    private fun isLineStart(source: String, index: Int): Boolean {
+        var cursor = index - 1
+        while (cursor >= 0 && (source[cursor] == ' ' || source[cursor] == '\t')) cursor -= 1
+        return cursor < 0 || source[cursor] == '\n'
     }
 
     private fun productSource(path: String): String = File(mcaRepositoryRoot(), path).readText()

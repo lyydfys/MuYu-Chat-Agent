@@ -44,6 +44,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaIconSize
+import com.muyuchat.core.designsystem.McaTextField
 import kotlinx.coroutines.launch
 
 @Composable
@@ -221,7 +222,7 @@ internal fun CloudModelEditorPage(
                         }
                         McaSwitch(checked = cloud.enabled, onCheckedChange = onEnabledChange, enabled = enabled, contentDescription = "启用云端模型")
                     }
-                    OutlinedTextField(
+                    McaTextField(
                         value = cloud.displayName,
                         onValueChange = onDisplayNameChange,
                         modifier = Modifier.fillMaxWidth(),
@@ -230,7 +231,7 @@ internal fun CloudModelEditorPage(
                         label = { Text("显示名称") },
                         placeholder = { Text("可选，不填则使用模型名") }
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = if (isImage) cloud.imageModel else cloud.chatModel,
                         onValueChange = if (isImage) onImageModelChange else onChatModelChange,
                         modifier = Modifier.fillMaxWidth(),
@@ -428,7 +429,7 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = cloud.baseUrl,
                         onValueChange = onBaseUrlChange,
                         modifier = Modifier.fillMaxWidth(),
@@ -442,7 +443,7 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                         }
                     )
                     if (isImage) {
-                        OutlinedTextField(
+                        McaTextField(
                             value = cloud.imageEndpointPath,
                             onValueChange = onImageEndpointPathChange,
                             modifier = Modifier.fillMaxWidth(),
@@ -452,7 +453,7 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                             placeholder = { Text(imageEndpointPlaceholder(cloud.imageApiFormat)) },
                             supportingText = { Text("可以留空，MCA 会按当前协议补齐默认路径。") }
                         )
-                        OutlinedTextField(
+                        McaTextField(
                             value = cloud.imageSize,
                             onValueChange = onImageSizeChange,
                             modifier = Modifier.fillMaxWidth(),
@@ -463,7 +464,7 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                             supportingText = { Text("可以留空，默认使用 1024x1024。") }
                         )
                     }
-                    OutlinedTextField(
+                    McaTextField(
                         value = cloud.apiKey,
                         onValueChange = onApiKeyChange,
                         modifier = Modifier.fillMaxWidth(),

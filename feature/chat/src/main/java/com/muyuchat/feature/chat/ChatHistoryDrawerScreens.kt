@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 
 import com.muyuchat.core.designsystem.McaTonal
 import com.muyuchat.core.designsystem.McaShape
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.McaPlateSize
 import com.muyuchat.core.designsystem.McaIconPlate
 import com.muyuchat.core.designsystem.McaIcons
@@ -277,7 +278,7 @@ internal fun ChatHistoryDrawer(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                OutlinedTextField(
+                                McaTextField(
                                     value = query,
                                     onValueChange = { query = it },
                                     modifier = Modifier
@@ -601,7 +602,7 @@ internal fun ChatHistoryDrawer(
             onDismissRequest = { renameTarget = null },
             title = { Text("重命名对话") },
             text = {
-                OutlinedTextField(
+                McaTextField(
                     value = renameText,
                     onValueChange = { renameText = it },
                     label = { Text("对话标题") },

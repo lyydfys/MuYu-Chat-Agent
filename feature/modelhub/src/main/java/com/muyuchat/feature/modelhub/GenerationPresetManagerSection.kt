@@ -50,6 +50,7 @@ import com.muyuchat.core.designsystem.McaIconSize
 import com.muyuchat.core.designsystem.McaIcons
 import com.muyuchat.core.designsystem.McaPlateSize
 import com.muyuchat.core.designsystem.McaShape
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.modelstore.ModelManifest
 
 /**
@@ -524,7 +525,7 @@ private fun PresetBindingDialogContent(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        OutlinedTextField(
+        McaTextField(
             value = name,
             onValueChange = onNameChange,
             label = { Text("预设名称") },

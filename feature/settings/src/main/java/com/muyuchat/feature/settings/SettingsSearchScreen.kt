@@ -1,6 +1,7 @@
 package com.muyuchat.feature.settings
 
 import com.muyuchat.core.designsystem.*
+import com.muyuchat.core.designsystem.McaTextField
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -282,7 +283,7 @@ fun SearchSettingsScreen(
                             )
                         }
                     }
-                    OutlinedTextField(
+                    McaTextField(
                         value = endpoint,
                         onValueChange = { endpoint = it },
                         label = { Text(if (provider == "SEARXNG") "SearxNG 地址" else "搜索接口地址") },
@@ -290,7 +291,7 @@ fun SearchSettingsScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = apiKey,
                         onValueChange = { apiKey = it },
                         label = { Text(if (needsApiKey) "API Key" else "API Key（可选）") },
@@ -360,7 +361,7 @@ fun SearchSettingsScreen(
                             onApiKeyChange = { backup2ApiKey = it }
                         )
                     }
-                    OutlinedTextField(
+                    McaTextField(
                         value = maxResultsText,
                         onValueChange = { maxResultsText = it.filter { ch -> ch.isDigit() }.take(1).ifBlank { "" } },
                         label = { Text("结果数量") },
@@ -417,7 +418,7 @@ fun SearchSettingsScreen(
                         configured = state.configured,
                         busy = state.operationBusy
                     )
-                    OutlinedTextField(
+                    McaTextField(
                         value = testQuery,
                         onValueChange = { testQuery = it },
                         label = { Text("测试问题") },

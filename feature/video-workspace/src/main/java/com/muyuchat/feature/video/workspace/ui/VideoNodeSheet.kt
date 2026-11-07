@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.video.contract.VideoNode
 import com.muyuchat.core.video.contract.VideoNodeValue
 import com.muyuchat.core.video.contract.VideoWorkflowIssue
@@ -182,7 +183,7 @@ private fun NodeFieldRow(
             val initial = (current as? VideoNodeValue.TextValue)?.text.orEmpty()
             var text by remember(node.nodeId, field.name) { mutableStateOf(initial) }
             LaunchedEffect(initial) { if (text != initial && initial.isNotEmpty()) text = initial }
-            OutlinedTextField(
+            McaTextField(
                 value = text,
                 onValueChange = { value ->
                     text = value
@@ -191,15 +192,14 @@ private fun NodeFieldRow(
                 label = { Text(field.label) },
                 supportingText = field.hint?.let { hint -> { Text(hint) } },
                 minLines = if (field.kind == FieldKind.PROMPT_TEXT) 2 else 1,
-                modifier = Modifier.fillMaxWidth(),
-            )
+                modifier = Modifier.fillMaxWidth())
         }
 
         FieldKind.LONG, FieldKind.SEED -> {
             val initial = (current as? VideoNodeValue.LongValue)?.value?.toString().orEmpty()
             var text by remember(node.nodeId, field.name) { mutableStateOf(initial) }
             var parseError by remember { mutableStateOf(false) }
-            OutlinedTextField(
+            McaTextField(
                 value = text,
                 onValueChange = { value ->
                     text = value
@@ -220,8 +220,7 @@ private fun NodeFieldRow(
                         else -> {}
                     }
                 },
-                modifier = Modifier.fillMaxWidth(),
-            )
+                modifier = Modifier.fillMaxWidth())
         }
 
         FieldKind.DECIMAL -> {
@@ -231,7 +230,7 @@ private fun NodeFieldRow(
             }
             var text by remember(node.nodeId, field.name) { mutableStateOf(initial) }
             var parseError by remember { mutableStateOf(false) }
-            OutlinedTextField(
+            McaTextField(
                 value = text,
                 onValueChange = { value ->
                     text = value
@@ -252,8 +251,7 @@ private fun NodeFieldRow(
                         else -> {}
                     }
                 },
-                modifier = Modifier.fillMaxWidth(),
-            )
+                modifier = Modifier.fillMaxWidth())
         }
     }
 }

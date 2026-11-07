@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.dsh.contract.console.DshConsoleIntent
 import com.muyuchat.core.dsh.contract.console.DshConsoleOfficialSurface
 import com.muyuchat.feature.dsh.workspace.DshConsoleRow
@@ -691,7 +692,7 @@ private fun DshPluginAdminBlock(
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.primary
     )
-    OutlinedTextField(
+    McaTextField(
         value = name,
         onValueChange = { name = it },
         singleLine = true,
@@ -699,7 +700,7 @@ private fun DshPluginAdminBlock(
         label = { Text("插件名，例如 dsh-plugin-market 或 @scope/name") },
         modifier = Modifier.fillMaxWidth()
     )
-    OutlinedTextField(
+    McaTextField(
         value = version,
         onValueChange = { version = it },
         singleLine = true,

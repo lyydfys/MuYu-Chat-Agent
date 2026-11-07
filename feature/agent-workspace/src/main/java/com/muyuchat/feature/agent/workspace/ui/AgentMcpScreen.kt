@@ -37,6 +37,7 @@ import com.muyuchat.core.designsystem.McaDialog
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaSwitch
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.feature.agent.workspace.AgentMcpAddDraftUi
 import com.muyuchat.feature.agent.workspace.AgentMcpOperationKind
 import com.muyuchat.feature.agent.workspace.AgentMcpUiItem
@@ -351,7 +352,7 @@ private fun McpAddDialog(
         title = { Text("添加 MCP 服务器") },
         text = {
             Column {
-                OutlinedTextField(
+                McaTextField(
                     value = draft.displayName,
                     onValueChange = onNameChange,
                     label = { Text("名称") },
@@ -363,7 +364,7 @@ private fun McpAddDialog(
                         .testTag("mcp.add.name")
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
+                McaTextField(
                     value = draft.endpoint,
                     onValueChange = onEndpointChange,
                     label = { Text("HTTPS 端点") },
@@ -376,7 +377,7 @@ private fun McpAddDialog(
                         .testTag("mcp.add.endpoint")
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
+                McaTextField(
                     value = draft.bearerToken,
                     onValueChange = onTokenChange,
                     label = { Text("Bearer token（可选）") },

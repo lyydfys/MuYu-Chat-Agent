@@ -3,6 +3,7 @@ import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaChip
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaTextField
 
 import android.content.ContentValues
 import android.content.Context
@@ -384,7 +385,7 @@ internal fun AssistantMemoryManagerDialog(
                         label = { Text("角色进度") }
                     )
                 }
-                OutlinedTextField(
+                McaTextField(
                     value = content,
                     onValueChange = { content = it.take(4000) },
                     label = {

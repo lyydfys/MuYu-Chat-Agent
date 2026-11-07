@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,7 +51,7 @@ internal fun ChatImageTranslationDraftDialog(
                         Text(original, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
-                OutlinedTextField(
+                McaTextField(
                     value = positive,
                     onValueChange = { positive = it },
                     label = { Text("使用的正向提示词") },
@@ -58,7 +59,7 @@ internal fun ChatImageTranslationDraftDialog(
                     minLines = 3,
                     maxLines = 7
                 )
-                OutlinedTextField(
+                McaTextField(
                     value = negative,
                     onValueChange = { negative = it },
                     label = { Text("使用的负向提示词") },
@@ -104,7 +105,7 @@ internal fun ChatImageActionDraftDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(draft.reason, style = MaterialTheme.typography.bodyMedium)
-                OutlinedTextField(
+                McaTextField(
                     value = editedText,
                     onValueChange = { editedText = it },
                     label = { Text("原始描述") },

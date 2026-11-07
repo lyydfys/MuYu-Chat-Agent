@@ -72,6 +72,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.core.designsystem.mcaPressScale
 import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.designsystem.McaIconSize
@@ -287,6 +288,9 @@ internal fun ImageNegativePromptTagField(
     }
 
     Column(modifier = modifier) {
+        // TextFieldValue（含选区与组合状态）不能走共享封装：McaTextField 只接收 String，
+        // 这是为了让清空按钮对所有调用点都是同一个契约。此处需要保留选区语义，
+        // 因此显式用 OutlinedTextField 并自行提供清空行为。
         OutlinedTextField(
             value = fieldValue,
             onValueChange = ::applyFieldValue,
@@ -635,7 +639,7 @@ private fun ImagePromptTranslationDraft(
         }
         if (translatedSource == source && draft != null) {
             Text("$label 英文草稿（可编辑）", style = MaterialTheme.typography.labelSmall)
-            OutlinedTextField(
+            McaTextField(
                 value = draft.orEmpty(), onValueChange = { draft = it },
                 modifier = Modifier.fillMaxWidth().testTag("$testTagPrefix.draft"),
                 minLines = 2, maxLines = 4

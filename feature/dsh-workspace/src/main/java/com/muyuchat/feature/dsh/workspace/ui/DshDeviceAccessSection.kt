@@ -27,6 +27,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaTextField
 import com.muyuchat.feature.dsh.workspace.DshConsoleRow
 import com.muyuchat.feature.dsh.workspace.DshConsoleTone
 import com.muyuchat.feature.dsh.workspace.device.DshAdbAutoConnectPolicy
@@ -134,7 +135,7 @@ internal fun DshDeviceAccessSectionContent(
             view = state.adb
         ) {
             val endpointError = state.adbEndpointError
-            OutlinedTextField(
+            McaTextField(
                 value = state.adbEndpoint,
                 onValueChange = onAdbEndpointChange,
                 label = { Text("ADB 端点") },
@@ -409,7 +410,7 @@ private fun DshAdbPairingControls(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.error
         )
-        OutlinedTextField(
+        McaTextField(
             value = state.pairingEndpoint,
             onValueChange = onPairingEndpointChange,
             label = { Text("配对端点 host:port") },
@@ -418,7 +419,7 @@ private fun DshAdbPairingControls(
             textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
             modifier = Modifier.fillMaxWidth()
         )
-        OutlinedTextField(
+        McaTextField(
             value = state.pairingCode,
             onValueChange = onPairingCodeChange,
             label = { Text("6 位配对码") },
