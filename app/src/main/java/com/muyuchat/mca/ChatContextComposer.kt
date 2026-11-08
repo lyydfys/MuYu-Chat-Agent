@@ -112,6 +112,30 @@ internal fun boundedTraceName(value: String?): String? = value
 /** Longest name kept in a trace; longer names are cut, never dropped. */
 internal const val MCA_TRACE_NAME_MAX_CHARS = 120
 
+/**
+ * The projection of a chat transcript into the messages the model may see.
+ *
+ * Rules, in order:
+ *  - `agentTrace == null` → the message is returned as the *same instance*, so a pure role-chat
+ *    transcript comes back identical (no copy, no field touched, no state change).
+ *  - `agentTrace.kind == "summary"` **and** a non-blank `finalSummary` → kept, with the raw content
+ *    replaced by the summary. The trace itself is preserved so a later stage can still recognise
+ *    the message as agent-produced.
+ *  - everything else carrying a trace → dropped.
+ *
+ * The mapping is applied before budgets, retrieval and the trace hash, so every downstream rule
+ * sees exactly the list the model sees.
+ */
+internal fun List<ChatMessage>.agentContextProjection(): List<ChatMessage> {
+    if (none { it.agentTrace != null }) return this
+    return mapNotNull { message ->
+        val trace = message.agentTrace ?: return@mapNotNull message
+        if (!trace.carriesContextSummary) return@mapNotNull null
+        val summary = trace.finalSummary
+        if (message.content == summary) message else message.copy(content = summary)
+    }
+}
+
 data class ChatRuntimeContextPlan(
     val runtimeSystemContext: String = "",
     val worldBook: WorldBookSelection = WorldBookSelection(),
@@ -143,6 +167,12 @@ class ChatContextComposer(
         knowledgeBaseIds: Set<String>,
         fileContextEnabled: Boolean = true
     ): ChatRuntimeContextPlan {
+        // Agent turns are transcript, not conversation: a step/approval/question/artifact message
+        // must never be replayed to the model, and a turn summary may replace its raw content.
+        // The projection is applied only here, so every downstream rule (budgets, ordering, the
+        // knowledge query, the trace) sees the same messages the model will see. Messages without
+        // a trace are passed through unchanged: the role-chat path is byte-for-byte the same.
+        val contextMessages = messages.agentContextProjection()
         val promptBudget = localContextWindowBudget(params.nCtx).promptBudgetTokens
         if (promptBudget <= 0) return ChatRuntimeContextPlan()
         // Dynamic data is deliberately a minority of the usable window so it
@@ -154,13 +184,13 @@ class ChatContextComposer(
         val retrievalBudget = dynamicBudget - loreBudget
         val lore = WorldBookResolver.select(
             books = sources.loadWorldBooks(),
-            messages = messages,
+            messages = contextMessages,
             assistantId = assistantId,
             chatSessionId = chatSessionId,
             tokenBudget = loreBudget
         )
         val knowledge = if (fileContextEnabled) {
-            val query = messages.asReversed()
+            val query = contextMessages.asReversed()
                 .firstOrNull { it.role == Role.USER && it.content.isNotBlank() }
                 ?.content
                 ?.let(::boundedQuery)

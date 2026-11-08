@@ -88,6 +88,12 @@ fun extendedAgentToolCatalog(
     deviceUrlLauncher: DeviceUrlLauncher? = null,
     deviceClipboardSink: DeviceClipboardSink? = null,
     deviceSettingsLauncher: DeviceAppSettingsLauncher? = null,
+    /**
+     * Screen lane. Registered whenever supplied; a disabled accessibility service answers
+     * `SCREEN_SERVICE_DISABLED` per call instead of the tool disappearing from the catalog, so the
+     * model can tell the user what to enable.
+     */
+    deviceScreenPort: AgentScreenPort? = null,
     httpClient: AgentHttpTextClient? = null,
     httpGate: AgentHttpGetGate = AgentHttpGetGate.DENY_ALL,
     terminalSandbox: AgentTerminalSandbox = AgentTerminalSandbox.UNAVAILABLE,
@@ -105,6 +111,7 @@ fun extendedAgentToolCatalog(
     if (deviceSettingsLauncher != null) {
         executors += AgentDeviceNotificationSettingsTool(deviceSettingsLauncher)
     }
+    if (deviceScreenPort != null) executors += AgentScreenTool(deviceScreenPort)
     if (httpClient != null) executors += AgentHttpGetTool(httpClient, httpGate)
     if (terminalSandbox.isAvailable) executors += AgentTerminalExecTool(terminalSandbox, terminalWhitelist)
     return BuiltInAgentToolCatalog(executors)

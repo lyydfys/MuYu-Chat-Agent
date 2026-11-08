@@ -377,7 +377,12 @@ internal class AgentHostAssembly(
             deviceUrlLauncher = com.muyuchat.mca.agent.tools.DeviceUrlLauncher.android(application),
             deviceClipboardSink = com.muyuchat.mca.agent.tools.DeviceClipboardSink.android(application),
             deviceSettingsLauncher =
-                com.muyuchat.mca.agent.tools.DeviceAppSettingsLauncher.android(application)
+                com.muyuchat.mca.agent.tools.DeviceAppSettingsLauncher.android(application),
+            // `device.screen` rides the app's existing accessibility engine: the same
+            // DshA11yController the DSH capability lane uses, so there is exactly one tapper and one
+            // typer in the app. Registered unconditionally — with the service disabled every call
+            // answers SCREEN_SERVICE_DISABLED instead of silently succeeding.
+            deviceScreenPort = com.muyuchat.mca.agent.tools.AndroidAgentScreenPort()
         )
             .augmentedWithPackageTools { packageExecutorSnapshot.current() }
         val skillCatalogProvider = RunScopedSkillCatalogProvider(

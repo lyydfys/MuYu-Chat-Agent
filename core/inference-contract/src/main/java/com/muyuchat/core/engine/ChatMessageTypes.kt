@@ -20,8 +20,45 @@ data class ChatMessage(
     val pinned: Boolean = false,
     /** Exact local retrieval snapshot used for this message; absent in legacy records. */
     val contextAssemblyTraceJson: String? = null,
+    /**
+     * Present when this message is an agent turn (a step, an approval request, a question, an
+     * artifact or a turn summary) rather than a chat turn.
+     *
+     * The context composer drops such messages from the model context: an agent's intermediate
+     * steps are transcript, not conversation, so replaying them would both bloat the prompt and
+     * teach the model to answer with protocol noise. Only a [AgentTurnTrace.kind] `summary` with a
+     * non-blank [AgentTurnTrace.finalSummary] survives, replacing the raw content with that summary.
+     */
+    val agentTrace: AgentTurnTrace? = null,
     val id: String = java.util.UUID.randomUUID().toString()
 )
+
+/**
+ * Why one [ChatMessage] belongs to an agent turn, and what the model may see of it.
+ *
+ * A pure value: no Android type, no behaviour beyond the one derived predicate, so both the engine
+ * contract and its tests stay platform-free. [kind] is the wire value of the agent stage
+ * (`step` / `approval` / `question` / `artifact` / `summary`); unknown stages are treated as
+ * non-summary, which means "drop from context" rather than "trust it".
+ */
+data class AgentTurnTrace(
+    val turnId: String,
+    val kind: String,
+    /** The only part of an agent turn that may enter a later prompt, and only for [SUMMARY]. */
+    val finalSummary: String = ""
+) {
+    /** True when this turn may enter the model context, using [finalSummary] as its content. */
+    val carriesContextSummary: Boolean
+        get() = kind == SUMMARY && finalSummary.isNotBlank()
+
+    companion object {
+        /** Wire value of the one stage that is allowed into the model context. */
+        const val SUMMARY: String = "summary"
+
+        /** The stages the console/agent layer can produce. */
+        val KNOWN_KINDS: Set<String> = setOf("step", "approval", "question", "artifact", SUMMARY)
+    }
+}
 
 data class ChatSourceReference(
     val title: String = "",

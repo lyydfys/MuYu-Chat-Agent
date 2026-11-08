@@ -24,6 +24,7 @@ object AgentToolNormalizerRoutes {
             setOf(AgentDeviceNotificationTool.TOOL_KEY) to AgentDeviceNotificationArgumentNormalizer(),
             setOf(AgentDeviceOpenUrlTool.TOOL_KEY) to AgentDeviceOpenUrlArgumentNormalizer(),
             setOf(AgentDeviceClipboardTool.TOOL_KEY) to AgentDeviceClipboardArgumentNormalizer(),
+            setOf(AgentScreenTool.TOOL_KEY) to AgentScreenArgumentNormalizer(),
             setOf(
                 AgentExtendedToolArgumentNormalizer.WORKSPACE_WRITE_TEXT,
                 AgentExtendedToolArgumentNormalizer.WORKSPACE_EDIT_TEXT,
