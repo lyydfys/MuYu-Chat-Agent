@@ -12,20 +12,18 @@ import com.muyuchat.core.engine.ChatMessage
  * so the runtime never has to hand a whole aggregate across the boundary, and so the chat side can
  * be implemented without the agent package leaking into one another.
  *
- * ## Status: mounted, intentionally not wired
+ * ## Status: mounted and wired
  *
  * The runtime mount point exists (`AgentRunOwner.appendTerminalEventIfNeeded`, the single
- * `RUN_TERMINAL` write) and the production composition passes no implementation, so
- * [NoAgentTurnSummarySink] is what runs today. The reason is structural, not a missing call site:
- * an Agent task has **no chat session binding**. `CreateAgentTask`, `AgentTask`, `AgentRun` and
- * `AgentRunPolicy` carry no conversation identifier, and nothing in the app records one, so
- * [chatSessionId] can never be resolved for a real run. Writing a message anyway would either
- * orphan it or attach an Agent summary to whichever conversation happens to be active, which is
- * exactly the cross-conversation leak the `agentTrace` filter was added to prevent.
+ * `RUN_TERMINAL` write) and `AgentHostAssembly` passes `RoomAgentTurnSummarySink`. The blocker
+ * that used to prevent this - an Agent task having no chat session binding - is gone: the app
+ * records a durable task -> conversation mapping (`FileAgentTaskChatBindingStore`) when the user
+ * starts a task from a conversation, so `chatSessionId` resolves for a real run.
  *
- * Wiring this up needs a product decision first: either a durable `task -> chatSessionId` binding
- * written when the user starts a task from a conversation, or an explicit "agent tasks have no
- * conversation" answer that turns this sink into a no-op permanently.
+ * Two terminal states report here, for two different reasons: SUCCEEDED (its final answer may
+ * re-enter later prompts as the one carried-over summary) and PAUSED (the user pressed stop, so
+ * the chat gets a wrap-up line that offers "say continue" but never enters the prompt).
+ * FAILED / CANCELLED / SUPERSEDED / INTERRUPTED deliberately write nothing.
  */
 fun interface AgentTurnSummarySink {
     /**

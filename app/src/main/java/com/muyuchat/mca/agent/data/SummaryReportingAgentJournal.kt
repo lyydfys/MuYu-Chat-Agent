@@ -41,9 +41,14 @@ class SummaryReportingAgentJournal(
                 }
                 ?.runId
 
+            // A paused run is settled-but-continuable, not terminal: the user pressed stop and the
+            // chat needs the wrap-up line so "say continue" is a visible affordance. Every other
+            // state (FAILED / CANCELLED / SUPERSEDED / INTERRUPTED) stays out -- an aborted attempt's
+            // transcript ends in an error, and reporting it as a conclusion would be a lie.
             is UpdateRunTransition ->
                 command.run.runId.takeIf {
-                    command.run.state == com.muyuchat.core.agent.contract.AgentRunState.SUCCEEDED
+                    command.run.state == com.muyuchat.core.agent.contract.AgentRunState.SUCCEEDED ||
+                        command.run.state == com.muyuchat.core.agent.contract.AgentRunState.PAUSED
                 }
 
             is CreateRunTransition -> null

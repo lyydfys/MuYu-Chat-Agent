@@ -43,11 +43,22 @@ class RoomAgentTurnSummarySink(
         val snapshot = journal.readRun(runId) ?: return
         val run = snapshot.run
         val events = readAllEvents(runId)
-        val message = AgentTurnSummaryWriter.messageFor(
-            run = run,
-            events = events,
-            chatSessionId = chatSessionId,
-            createdAtMillis = nowMillis()
+        // Two different questions, two different writers: a succeeded run answers "what did it
+        // conclude" (and that answer may re-enter later prompts), while a paused run — the user
+        // pressed stop — answers "where did it stop, and can I say continue" without ever being fed
+        // forward as a conclusion.
+        val message = (
+            AgentTurnSummaryWriter.messageFor(
+                run = run,
+                events = events,
+                chatSessionId = chatSessionId,
+                createdAtMillis = nowMillis()
+            ) ?: AgentStopHandoffWriter.messageFor(
+                run = run,
+                events = events,
+                chatSessionId = chatSessionId,
+                createdAtMillis = nowMillis()
+            )
         ) ?: return
 
         // A run reported twice must not produce two bubbles.
