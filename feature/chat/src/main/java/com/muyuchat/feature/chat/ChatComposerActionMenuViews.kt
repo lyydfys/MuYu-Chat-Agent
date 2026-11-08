@@ -101,6 +101,9 @@ internal fun CompactInputActionMenu(
     onFile: () -> Unit,
     onLibrary: () -> Unit,
     onImagePromptMode: () -> Unit,
+    /** Agent mode is mutually exclusive with image-prompt and research mode (see [ChatComposerModes]). */
+    agentMode: Boolean,
+    onToggleAgentMode: () -> Unit,
     assistantImageToolAvailable: Boolean,
     assistantImageToolUnavailableReason: String,
     assistantImageToolAutoApproval: Boolean,
@@ -219,6 +222,16 @@ internal fun CompactInputActionMenu(
                             ComposerMenuMetrics.SHEET_ROW_SPACING_DP.dp
                         )
                     ) {
+                        CompactInputActionRow(
+                            icon = { Icon(McaIcons.Build, contentDescription = null, modifier = Modifier.size(ComposerMenuMetrics.ROW_ICON_GLYPH_DP.dp)) },
+                            label = ChatComposerModes.agentMenuLabel(agentMode),
+                            subtitle = ChatComposerModes.agentMenuSubtitle(agentMode),
+                            actionable = menu.menu.acceptsActions,
+                            onClick = {
+                                haptics.tick()
+                                menu.runMenuAction(onToggleAgentMode)
+                            }
+                        )
                         CompactInputActionRow(
                             icon = { Icon(McaIcons.Image, contentDescription = null, modifier = Modifier.size(ComposerMenuMetrics.ROW_ICON_GLYPH_DP.dp)) },
                             label = if (imagePromptMode) "退出聊天生图" else "在聊天中生成图片",

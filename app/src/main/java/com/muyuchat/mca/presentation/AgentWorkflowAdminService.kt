@@ -1,4 +1,4 @@
-﻿package com.muyuchat.mca.presentation
+package com.muyuchat.mca.presentation
 
 import com.muyuchat.core.agent.contract.AgentModelBinding
 import com.muyuchat.core.agent.contract.AgentRunPolicy
@@ -605,10 +605,13 @@ class AgentWorkflowAdminService(
         definitionId = RecipeWorkflowDefinitionStore.recipeId(entry.definitionId)
             ?.let { "recipe-$it" } ?: entry.definitionId,
         version = entry.version,
-        trigger = if (entry.trigger == WorkflowTriggerKind.SCHEDULE) {
-            com.muyuchat.feature.agent.workspace.workflow.WorkflowRunTrigger.SCHEDULE
-        } else {
-            com.muyuchat.feature.agent.workspace.workflow.WorkflowRunTrigger.MANUAL
+        trigger = when (entry.trigger) {
+            WorkflowTriggerKind.SCHEDULE ->
+                com.muyuchat.feature.agent.workspace.workflow.WorkflowRunTrigger.SCHEDULE
+            WorkflowTriggerKind.INTENT ->
+                com.muyuchat.feature.agent.workspace.workflow.WorkflowRunTrigger.INTENT
+            WorkflowTriggerKind.MANUAL ->
+                com.muyuchat.feature.agent.workspace.workflow.WorkflowRunTrigger.MANUAL
         },
         slotMillis = entry.slotMillis,
         startedAtMillis = entry.startedAtMillis,

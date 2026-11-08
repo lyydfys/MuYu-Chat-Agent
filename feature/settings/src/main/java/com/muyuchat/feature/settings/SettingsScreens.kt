@@ -85,6 +85,8 @@ import androidx.compose.ui.unit.sp
 import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.McaIconSize
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.appearance.McaAppearanceSection
+import com.muyuchat.core.designsystem.appearance.McaAppearanceThemeChoice
 import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.RuntimeStats
@@ -254,13 +256,51 @@ data class WebSearchBackupProviderDraft(
     val apiKey: String
 )
 
-private enum class SettingsSection(val title: String, val summary: String) {
-    RUNTIME("运行", "模型加载、生成参数、后端与内存。"),
-    LOGS("日志与诊断", "运行日志、API 日志与诊断导出。"),
-    PRIVACY("隐私与数据", "本机数据清理与缓存边界。"),
-    SEARCH("联网检索", "搜索服务、触发策略与来源质量。"),
-    EXPERIMENTS("实验功能", "仍在打磨的能力，可能随版本调整。"),
-    ABOUT("关于", "版本更新、开源许可与项目信息。")
+/**
+ * Dashboard sections in render order. Enum order *is* the user-visible order, so the sequence is a
+ * contract (see SettingsAppearanceSectionContractTest).
+ *
+ * [APPEARANCE] sits after [SEARCH] and before [EXPERIMENTS]: choosing light/dark is a high-frequency,
+ * instantly visible preference, while half-finished capabilities stay last before [ABOUT].
+ *
+ * `internal` rather than `private` so the contract test can assert this order on the real enum
+ * instead of scraping the source text. Nothing outside this module can see it.
+ *
+ * This enum is the single source of truth for settings sections: the settings search index and every
+ * ordering/section test must reference it. Do not create a mirrored enum in another package.
+ *
+ * **Naming follows user intent, not technical modules** (`MCA_SETTINGS_IA.md` section 4). The old
+ * labels named implementation areas (the runtime page, the logs page, the experiments page); each card
+ * title now answers the question a user actually asks, and each summary states what the page really
+ * contains, so a card can no longer promise something the page does not render.
+ *
+ * Section 4's eight groups do not become eight cards: the interface/automation group has no settings
+ * page at all (the Local API screen lives in the API tab, and section 5.7 forbids moving it), and the
+ * device/peripherals group still lives inside the privacy page because splitting it means moving
+ * composables between page files rather than renaming a card. Both are recorded in the IA document
+ * instead of being faked with an empty card.
+ *
+ * Enum order is still render order and `wireName` is still the persisted identifier: renaming a title
+ * is safe for stored preferences, renaming a wire name is not, so wire names are unchanged here.
+ * * [wireName] is the stable ASCII identifier the search index keys on: never localised, never
+ * renamed, safe to persist in a preference or write to a log.
+ */
+internal enum class SettingsSection(
+    val title: String,
+    val summary: String,
+    val wireName: String
+) {
+    RUNTIME(
+        "模型与运行",
+        "当前模型、性能、内存、实时负载，以及应用更新与离线翻译包。",
+        "runtime"
+    ),
+    LOGS("日志与排错", "运行日志、诊断导出与备份恢复。", "logs"),
+    PRIVACY("隐私与数据", "本机数据清理、缓存边界与 DSH 设备能力授权。", "privacy"),
+    SEARCH("联网与检索", "搜索服务、触发策略与来源质量。", "search"),
+    APPEARANCE("外观", "跟随系统，或固定浅色与深色。", "appearance"),
+    EXPERIMENTS("对话与生成", "聊天本地工具、富文本显示与能力说明。", "experiments"),
+    ABOUT("更新与关于", "版本更新、开源许可与项目信息。", "about")
 }
 
 private enum class SettingsSectionTone {
@@ -288,6 +328,9 @@ fun SettingsHubScreen(
     onClearPersistentPrefixCache: () -> Unit,
     onChatLocalToolsEnabledChanged: (Boolean) -> Unit = {},
     onRichBlocksEnabledChanged: (Boolean) -> Unit = {},
+    /** Stored Agent approval tier; see [AgentApprovalPresetUi] for why this side owns no storage. */
+    agentApprovalPreset: AgentApprovalPresetUi = AgentApprovalPresetUi.DEFAULT,
+    onAgentApprovalPresetChanged: (AgentApprovalPresetUi) -> Unit = {},
     offlineTranslationStatus: String = "未安装",
     offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
@@ -316,7 +359,43 @@ fun SettingsHubScreen(
      * launcher still compile; the page renders the honest "not wired" state through the same card.
      */
     onExportBackup: () -> Unit = {},
-    onPreviewBackupRestore: () -> Unit = {}
+    onPreviewBackupRestore: () -> Unit = {},
+    /**
+     * Appearance selection. `:app` passes the persisted choice; the default keeps every existing
+     * caller compiling while the wiring lands in two steps, and matches a fresh install.
+     */
+    appearanceThemeChoice: McaAppearanceThemeChoice = McaAppearanceThemeChoice.Default,
+    onAppearanceThemeChoiceChange: (McaAppearanceThemeChoice) -> Unit = {},
+    /**
+     * The wallpaper selection as the appearance panel should render it.
+     *
+     * Defaulted like the rest of the appearance surface so the `:app` wiring can land in its own
+     * step without breaking this signature: the default is "no wallpaper chosen", which is exactly
+     * what a fresh install shows.
+     */
+    appearanceWallpaper: SettingsAppearanceWallpaperUiState = SettingsAppearanceWallpaperUiState(),
+    /** Opens the system image picker; the `:app` side owns the SAF launcher. */
+    onPickAppearanceWallpaper: () -> Unit = {},
+    /** Clears the stored wallpaper; the `:app` side owns the store. */
+    onClearAppearanceWallpaper: () -> Unit = {},
+    /**
+     * Replay intent only. Resetting the persisted "onboarding seen" flag stays an `:app`
+     * responsibility (`OnboardingPreferences.reset()`); this module owns no onboarding state.
+     */
+    onReplayOnboarding: () -> Unit = {},
+    /**
+     * D5: opens the assistant editor, which is where the memory switch actually lives.
+     *
+     * Forwarded rather than implemented here because navigating into the assistant surface belongs
+     * to the `:app` composition root; this module only owns the intent. Defaulted so the hub keeps
+     * compiling for callers that have not wired it yet.
+     */
+    onOpenAssistantEditor: () -> Unit = {},
+    /**
+     * D6: the experiments page's read-only "联网检索" card points at the canonical SEARCH section
+     * instead of restating its state a third way. Defaulted so existing callers keep compiling.
+     */
+    onOpenWebSearch: () -> Unit = {}
 ) {
     val startSection = if (startInWebSearch) SettingsSection.SEARCH else null
     // Null means the dashboard. A section opens as a full-height detail page with a draggable
@@ -330,8 +409,21 @@ fun SettingsHubScreen(
     val navigateBackToHub = {
         section = null
     }
+    // Search is page-local state, deliberately not a SettingsSection: it sits above the card grid
+    // and must never shift the frozen section order or the card list.
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val closeSearch = {
+        searchOpen = false
+        searchQuery = ""
+    }
+    // Row-level reveal channel: the search page requests a spotId, the owning section page scrolls
+    // to that row and marks it briefly. Owned here so the request survives the page transition.
+    val reveal = rememberSettingsRevealState()
 
-    BackHandler(enabled = section != null) { navigateBackToHub() }
+    BackHandler(enabled = section != null || searchOpen) {
+        if (searchOpen) closeSearch() else navigateBackToHub()
+    }
 
     AnimatedContent(
         targetState = section,
@@ -350,19 +442,34 @@ fun SettingsHubScreen(
         val pageKey = targetSection?.name ?: "settings-hub"
         pageStateHolder.SaveableStateProvider(pageKey) {
             if (targetSection == null) {
-                SettingsHubContent(
-                    state = state,
-                    onOpenSection = { target ->
-                        section = target
-                    },
-                    onClose = onBack
-                )
+                if (searchOpen) {
+                    SettingsSearchPage(
+                        query = searchQuery,
+                        onQueryChange = { searchQuery = it },
+                        onClose = closeSearch,
+                        onOpenSection = { entry ->
+                            closeSearch()
+                            reveal.revealTo(entry.spotId)
+                            section = entry.section
+                        }
+                    )
+                } else {
+                    SettingsHubContent(
+                        state = state,
+                        onOpenSection = { target ->
+                            section = target
+                        },
+                        onClose = onBack,
+                        onOpenSearch = { searchOpen = true }
+                    )
+                }
             } else {
                 val detailSection = targetSection
                 SettingsDetailScreen(
                     section = detailSection,
                     onNavigateUp = navigateBackToHub,
-                    onCloseSettings = onBack
+                    onCloseSettings = onBack,
+                    reveal = reveal
                 ) {
                     when (detailSection) {
                         SettingsSection.RUNTIME -> RuntimeScreen(
@@ -381,6 +488,11 @@ fun SettingsHubScreen(
                             onInstallUpdate = onInstallUpdate,
                             onOpenRelease = onOpenRelease,
                             onAutoCheckChanged = onAutoCheckChanged,
+                            // D2: the runtime card keeps its compact update summary; the full update
+                            // surface (auto-check, history, skip) lives in the ABOUT section, so the
+                            // card points there instead of growing a second copy of those controls.
+                            onOpenAboutSettings = { section = SettingsSection.ABOUT },
+                            reveal = reveal,
                             modifier = Modifier.fillMaxSize()
                         )
                         SettingsSection.LOGS -> LogsApiScreen(
@@ -399,6 +511,9 @@ fun SettingsHubScreen(
                             onClearFileLibrary = onClearFileLibrary,
                             onPersistentPrefixCacheEnabledChanged = onPersistentPrefixCacheEnabledChanged,
                             onClearPersistentPrefixCache = onClearPersistentPrefixCache,
+                            // D5: the memory controls live in the assistant editor, not here, so the
+                            // privacy placeholder card navigates instead of pretending to own them.
+                            onOpenAssistantEditor = onOpenAssistantEditor,
                             modifier = Modifier.fillMaxSize()
                         )
                         SettingsSection.SEARCH -> SearchSettingsScreen(
@@ -411,10 +526,27 @@ fun SettingsHubScreen(
                             onOpenWebPage = onOpenWebPage,
                             modifier = Modifier.fillMaxSize()
                         )
+                        SettingsSection.APPEARANCE -> SettingsAppearancePanel(
+                            selected = appearanceThemeChoice,
+                            onSelect = onAppearanceThemeChoiceChange,
+                            wallpaper = appearanceWallpaper,
+                            onPickWallpaper = onPickAppearanceWallpaper,
+                            onClearWallpaper = onClearAppearanceWallpaper,
+                            // Startup background and launcher icon are not user-selectable in this
+                            // build; the panel renders these as honest statements instead of dead
+                            // switches. See SettingsAppearancePanel's KDoc for the constraints.
+                            launchScreenSummary = "跟随系统的深色/浅色设置显示对应的启动背景色，与应用首帧一致。",
+                            iconSummary = "本版本不提供应用图标切换；图标随安装包发布。",
+                            onReplayOnboarding = onReplayOnboarding,
+                            modifier = Modifier.fillMaxSize()
+                        )
                         SettingsSection.EXPERIMENTS -> ExperimentsScreen(
                             state = state,
                             onChatLocalToolsEnabledChanged = onChatLocalToolsEnabledChanged,
                             onRichBlocksEnabledChanged = onRichBlocksEnabledChanged,
+                            agentApprovalPreset = agentApprovalPreset,
+                            onAgentApprovalPresetChanged = onAgentApprovalPresetChanged,
+                            onOpenWebSearch = onOpenWebSearch,
                             modifier = Modifier.fillMaxSize()
                         )
                         SettingsSection.ABOUT -> SettingsAboutScreen(
@@ -424,6 +556,8 @@ fun SettingsHubScreen(
                             onInstallUpdate = onInstallUpdate,
                             onOpenRelease = onOpenRelease,
                             onOpenWebPage = onOpenWebPage,
+                            onReplayOnboarding = onReplayOnboarding,
+                            reveal = reveal,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -433,11 +567,37 @@ fun SettingsHubScreen(
     }
 }
 
+/**
+ * Settings -> Appearance. The three-way control itself lives in `:core:designsystem` so the same
+ * rows can be reused elsewhere; this page only supplies the detail page's scroll body and padding.
+ * Back, title and close stay in [SettingsDetailScreen]'s header, so no second navigation bar is
+ * drawn here.
+ */
+@Composable
+private fun SettingsAppearanceScreen(
+    selected: McaAppearanceThemeChoice,
+    onSelect: (McaAppearanceThemeChoice) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LazyColumn(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            McaAppearanceSection(selected = selected, onSelect = onSelect)
+        }
+    }
+}
+
 @Composable
 private fun SettingsHubContent(
     state: SettingsUiState,
     onOpenSection: (SettingsSection) -> Unit,
     onClose: () -> Unit,
+    onOpenSearch: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val haptics = rememberMcaHaptics()
@@ -458,6 +618,16 @@ private fun SettingsHubContent(
             ) {
                 item(key = "hero") {
                     SettingsHero(state = state)
+                }
+                // The dashboard's only text entry point: it sits directly above the section list so a
+                // user who knows the name of a setting never has to read the cards first.
+                item(key = "search") {
+                    SettingsSearchEntryField(
+                        onClick = {
+                            haptics.tick()
+                            onOpenSearch()
+                        }
+                    )
                 }
                 item(key = "sections-title") {
                     Row(
@@ -958,6 +1128,7 @@ private fun SettingsDetailScreen(
     onNavigateUp: () -> Unit,
     onCloseSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    reveal: SettingsRevealState? = null,
     content: @Composable () -> Unit
 ) {
     var dragY by remember(section) { mutableFloatStateOf(0f) }
@@ -1011,6 +1182,7 @@ private fun SettingsDetailScreen(
                     }
                 )
             )
+            SettingsRevealBanner(reveal = reveal)
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 content()
             }
@@ -1095,6 +1267,9 @@ private fun SettingsSection.icon(): ImageVector = when (this) {
     SettingsSection.LOGS -> McaIcons.Description
     SettingsSection.PRIVACY -> McaIcons.Shield
     SettingsSection.SEARCH -> McaIcons.Search
+    // Tune is unoccupied in this mapping and is the same glyph the appearance page uses for its
+    // "follow system" row, so the card and its content read as one control family.
+    SettingsSection.APPEARANCE -> McaIcons.Tune
     SettingsSection.EXPERIMENTS -> McaIcons.Science
     SettingsSection.ABOUT -> McaIcons.Info
 }
@@ -1121,6 +1296,12 @@ private fun SettingsSection.hubStatus(state: SettingsUiState): SettingsSectionSt
         SettingsSection.SEARCH -> SettingsSectionStatus(
             label = state.webSearch.hubStatusLabel(),
             tone = state.webSearch.hubStatusTone()
+        )
+        // Purely device-local and applied the moment it is chosen, so it has no failure or busy
+        // state to report: "本机" mirrors the privacy card's device-local wording.
+        SettingsSection.APPEARANCE -> SettingsSectionStatus(
+            label = "本机",
+            tone = SettingsSectionTone.ONLINE
         )
         SettingsSection.EXPERIMENTS -> SettingsSectionStatus(
             label = "预览",

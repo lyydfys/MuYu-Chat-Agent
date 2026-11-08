@@ -35,15 +35,16 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.designsystem.McaMotion
-import com.muyuchat.core.designsystem.McaFeedbackLayer
 import com.muyuchat.core.designsystem.McaTheme
 import com.muyuchat.core.deviceprofile.DeviceProfile
+import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.dsh.contract.console.DshScreenCaptureConsentCodes
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
 import com.muyuchat.mca.dsh.overlay.DshOverlayHost
 import com.muyuchat.mca.dsh.overlay.DshOverlayIntents
+import com.muyuchat.mca.onboarding.onboardingModelStep
 import com.muyuchat.feature.agent.*
 import com.muyuchat.feature.agent.workspace.AgentWorkspaceRoute
 import com.muyuchat.feature.chat.*
@@ -58,6 +59,7 @@ import com.muyuchat.mca.video.model.Wan22Ti2v5bProfiles
 import com.muyuchat.mca.video.settings.VideoDraftFileStore
 import com.muyuchat.mca.video.settings.VideoEnginePreferenceStore
 import com.muyuchat.mca.presentation.startup.TtfdProbe
+import com.muyuchat.core.designsystem.appearance.McaAppearanceThemeChoice
 import com.muyuchat.mca.presentation.startup.TtfdProbeHost
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -218,12 +220,34 @@ class MainActivity : ComponentActivity() {
             // One TTFD observation point; renders nothing and never changes the startup flow.
             TtfdProbeHost()
             val startupState by startup.state.collectAsStateWithLifecycle()
-            McaTheme {
-                McaFeedbackLayer {
-                // V03: splash -> app handoff. Both surfaces live under the one McaTheme node, so the
-                // system-bar owner stays single while the startup surface crossfades out and the app
-                // crossfades in; neither branch is composed twice and the app's content lambda is the
-                // existing McaApp call.
+            // Model-download facts for the first-run page, reduced to plain values so the guide never
+            // sees MainUiState; no ready model or no recommendation degrades it to 「稍后下载模型」.
+            val guideModel = startupState.model
+            val guideState = if (guideModel != null) {
+                guideModel.uiState.collectAsStateWithLifecycle().value
+            } else {
+                null
+            }
+            val guideRecommended = guideState?.recommendedRemoteModels?.firstOrNull()
+            val guideModelStep = onboardingModelStep(
+                modelLabel = guideRecommended?.title,
+                downloadedBytes = guideState?.downloadedBytes ?: 0L,
+                totalBytes = guideState?.downloadTotalBytes ?: 0L,
+                running = guideState?.downloadStatus == DownloadStatus.RUNNING ||
+                    guideState?.downloadStatus == DownloadStatus.QUEUED,
+                failed = guideState?.downloadStatus == DownloadStatus.FAILED,
+                failureReason = guideState?.downloadIntegrityMessage ?: guideState?.downloadExecutionMessage,
+                blockReason = guideRecommended?.let(::recommendedDownloadBlockReason)
+            )
+            // The colour mode, the first-run gate and the app-wide consent dialog all live in
+            // FirstRunContent; the shell only supplies the app body, which is composed once the guide is
+            // done and is skipped entirely while it runs.
+            FirstRunContent(
+                modelStep = guideModelStep,
+                onDownloadModel = { guideRecommended?.let { viewModel.downloadRecommended(it) } }
+            ) { appearanceChoice, onAppearanceChange, onReplay ->
+                // V03: splash -> app handoff inside the one McaTheme node FirstRunContent provides, so the
+                // startup surface crossfades out and the app crossfades in without a second theme owner.
                 Crossfade(
                     targetState = startupState.model,
                     animationSpec = McaMotion.fade(STARTUP_HANDOFF_FADE_MILLIS),
@@ -259,13 +283,12 @@ class MainActivity : ComponentActivity() {
                             onExportBackup = { backupExportLauncher.launch(viewModel.suggestedBackupFileName()) },
                             onPreviewBackupRestore = { backupPreviewLauncher.launch(arrayOf("application/json", "text/json")) },
                             onExportChatSession = { id -> pendingChatExportSessionId = id; chatExportLauncher.launch(viewModel.chatSessionExportFileName(id)) },
-                            viewModel = viewModel
+                            viewModel = viewModel,
+                            appearanceRememberedChoice = appearanceChoice,
+                            onAppearanceRememberedChange = onAppearanceChange,
+                            onReplayOnboarding = onReplay
                         )
                     }
-                }
-                // D16: the one host for DSH capability consent. It renders nothing until a
-                // privileged/consent-gated request arrives and never pulls itself to front.
-                com.muyuchat.mca.composition.DshCapabilityConsentDialog()
                 }
             }
         }
@@ -327,7 +350,15 @@ private fun McaApp(
     onImportWorldBookFile: (WorldBookImportScope) -> Unit, onImportKnowledgeDocument: (String) -> Unit,
     onAttachVisionProjector: (String) -> Unit, onExportDiagnostics: () -> Unit,
     onExportBackup: () -> Unit, onPreviewBackupRestore: () -> Unit,
-    onExportChatSession: (String) -> Unit, viewModel: MainViewModel
+    onExportChatSession: (String) -> Unit, viewModel: MainViewModel,
+    /**
+     * Appearance and first-run callbacks the settings surface forwards. Passed in rather than read
+     * inside the settings page because both owners live at the composition root: the colour mode has
+     * to reach [McaTheme] above this node, and replaying onboarding replaces this whole subtree.
+     */
+    appearanceRememberedChoice: McaAppearanceThemeChoice,
+    onAppearanceRememberedChange: (McaAppearanceThemeChoice) -> Unit,
+    onReplayOnboarding: () -> Unit
 ) {
     val timestampLocale = androidx.compose.ui.platform.LocalLocale.current.platformLocale
     state.contentImportPreview?.let { preview ->
@@ -775,6 +806,8 @@ private fun McaApp(
                     onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
                     onChatLocalToolsEnabledChanged = viewModel::setChatLocalToolsEnabled,
                     onRichBlocksEnabledChanged = { enabled -> viewModel.setRichBlocksEnabled(enabled) },
+                    agentApprovalPreset = viewModel.agentApprovalPreset(),
+                    onAgentApprovalPresetChanged = viewModel::setAgentApprovalPreset,
                     offlineTranslationStatus = state.offlineTranslationStatus,
                     offlineTranslationInstalled = state.offlineTranslationInstalled,
                     offlineTranslationInstalling = state.offlineTranslationInstalling,
@@ -800,7 +833,10 @@ private fun McaApp(
                     onDownloadUpdate = viewModel::downloadAppUpdate, onInstallUpdate = viewModel::installAppUpdate,
                     onOpenRelease = viewModel::openAppUpdateRelease, onAutoCheckChanged = viewModel::setAppUpdateAutoCheckEnabled,
                     onOpenWebPage = { url -> internalBrowserUrl = url }, onBack = closePage,
-                    startInWebSearch = startSettingsInWebSearch, modifier = pageModifier
+                    startInWebSearch = startSettingsInWebSearch, modifier = pageModifier,
+                    appearanceThemeChoice = appearanceRememberedChoice,
+                    onAppearanceThemeChoiceChange = onAppearanceRememberedChange,
+                    onReplayOnboarding = onReplayOnboarding
                 )
             }
 

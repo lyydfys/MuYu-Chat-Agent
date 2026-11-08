@@ -28,7 +28,7 @@ import com.muyuchat.mca.agent.projection.AgentTurnSummarySink
  */
 class SummaryReportingAgentJournal(
     private val delegate: AgentJournal,
-    private val onRunSucceeded: (runId: String) -> Unit
+    private val onRunSucceeded: suspend (runId: String) -> Unit
 ) : AgentJournal by delegate {
 
     override suspend fun commit(command: AgentTransition): AgentCommitResult {
@@ -50,7 +50,15 @@ class SummaryReportingAgentJournal(
             else -> null
         }
         if (succeededRunId != null) {
-            runCatching { onRunSucceeded(succeededRunId) }
+            // Suspending inside runCatching would need a suspend-aware variant; the try/catch keeps
+            // the same "a bookkeeping failure must never fail the commit" guarantee.
+            try {
+                onRunSucceeded(succeededRunId)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Chat bookkeeping must not turn a committed Agent transition into a failed command.
+            }
         }
         return result
     }
@@ -65,10 +73,25 @@ class SummaryReportingAgentJournal(
  * no-op, not a fake implementation.
  */
 fun AgentJournal.reportingAgentTurnSummaries(
-    sink: AgentTurnSummarySink = com.muyuchat.mca.agent.projection.NoAgentTurnSummarySink
+    sink: AgentTurnSummarySink = com.muyuchat.mca.agent.projection.NoAgentTurnSummarySink,
+    /**
+     * Resolves the conversation a finished run belongs to, or null when it has none.
+     *
+     * A run only knows its task id, and the durable task -> conversation mapping lives in the app's
+     * binding store, so the lookup is injected rather than reached for. The default answers null,
+     * which is also the correct answer for scheduled, intent-triggered and workflow frames: those
+     * were never started from a conversation and their summaries must not be attached to one.
+     */
+    resolveChatSession: suspend (runId: String) -> String? = { null }
 ): AgentJournal = SummaryReportingAgentJournal(this) { runId ->
-    // TODO(agent-chat-bridge): resolve the run's chatSessionId once a task -> conversation binding
-    // exists. Today no contract type carries it (CreateAgentTask/AgentTask/AgentRun/AgentRunPolicy
-    // all lack the field), so the id is always null and the sink writes nothing.
-    sink.onAgentTurnCompleted(runId, chatSessionId = null)
+    // A throwing resolver must not turn a committed Agent transition into a failed command, so the
+    // lookup degrades to "no conversation" instead of propagating.
+    val chatSessionId = try {
+        resolveChatSession(runId)
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        null
+    }
+    sink.onAgentTurnCompleted(runId, chatSessionId = chatSessionId)
 }

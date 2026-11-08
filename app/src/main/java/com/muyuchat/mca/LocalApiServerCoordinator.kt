@@ -221,7 +221,10 @@ internal class LocalApiServerCoordinator(
             if (!LocalApiForegroundService.isListenerRunning(bindHost)) {
                 cancelActiveLocalApiImageGeneration("Local API server is restarting.")
             }
-            LocalApiForegroundService.ensureListener(bindHost, apiKey)
+            // A2A is read from the same persisted switch the foreground service uses, so the listener
+            // rebuilt here never disagrees with the stored preference.
+            val a2aEnabled = GenerationPreferences.loadApiPreferences(application).a2aEnabled
+            LocalApiForegroundService.ensureListener(bindHost, apiKey, a2aEnabled)
         }
     }
 

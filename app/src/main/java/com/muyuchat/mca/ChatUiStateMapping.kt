@@ -427,6 +427,7 @@ internal fun buildChatUiState(
                     webSearchStatusMessage = state.webSearchStatusMessage,
                     webSearchTurnModeLabel = state.toWebSearchTurnModeLabel(),
                     webSearchResearchMode = (state.webSearchResearchModeOverride ?: state.webSearchConfig.researchMode).name,
+                    agentModeEnabled = state.agentModeEnabled,
                     webSearchResearchModeLabel = (state.webSearchResearchModeOverride ?: state.webSearchConfig.researchMode).label,
                     webSearchResearchOverridden = state.webSearchResearchModeOverride != null,
                     webSearchProviderLabel = buildString {

@@ -322,6 +322,8 @@ fun PrivacyDataScreen(
     onClearFileLibrary: () -> Unit,
     onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
     onClearPersistentPrefixCache: () -> Unit,
+    /** D5: opens the assistant editor, where memory is actually switched on and managed. */
+    onOpenAssistantEditor: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var confirmClearChats by rememberSaveable { mutableStateOf(false) }
@@ -349,11 +351,19 @@ fun PrivacyDataScreen(
     ) {
         item { Text("隐私与数据", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         item {
-            InfoCard(
-                title = "记忆管理",
-                primary = "已预留助手记忆入口",
-                secondary = "当前版本先提供助手侧的记忆开关；后续会在这里集中查看、编辑和删除本机记忆。"
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                InfoCard(
+                    title = "记忆管理",
+                    primary = "已预留助手记忆入口",
+                    secondary = "当前版本先提供助手侧的记忆开关；后续会在这里集中查看、编辑和删除本机记忆。"
+                )
+                // D5: 记忆开关的真实位置在助手编辑器；这张卡不再是一张「点不动的占位卡」，
+                // 而是通往规范入口的指针，能力没有减少、也没有出现第二套记忆开关。
+                McaButton(style = McaButtonStyle.Text, onClick = onOpenAssistantEditor) {
+                    Icon(McaIcons.Psychology, contentDescription = null)
+                    Text("前往助手编辑器管理记忆", modifier = Modifier.padding(start = 6.dp))
+                }
+            }
         }
         item {
             val localDataText = remember(state.imageAssetBytes, state.fileAssetBytes) {
@@ -612,6 +622,15 @@ fun ExperimentsScreen(
     state: SettingsUiState,
     onChatLocalToolsEnabledChanged: (Boolean) -> Unit = {},
     onRichBlocksEnabledChanged: (Boolean) -> Unit = {},
+    /**
+     * Currently stored Agent approval tier. The `:app` composition root reads the persisted
+     * document and maps it onto [AgentApprovalPresetUi]; this module owns no policy storage
+     * because it must not depend on `:app` (architecture Rule 14).
+     */
+    agentApprovalPreset: AgentApprovalPresetUi = AgentApprovalPresetUi.DEFAULT,
+    onAgentApprovalPresetChanged: (AgentApprovalPresetUi) -> Unit = {},
+    /** D6: opens the canonical SEARCH section instead of duplicating its state here. */
+    onOpenWebSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // W9-1: the vision-readiness flag is a scan over the whole native stats JSON. Cache it by the
@@ -642,11 +661,18 @@ fun ExperimentsScreen(
             )
         }
         item {
-            InfoCard(
-                title = "联网检索",
-                primary = if (state.webSearch.configured) "已配置：${state.webSearch.providerLabel}" else "需要在联网检索页配置服务",
-                secondary = "可由助手默认开关或输入框本轮开关触发。MCA 会显示来源卡片，并只把搜索摘要注入当前轮。"
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                InfoCard(
+                    title = "联网检索",
+                    primary = if (state.webSearch.configured) "已配置：${state.webSearch.providerLabel}" else "需要在联网检索页配置服务",
+                    secondary = "可由助手默认开关或输入框本轮开关触发。MCA 会显示来源卡片，并只把搜索摘要注入当前轮。"
+                )
+                // D6: 状态只在这张卡里展示一次，其余入口改为跳转到规范位置「联网检索」分区。
+                McaButton(style = McaButtonStyle.Text, onClick = onOpenWebSearch) {
+                    Icon(McaIcons.Search, contentDescription = null)
+                    Text("前往联网检索设置", modifier = Modifier.padding(start = 6.dp))
+                }
+            }
         }
         item {
             ChatLocalToolsCard(
@@ -658,6 +684,12 @@ fun ExperimentsScreen(
             RichBlocksCard(
                 enabled = state.richBlocksEnabled,
                 onEnabledChanged = onRichBlocksEnabledChanged
+            )
+        }
+        item {
+            AgentApprovalSettingsCard(
+                selected = agentApprovalPreset,
+                onSelect = onAgentApprovalPresetChanged
             )
         }
         item {

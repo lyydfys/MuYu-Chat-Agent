@@ -92,6 +92,8 @@ data class ChatUiState(
     val webSearchEnabledForTurn: Boolean = false,
     val webSearchStatusMessage: String? = null,
     val webSearchTurnModeLabel: String = "",
+    /** `+` menu Agent mode; app state so the send path can read it after session save. */
+    val agentModeEnabled: Boolean = false,
     val webSearchResearchMode: String = "AUTO",
     val webSearchResearchModeLabel: String = "",
     val webSearchResearchOverridden: Boolean = false,

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,7 +45,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 @Composable
-fun RuntimeScreen(
+internal fun RuntimeScreen(
     state: SettingsUiState,
     modifier: Modifier = Modifier,
     offlineTranslationStatus: String = "未安装",
@@ -60,7 +61,11 @@ fun RuntimeScreen(
     onDownloadUpdate: () -> Unit = {},
     onInstallUpdate: () -> Unit = {},
     onOpenRelease: () -> Unit = {},
-    onAutoCheckChanged: (Boolean) -> Unit = {}
+    onAutoCheckChanged: (Boolean) -> Unit = {},
+    /** D2: opens the canonical update surface (About) without moving or removing any control. */
+    onOpenAboutSettings: () -> Unit = {},
+    /** Row-level reveal channel owned by the settings host; null keeps the page unchanged. */
+    reveal: SettingsRevealState? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -90,7 +95,10 @@ fun RuntimeScreen(
             }
         }
     }
+    val revealListState = rememberLazyListState()
+    RevealScrollEffect(state = revealListState, reveal = reveal, order = SettingsRevealOrder.runtime)
     LazyColumn(
+        state = revealListState,
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
@@ -99,7 +107,10 @@ fun RuntimeScreen(
     ) {
         item { Text("运行状态", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(
+                modifier = Modifier.settingsRevealSpot("runtime.offline_translation", reveal),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 Text("离线图片提示词翻译 · Hy-MT2", fontWeight = FontWeight.SemiBold)
                 Text(
                     offlineTranslationStatus,
@@ -158,7 +169,8 @@ fun RuntimeScreen(
                 onDownloadUpdate = onDownloadUpdate,
                 onInstallUpdate = onInstallUpdate,
                 onOpenRelease = onOpenRelease,
-                onAutoCheckChanged = onAutoCheckChanged
+                onAutoCheckChanged = onAutoCheckChanged,
+                onOpenAboutSettings = onOpenAboutSettings
             )
         }
         item {
@@ -178,7 +190,8 @@ fun RuntimeScreen(
             InfoCard(
                 "当前模型",
                 modelText.name,
-                modelText.details
+                modelText.details,
+                modifier = Modifier.settingsRevealSpot("runtime.model", reveal)
             )
         }
         item {
@@ -188,7 +201,12 @@ fun RuntimeScreen(
                     secondary = "已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。"
                 )
             }
-            InfoCard("性能", performanceText.primary, performanceText.secondary)
+            InfoCard(
+                "性能",
+                performanceText.primary,
+                performanceText.secondary,
+                modifier = Modifier.settingsRevealSpot("runtime.performance", reveal)
+            )
         }
         item {
             val memoryText = remember(state.stats) {
@@ -198,7 +216,12 @@ fun RuntimeScreen(
                     secondary = "Native 堆 ${formatKb(state.stats.nativeHeapKb)} · Java 堆 ${formatKb(state.stats.javaHeapKb)} · 系统可用 ${formatKb(state.stats.availMemKb)} · 运行预算 ${formatKb(state.stats.modelMemoryBudgetKb)}"
                 )
             }
-            InfoCard("内存", memoryText.primary, memoryText.secondary)
+            InfoCard(
+                "内存",
+                memoryText.primary,
+                memoryText.secondary,
+                modifier = Modifier.settingsRevealSpot("runtime.memory", reveal)
+            )
         }
         item {
             val cpu = systemLoad.systemCpuPercent?.let { "$it%" } ?: "不可用"
@@ -214,7 +237,8 @@ fun RuntimeScreen(
             InfoCard(
                 "实时负载",
                 "CPU $cpu · 进程 $processCpu · 内存 $memory",
-                "GPU $gpu${systemLoad.gpuSource?.let { " ($it)" }.orEmpty()} · NPU $npu"
+                "GPU $gpu${systemLoad.gpuSource?.let { " ($it)" }.orEmpty()} · NPU $npu",
+                modifier = Modifier.settingsRevealSpot("runtime.load", reveal)
             )
         }
         item {
@@ -224,7 +248,7 @@ fun RuntimeScreen(
                     title = if (error.isNullOrBlank()) "诊断" else "最近问题",
                     primary = if (error.isNullOrBlank()) "运行正常" else friendlyError(error),
                     secondary = if (error.isNullOrBlank()) {
-                        "需要排错时，可到“日志与接口”导出完整诊断。"
+                        "需要排错时，可到“日志与诊断”导出完整诊断。"
                     } else {
                         "完整信息已保留在诊断报告中。"
                     }
@@ -233,7 +257,8 @@ fun RuntimeScreen(
             InfoCard(
                 title = diagnosticText.title,
                 primary = diagnosticText.primary,
-                secondary = diagnosticText.secondary
+                secondary = diagnosticText.secondary,
+                modifier = Modifier.settingsRevealSpot("runtime.diagnostic", reveal)
             )
         }
     }
@@ -342,7 +367,8 @@ private fun AppUpdateCard(
     onDownloadUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
     onOpenRelease: () -> Unit,
-    onAutoCheckChanged: (Boolean) -> Unit
+    onAutoCheckChanged: (Boolean) -> Unit,
+    onOpenAboutSettings: () -> Unit = {}
 ) {
     val presentation = remember(state.status, state.canDownload) {
         appUpdateStatusPresentation(state.status, state.canDownload)
@@ -386,6 +412,12 @@ private fun AppUpdateCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // D2: 更新能力只在「关于」页保留完整入口；这里给一条通往规范位置的短链路，
+                // 不搬开关、不改本卡布局，避免出现第二套更新流程。
+                McaButton(style = McaButtonStyle.Text, onClick = onOpenAboutSettings) {
+                    Icon(McaIcons.OpenInNew, contentDescription = null)
+                    Text("完整设置见 关于", modifier = Modifier.padding(start = 6.dp))
+                }
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

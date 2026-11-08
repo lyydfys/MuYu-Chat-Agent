@@ -35,7 +35,7 @@ fun interface AgentTurnSummarySink {
      * @param chatSessionId the conversation the summary belongs to, or `null` when the run has no
      *   conversation. A null id is a normal value, not an error: the sink must then write nothing.
      */
-    fun onAgentTurnCompleted(runId: String, chatSessionId: String?)
+    suspend fun onAgentTurnCompleted(runId: String, chatSessionId: String?)
 }
 
 /**
@@ -46,7 +46,7 @@ fun interface AgentTurnSummarySink {
  * smeared across the runtime as an unused parameter.
  */
 object NoAgentTurnSummarySink : AgentTurnSummarySink {
-    override fun onAgentTurnCompleted(runId: String, chatSessionId: String?) = Unit
+    override suspend fun onAgentTurnCompleted(runId: String, chatSessionId: String?) = Unit
 }
 
 /**
@@ -63,12 +63,12 @@ object NoAgentTurnSummarySink : AgentTurnSummarySink {
  *   owner once the binding exists.
  */
 internal class ChatAgentTurnSummarySink(
-    private val loadRun: (String) -> AgentRun?,
-    private val loadEvents: (String) -> List<AgentEvent>,
-    private val deliver: (ChatMessage) -> Unit
+    private val loadRun: suspend (String) -> AgentRun?,
+    private val loadEvents: suspend (String) -> List<AgentEvent>,
+    private val deliver: suspend (ChatMessage) -> Unit
 ) : AgentTurnSummarySink {
 
-    override fun onAgentTurnCompleted(runId: String, chatSessionId: String?) {
+    override suspend fun onAgentTurnCompleted(runId: String, chatSessionId: String?) {
         if (chatSessionId.isNullOrBlank()) return
         val run = loadRun(runId) ?: return
         val message = AgentTurnSummaryWriter.messageFor(

@@ -81,7 +81,25 @@ class SettingsAccessibilityContractTest {
         val screen = source("feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsScreens.kt")
         val hub = screen.substringAfter("private fun SettingsHubContent(")
             .substringBefore("private fun SettingsHubTopBar(")
-        assertEquals(1, Regex("haptics\\.tick\\(\\)").findAll(hub).count())
+        // The dashboard has two entry points that are each a navigation choice, so each owns exactly
+        // one tick: opening a section from the grid, and opening settings search. The invariant being
+        // pinned is "one tick per navigation action", not "one tick in the function" -- the search
+        // entry is a user choice like any card, and leaving it silent would make it the only
+        // tappable dashboard row with no tactile feedback.
+        assertEquals(2, Regex("haptics\\.tick\\(\\)").findAll(hub).count())
+        val searchEntry = hub.substringAfter("item(key = \"search\")")
+            .substringBefore("item(key = \"sections-title\")")
+        assertEquals(
+            "the search entry is a navigation choice and must tick exactly once",
+            1,
+            Regex("haptics\\.tick\\(\\)").findAll(searchEntry).count()
+        )
+        val sectionGrid = hub.substringAfter("SettingsSectionGrid(")
+        assertEquals(
+            "the section grid must tick exactly once per opened section",
+            1,
+            Regex("haptics\\.tick\\(\\)").findAll(sectionGrid).count()
+        )
         assertFalse(hub.contains("if (section != item)"))
         // Returning to the dashboard is navigation, not a selection change.
         val back = screen.substringAfter("val navigateBackToHub = {").substringBefore("}\n")

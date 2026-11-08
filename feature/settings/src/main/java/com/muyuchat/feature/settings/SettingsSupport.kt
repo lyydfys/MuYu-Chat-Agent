@@ -274,9 +274,14 @@ internal fun WebSearchDiagnosticUiItem.toEvidenceText(): String =
     }.trim()
 
 @Composable
-internal fun InfoCard(title: String, primary: String, secondary: String) {
+internal fun InfoCard(
+    title: String,
+    primary: String,
+    secondary: String,
+    modifier: Modifier = Modifier
+) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         shape = RoundedCornerShape(8.dp)

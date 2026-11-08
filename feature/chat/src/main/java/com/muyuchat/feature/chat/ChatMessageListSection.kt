@@ -220,6 +220,10 @@ internal fun ChatMessageListSection(
                 key = { _, row -> row.identity }
             ) { index, row ->
                 val message = row.message
+                // An agent turn is a transcript of what the agent did, not a chat reply. It is shown
+                // inline so the conversation reads as one thread, but it is marked as machine work so
+                // the user can tell an agent summary from the character speaking.
+                val agentTrace = message.agentTrace
                 val generatedImageRequest = message.generatedImageRequest
                 val generatedImageJob = generatedImageRequest?.let { request ->
                     chatGeneratedImageJob(
@@ -241,6 +245,10 @@ internal fun ChatMessageListSection(
                         job = generatedImageJob,
                         imageCount = generatedImages.size
                     )
+                }
+                if (agentTrace != null) {
+                    AgentTraceBubble(trace = agentTrace, content = message.content)
+                    return@itemsIndexed
                 }
                 MessageBubble(
                     message = message,

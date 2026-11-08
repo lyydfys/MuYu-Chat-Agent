@@ -77,7 +77,14 @@ internal fun SettingsAboutScreen(
     onInstallUpdate: () -> Unit,
     onOpenRelease: () -> Unit,
     onOpenWebPage: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * Replay intent for the first-run guide. Defaulted so callers that do not wire onboarding still
+     * compile; the tap reports intent only and never resets persisted state from the UI layer.
+     */
+    onReplayOnboarding: () -> Unit = {},
+    /** Row-level reveal channel owned by the settings host; null keeps the page unchanged. */
+    reveal: SettingsRevealState? = null
 ) {
     val context = LocalContext.current
     val preferences = remember {
@@ -127,7 +134,8 @@ internal fun SettingsAboutScreen(
             onCheckUpdate = onCheckUpdate,
             onOpenRelease = {
                 if (update.releaseNotes.isNotBlank()) showReleaseNotes = true else onOpenRelease()
-            }
+            },
+            reveal = reveal
         )
 
         if (hasUpdate && !skipped) {
@@ -193,14 +201,14 @@ internal fun SettingsAboutScreen(
                 icon = McaIcons.Person,
                 title = "主作者",
                 subtitle = ABOUT_AUTHOR,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).settingsRevealSpot("about.author", reveal),
                 onClick = { onOpenWebPage(ABOUT_AUTHOR_URL) }
             )
             AboutLinkCard(
                 icon = McaIcons.Code,
                 title = "开源仓库",
                 subtitle = ABOUT_REPOSITORY,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).settingsRevealSpot("about.repository", reveal),
                 onClick = { onOpenWebPage(ABOUT_REPOSITORY_URL) }
             )
         }
@@ -212,14 +220,14 @@ internal fun SettingsAboutScreen(
                 icon = McaIcons.Favorite,
                 title = "赞助支持",
                 subtitle = "支持项目持续开发",
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).settingsRevealSpot("about.sponsor", reveal),
                 onClick = { showSponsor = true }
             )
             AboutLinkCard(
                 icon = McaIcons.Feedback,
                 title = "意见反馈",
                 subtitle = "报告问题或提交建议",
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).settingsRevealSpot("about.feedback", reveal),
                 onClick = { onOpenWebPage(ABOUT_ISSUES_URL) }
             )
         }
@@ -236,8 +244,11 @@ internal fun SettingsAboutScreen(
             currentVersion = currentVersion,
             latestVersion = latestVersion,
             lastCheckedText = update.lastCheckedText,
-            autoCheckEnabled = update.autoCheckEnabled
+            autoCheckEnabled = update.autoCheckEnabled,
+            modifier = Modifier.settingsRevealSpot("about.version_info", reveal)
         )
+
+        AboutReplayOnboardingCard(onReplayOnboarding = onReplayOnboarding)
     }
 
     if (showSponsor) {
@@ -285,7 +296,8 @@ private fun AboutHero(
     latestVersion: String?,
     status: String,
     onCheckUpdate: () -> Unit,
-    onOpenRelease: () -> Unit
+    onOpenRelease: () -> Unit,
+    reveal: SettingsRevealState? = null
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -330,11 +342,19 @@ private fun AboutHero(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
-                McaButton(style = McaButtonStyle.Outlined, onClick = onCheckUpdate) {
+                McaButton(
+                    style = McaButtonStyle.Outlined,
+                    onClick = onCheckUpdate,
+                    modifier = Modifier.settingsRevealSpot("about.check_update", reveal)
+                ) {
                     Icon(McaIcons.Refresh, contentDescription = null)
                     Text("检查更新", modifier = Modifier.padding(start = 6.dp))
                 }
-                McaButton(style = McaButtonStyle.Text, onClick = onOpenRelease) {
+                McaButton(
+                    style = McaButtonStyle.Text,
+                    onClick = onOpenRelease,
+                    modifier = Modifier.settingsRevealSpot("about.update_history", reveal)
+                ) {
                     Icon(McaIcons.History, contentDescription = null)
                     Text("更新记录", modifier = Modifier.padding(start = 6.dp))
                 }
@@ -575,10 +595,11 @@ private fun AboutBuildInfo(
     currentVersion: String,
     latestVersion: String?,
     lastCheckedText: String,
-    autoCheckEnabled: Boolean
+    autoCheckEnabled: Boolean,
+    modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         shape = RoundedCornerShape(8.dp)
@@ -593,6 +614,39 @@ private fun AboutBuildInfo(
             AboutInfoRow("上次检查", lastCheckedText.ifBlank { "—" })
             AboutInfoRow("自动检查", if (autoCheckEnabled) "已开启" else "已关闭")
             AboutInfoRow("开源许可", "Apache-2.0")
+        }
+    }
+}
+
+/**
+ * Replay entry for the first-run guide.
+ *
+ * The tap only reports intent. Clearing the persisted "onboarding seen" flag belongs to `:app`'s
+ * onboarding preference owner: this module stores no onboarding state, and a UI-local reset here
+ * would be a second writer racing the real one on the next launch.
+ */
+@Composable
+private fun AboutReplayOnboardingCard(onReplayOnboarding: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("新手引导", fontWeight = FontWeight.SemiBold)
+            Text(
+                "重新走一遍首次启动时的功能说明；不会清除聊天记录、模型或已保存的设置。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            McaButton(style = McaButtonStyle.Outlined, onClick = onReplayOnboarding) {
+                Icon(McaIcons.Replay, contentDescription = null)
+                Text("重新查看新手引导", modifier = Modifier.padding(start = 6.dp))
+            }
         }
     }
 }

@@ -85,7 +85,10 @@ class LocalApiForegroundService : Service() {
                         val key = preferences.getString("api_key", null)
                             ?.takeIf(String::isNotBlank)
                             ?: error("Local API key is missing")
-                        ensureListener(bindHost, key)
+                        // A2A is a separate, default-off surface: read it here so the listener built
+                        // below matches the persisted switch even on a service-initiated start.
+                        val a2aEnabled = preferences.getBoolean("a2a_enabled", false)
+                        ensureListener(bindHost, key, a2aEnabled)
                     }.onFailure { error ->
                         Log.e(TAG, "Unable to start local API listener", error)
                         synchronized(stateLock) { requestedRunning = false }
@@ -190,22 +193,34 @@ class LocalApiForegroundService : Service() {
         private var listener: McaLoopbackServer? = null
         private var listenerHost: String? = null
         private var listenerKey: String? = null
+        private var listenerA2a: Boolean = false
 
-        fun ensureListener(bindHost: String, apiKey: String) = synchronized(listenerLock) {
-            check(isForegroundReady()) { "Local API foreground service is not ready" }
-            if (listener?.isRunning == true && listenerHost == bindHost && listenerKey == apiKey) {
-                return@synchronized
+        fun ensureListener(bindHost: String, apiKey: String, a2aEnabled: Boolean = false) =
+            synchronized(listenerLock) {
+                check(isForegroundReady()) { "Local API foreground service is not ready" }
+                if (listener?.isRunning == true &&
+                    listenerHost == bindHost &&
+                    listenerKey == apiKey &&
+                    listenerA2a == a2aEnabled
+                ) {
+                    return@synchronized
+                }
+                listener?.shutdown()
+                listener = null
+                listenerHost = null
+                listenerKey = null
+                val next = McaLoopbackServer(
+                    port = 11435,
+                    bindHost = bindHost,
+                    apiKey = apiKey,
+                    a2aEnabled = a2aEnabled
+                )
+                next.start()
+                listener = next
+                listenerHost = bindHost
+                listenerKey = apiKey
+                listenerA2a = a2aEnabled
             }
-            listener?.shutdown()
-            listener = null
-            listenerHost = null
-            listenerKey = null
-            val next = McaLoopbackServer(port = 11435, bindHost = bindHost, apiKey = apiKey)
-            next.start()
-            listener = next
-            listenerHost = bindHost
-            listenerKey = apiKey
-        }
 
         fun isListenerRunning(bindHost: String): Boolean = synchronized(listenerLock) {
             listener?.isRunning == true && listenerHost == bindHost
@@ -216,6 +231,7 @@ class LocalApiForegroundService : Service() {
             listener = null
             listenerHost = null
             listenerKey = null
+            listenerA2a = false
         }
 
         fun start(context: Context, openPort: Boolean): Boolean =

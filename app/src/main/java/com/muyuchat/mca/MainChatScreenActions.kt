@@ -272,6 +272,8 @@ internal fun mainChatScreenActions(
             onBrowserTaskEvent = viewModel::onBrowserTaskEvent,
             onOpenBrowserTask = viewModel::startBrowserTask,
             onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
+            onChangeAgentMode = viewModel::changeAgentMode,
+            onClearWebSearchResearchMode = viewModel::clearWebSearchResearchModeForNextTurn,
             onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
             onDeleteFileAsset = viewModel::deleteFileAsset,
             onUseFileAsset = viewModel::useFileAsset,

@@ -92,7 +92,6 @@ internal fun McaAppMenuPage(
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var confirmClear by remember { mutableStateOf(false) }
     var chooseCompressionThreshold by remember { mutableStateOf(false) }
     var chooseSummaryModel by remember { mutableStateOf(false) }
     var showSummaryHistory by remember { mutableStateOf(false) }
@@ -151,7 +150,15 @@ internal fun McaAppMenuPage(
                 AppMenuRow(icon = { Icon(McaIcons.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
                 AppMenuRow(icon = { Icon(McaIcons.Tune, null) }, title = "预设管理", subtitle = "酒馆预设导入与本地/云端对话模型绑定", onClick = onOpenPresets)
                 AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
-                AppMenuRow(icon = { Icon(McaIcons.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
+                // D3: 原先「MCA」卡与本机状态卡各有一行「本地 API」，副标题语义不同、易被当成
+                // 两个功能。现在只保留这一行，并把本机启用状态折进副标题，信息不丢、入口唯一。
+                AppMenuRow(
+                    icon = { Icon(McaIcons.NetworkWifi, null) },
+                    title = "本地 API",
+                    subtitle = "接口地址、Key、API 使用文档 · " +
+                        if (state.apiEnabled || state.restEnabled) "已启用" else "未启用",
+                    onClick = onOpenApi
+                )
                  AppMenuRow(icon = { Icon(McaIcons.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与高级设置", onClick = onOpenSettings)
                 AppMenuRow(icon = { Icon(McaIcons.Image, null) }, title = "聊天背景", subtitle = "设置全局、助手或当前会话背景图片", onClick = onOpenBackgroundSettings)
                 AppMenuRow(icon = { Icon(McaIcons.Info, null) }, title = "快速开始", subtitle = "聊天、生图与常见问题", onClick = onOpenQuickStart)
@@ -177,12 +184,6 @@ internal fun McaAppMenuPage(
                     title = displayModelName(state.selectedModelName) ?: "未加载模型",
                     subtitle = "${"%.1f".format(state.stats.decodeTps)} token/s · ${state.stats.backend.uppercase()} 后端",
                     onClick = onOpenModels
-                )
-                AppMenuRow(
-                    icon = { Icon(McaIcons.NetworkWifi, null) },
-                    title = "本地 API",
-                    subtitle = if (state.apiEnabled || state.restEnabled) "已启用" else "未启用",
-                    onClick = onOpenApi
                 )
                 AppMenuRow(
                     icon = { Icon(McaIcons.Image, null) },
@@ -250,39 +251,19 @@ internal fun McaAppMenuPage(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             AppMenuCard {
+                // D1: 清空聊天记录只保留「设置 › 隐私与数据」这一个规范入口（含二次确认）。
+                // 菜单里保留可发现性，但动作改为导航，避免两处确认文案、两处写库入口。
                 AppMenuRow(
                     icon = { Icon(McaIcons.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                    title = "清空全部",
-                    subtitle = "删除本机保存的全部聊天记录",
+                    title = "清空聊天记录",
+                    subtitle = "同 设置 › 隐私与数据",
                     contentColor = MaterialTheme.colorScheme.error,
-                    onClick = { confirmClear = true }
+                    onClick = onOpenSettings
                 )
             }
         }
     }
 
-    if (confirmClear) {
-        AlertDialog(
-            onDismissRequest = { confirmClear = false },
-            title = { Text("清空全部历史") },
-            text = { Text("确定清空所有聊天记录吗？当前模型和模型文件不会被删除。") },
-            confirmButton = {
-                McaButton(style = McaButtonStyle.Text,
-                    onClick = {
-                        onClearHistory()
-                        confirmClear = false
-                    }
-                ) {
-                    Text("清空", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                McaButton(style = McaButtonStyle.Text,onClick = { confirmClear = false }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
 
     if (chooseCompressionThreshold) {
         AlertDialog(

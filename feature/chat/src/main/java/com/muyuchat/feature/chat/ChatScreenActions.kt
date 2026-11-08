@@ -141,6 +141,10 @@ data class ChatShellActions(
     val onBrowserTaskEvent: (BrowserTaskEvent) -> Unit = {},
     val onOpenBrowserTask: (BrowserTaskLaunch) -> Unit = {},
     val onSelectWebSearchResearchMode: (String) -> Unit = {},
+    /** `+` menu "转为 Agent 任务": one explicit intent, mutually exclusive with the others. */
+    val onChangeAgentMode: (Boolean) -> Unit = {},
+    /** Drops the next-turn research override (used when Agent mode is armed instead). */
+    val onClearWebSearchResearchMode: () -> Unit = {},
     val onToggleWebSearchForTurn: () -> Unit = {},
     val onDeleteFileAsset: (String) -> Unit = {},
     val onUseFileAsset: (String) -> Unit = {},

@@ -215,6 +215,15 @@ data class MainUiState(
     val nativeStatsJson: String = "{}",
     val webSearchConfig: WebSearchConfig = WebSearchConfig(),
     val webSearchTurnMode: WebSearchTurnMode = WebSearchTurnMode.FOLLOW,
+    /**
+     * `+` menu "转为 Agent 任务" for the next turn.
+     *
+     * Mutually exclusive with the image-prompt and research modes: they have no defined meaning
+     * together (an Agent task has its own submit target and its own plan). The exclusion rule and
+     * the pure state model live in `feature/chat/.../ChatComposerModes.kt`; this field is the
+     * durable copy the app layer and the send path read.
+     */
+    val agentModeEnabled: Boolean = false,
     val webSearchResearchModeOverride: WebSearchResearchMode? = null,
     val webSearchOneShotEnabled: Boolean = false,
     val webSearchStatusMessage: String? = null,

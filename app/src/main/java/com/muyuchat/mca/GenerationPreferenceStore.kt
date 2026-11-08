@@ -48,6 +48,9 @@ internal const val RICH_BLOCKS_ENABLED_KEY = "chat_rich_blocks_enabled"
     private const val KEY_API_KEY = "api_key"
     private const val KEY_API_ENABLED = "api_enabled"
     private const val KEY_REST_ENABLED = "rest_enabled"
+
+    /** A2A 1.0 surface (agent card + `POST /a2a`); off unless explicitly enabled. */
+    private const val KEY_A2A_ENABLED = "a2a_enabled"
     private const val KEY_PARAMS_JSON = "params_json"
     private const val KEY_RUNTIME_PARAMS_JSON = "runtime_params_json"
     private const val KEY_RUNTIME_USER_FIELDS = "runtime_user_fields"
@@ -90,24 +93,31 @@ internal const val RICH_BLOCKS_ENABLED_KEY = "chat_rich_blocks_enabled"
     }
 
     /**
-     * Reads the two Local API switches. REST is reported as enabled only when the API is: a stored
-     * `rest_enabled = true` with the API off must not resurrect the REST surface.
+     * Reads the Local API switches. REST and A2A are reported as enabled only when the API is:
+     * a stored `true` with the API off must not resurrect either surface.
      */
     fun loadApiPreferences(context: Context): LocalApiPreferences {
         val prefs = apiPreferences(context)
         val apiEnabled = prefs.getBoolean(KEY_API_ENABLED, false)
         return LocalApiPreferences(
             apiEnabled = apiEnabled,
-            restEnabled = apiEnabled && prefs.getBoolean(KEY_REST_ENABLED, false)
+            restEnabled = apiEnabled && prefs.getBoolean(KEY_REST_ENABLED, false),
+            a2aEnabled = apiEnabled && prefs.getBoolean(KEY_A2A_ENABLED, false)
         )
     }
 
-    /** Persists the two switches, collapsing REST to `false` whenever the API is off. */
-    fun persistApiPreferences(context: Context, apiEnabled: Boolean, restEnabled: Boolean) {
+    /** Persists the three switches, collapsing REST and A2A to `false` whenever the API is off. */
+    fun persistApiPreferences(
+        context: Context,
+        apiEnabled: Boolean,
+        restEnabled: Boolean,
+        a2aEnabled: Boolean = false
+    ) {
         apiPreferences(context)
             .edit()
             .putBoolean(KEY_API_ENABLED, apiEnabled)
             .putBoolean(KEY_REST_ENABLED, apiEnabled && restEnabled)
+            .putBoolean(KEY_A2A_ENABLED, apiEnabled && a2aEnabled)
             .apply()
     }
 
@@ -239,10 +249,12 @@ internal const val RICH_BLOCKS_ENABLED_KEY = "chat_rich_blocks_enabled"
     }
 }
 
-/** The two Local API switches as read from storage. */
+/** The Local API switches as read from storage. */
 internal data class LocalApiPreferences(
     val apiEnabled: Boolean,
-    val restEnabled: Boolean
+    val restEnabled: Boolean,
+    /** A2A 1.0 surface; defaults to false so the existing constructor calls stay off. */
+    val a2aEnabled: Boolean = false
 )
 
 /**

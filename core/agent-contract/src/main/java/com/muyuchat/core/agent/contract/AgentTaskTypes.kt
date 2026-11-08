@@ -85,7 +85,16 @@ data class CreateAgentTask(
      * path; a run resolves its read grant from that frozen selection, never from this command
      * object or from model text. Defaults to empty so existing callers stay source-compatible.
      */
-    val memorySpaceIds: Set<String> = emptySet()
+    val memorySpaceIds: Set<String> = emptySet(),
+    /**
+     * The conversation this task was started from, when it was started from one.
+     *
+     * Used only to write the run's terminal summary back into that conversation. It is not a frozen
+     * policy field and is not persisted on the task: the command is a transient input, and the durable
+     * task -> conversation mapping lives in a separate binding store written by the app layer. Null
+     * means "not started from a conversation", which is the normal case for scheduled or intent runs.
+     */
+    val chatSessionId: String? = null
 ) {
     init {
         AgentContract.requireId(commandId, "commandId")

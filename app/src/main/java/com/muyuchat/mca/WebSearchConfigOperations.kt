@@ -465,6 +465,46 @@ internal fun webSearchConfigFrom(
             backupProviders = backupProviders.take(3)
         )
 
+/**
+ * `+` menu Agent mode. Enabling it is one transition, not two:
+ *
+ * - `agentModeEnabled` is set and the research override is cleared in the **same** `copy`, so no
+ *   frame can show "Agent on + research armed";
+ * - the image-prompt draft is not app state, so the composer clears its own copy; this function is the
+ *   app-state half of the same rule and is documented here so the two cannot drift;
+ * - disabling touches only the flag, because "exit Agent mode" must not silently arm another mode.
+ *
+ * The pure exclusion rule lives in `com.muyuchat.feature.chat.ChatComposerModes`; this is its write.
+ */
+/** Drops only the next-turn override; the user's saved default research mode is untouched. */
+internal fun applyClearWebSearchResearchModeForNextTurn(port: WebSearchConfigPort) {
+    port.updateUiState { fields ->
+        if (fields.webSearchResearchModeOverride == null) {
+            fields
+        } else {
+            fields.copy(webSearchResearchModeOverride = null, webSearchStatusMessage = null)
+        }
+    }
+}
+
+internal fun applyChangeAgentMode(port: WebSearchConfigPort, enabled: Boolean) {
+    port.updateUiState { fields ->
+        if (enabled) {
+            fields.copy(
+                agentModeEnabled = true,
+                webSearchResearchModeOverride = null,
+                webSearchStatusMessage = null,
+                statusMessage = "\u5df2\u5f00\u542f Agent \u6a21\u5f0f\uff1a\u4e0b\u4e00\u8f6e\u4ea4\u7ed9 Agent \u6267\u884c"
+            )
+        } else {
+            fields.copy(
+                agentModeEnabled = false,
+                statusMessage = "\u5df2\u9000\u51fa Agent \u6a21\u5f0f"
+            )
+        }
+    }
+}
+
 internal fun applyToggleWebSearchForNextTurn(port: WebSearchConfigPort) {
     val state = port.uiState()
     val assistantDefault = state.selectedAssistant()?.webSearchEnabled == true

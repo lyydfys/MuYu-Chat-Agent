@@ -15,6 +15,7 @@ import com.muyuchat.feature.chat.withQuotedContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -120,6 +121,32 @@ internal class ChatWorkflowCoordinator(
         }
         val preparedInput = viewModel.prepareChatInput(state)
         if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return false
+        // Agent mode turns this send into an agent task instead of a model call. An image-bearing turn
+        // stays on the model path rather than silently dropping its attachments, because images are not
+        // part of the agent contract.
+        if (state.agentModeEnabled && preparedInput.imageAttachments.isEmpty()) {
+            viewModel.viewModelScope.launch {
+                val choices = viewModel.agentWorkspacePorts.modelCatalog.observeModelChoices().first()
+                val binding = com.muyuchat.mca.agent.inference.ChatAgentModelBinding.resolve(
+                    choices = choices,
+                    selectedCloudChatModelId = state.selectedCloudChatModelId
+                )
+                val failure = viewModel.submitAgentTurn(
+                    input = preparedInput.text,
+                    sessionId = state.activeChatSessionId,
+                    displayTitle = preparedInput.text,
+                    binding = binding
+                )
+                if (failure != null) {
+                    viewModel.showStatus(failure)
+                } else {
+                    // The turn belongs to the agent now. Clearing only after acceptance means a
+                    // rejected task leaves the user's text in place instead of eating it.
+                    store.update { it.copy(input = "") }
+                }
+            }
+            return true
+        }
         if (preparedInput.imageAttachments.size > 1) {
             if (!chatImageSubmissionPreflight.compareAndSet(false, true)) return false
             viewModel.viewModelScope.launch(Dispatchers.IO) {

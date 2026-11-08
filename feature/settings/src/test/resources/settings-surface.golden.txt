@@ -3,9 +3,14 @@
 # A line disappearing means a settings label or help text was removed from the UI.
    摘要: ${source.snippet}
    类型: ${listOf(source.trustLabel, source.hostLabel).filter { it.isNotBlank() }.joinToString(
+ · 预计剩余 ${formatUpdateEta(it)}
 $openBaseAddress（需开启开放端口）
 ${SettingsSection.entries.size} 个分区
+${hours}小时${minutes}分
 ${item.sourceCount} 源
+${label}收款码
+${minutes}分
+${safe.coerceAtLeast(1L)}秒
 ${state.diagnostics.size} 条本机诊断记录
 ${state.logs.size} 条
 .format(log.decodeTps)} token/s · 首 token ${log.ttftMs} ms
@@ -14,6 +19,7 @@ ${state.logs.size} 条
 API Key 已填写。
 API Key（可选）
 API使用文档
+Agent 工具审批
 Android content:// 不能稳定跨应用传给本机 HTTP API，建议转成 base64 或文件路径。本地识图需要先加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj；/v1/models 会返回 vision_ready，也可以在本地 API 页面直接运行“测试识图接口”。云端识图需要在对应云端推理引擎中开启图片输入能力，实际效果由所选模型和服务商决定。
 Brave LLM Context 路径正确
 Brave Web Search 路径正确
@@ -21,6 +27,7 @@ Brave 官方根地址会自动补全为完整 Web Search API 路径
 Brave 常规搜索推荐完整 Web Search API 路径 https://api.search.brave.com/res/v1/web/search；填写官方根地址 https://api.search.brave.com 时 MCA 会自动补全到 Web Search，AI grounding/RAG 可手动填写 /res/v1/llm/context。不要填控制台或聊天模型接口。
 Brave 需要 Search API 路径
 CPU $cpu · 进程 $processCpu · 内存 $memory
+GitHub 访问不稳定时，可直接使用上方离线赞赏码。
 JSON 请求体使用 OpenAI Chat Completions 格式；stream=true 时返回 SSE 流式输出。
 Jina Search 地址正确
 Jina Search 推荐使用 s.jina.ai
@@ -34,19 +41,23 @@ MCA 本机 Base URL
 MCA 联网检索诊断
 MCA 诊断报告
 MCA 默认不读取 localhost、局域网、链路本地和保留地址，这是防止网页读取误扫内网的安全策略。
+MuYu Chat Agent · 本地优先 · 模型与算力由你掌控
 Native 堆 ${formatKb(state.stats.nativeHeapKb)} · Java 堆 ${formatKb(state.stats.javaHeapKb)} · 系统可用 ${formatKb(state.stats.availMemKb)} · 运行预算 ${formatKb(state.stats.modelMemoryBudgetKb)}
 OpenAI 兼容接口与网页对话
 SDK/模型默认
 SearxNG 地址
 SearxNG 适合自建或可信实例
 SearxNG 通常填写实例根地址即可，MCA 会自动访问 /search?format=json；如果实例禁用 JSON，请换可信实例或自建。
+Star 完全免费，只需要一个 GitHub 账号。三步即可完成：
 Tavily Search 路径正确
 Tavily 官方根地址会自动补全 /search
 Tavily 应填写 Search API 地址
 Tavily 推荐 https://api.tavily.com/search；填写官方根地址 https://api.tavily.com 时 MCA 会自动补全 /search，并使用 POST JSON 调用。
 http://本机局域网IP:11435/v1
 上传的文本、Markdown、JSON、代码文件会保存为本机文本索引，便于从输入框重新添加到当前聊天。
+上次检查
 上次检查：${state.lastCheckedText}
+下方按钮打开 GitHub 官方仓库；如果加载较慢，请稍等或稍后重试。
 下载
 下载中
 下载失败
@@ -55,22 +66,28 @@ http://本机局域网IP:11435/v1
 不可用
 不是所有文本模型都能识图；MNN 需要完整多模态包，GGUF 需要匹配的视觉投影器。
 不是通用搜索服务
+不知道怎么点 Star？查看教程
 不确定性：$it
 不要把 Base URL 填成完整的 /v1/chat/completions，除非客户端明确要求填写完整请求地址。
 世界书与助手卡是文件存储，不会被这次恢复改动。
 世界书与助手卡是文件存储，不在本备份范围；备份里也不会有任何 API Key 或 token。
+主作者
 主搜索源限流、鉴权失败或没有可用结果时，MCA 只会按这里显式配置过的服务接力，不会调用未授权服务。
 仅在客户端要求填写完整请求地址，或你手动发起 HTTP 请求时使用。
+仅确认花钱操作
 仅缓存固定的系统提示词和角色设定前缀，且只保存在本机；每次请求中的消息、附件和其他请求范围内容不会写入缓存。
-仍在打磨的能力，可能随版本调整。
 从官方 GitHub Releases 检查并安装稳定版更新。
+仓库链接已复制
 代理
 以上能力只服务于 DSH 官方的设备与短信工具；MCA 自身不会在后台读取它们，也不会上传到任何服务器。
 会发起一次 SSE 流式短输出，并检查 [DONE] 终止帧；未加载本地模型时会返回 503。
 会发送一张极小的 base64 测试图；本地识图需 vision_ready=true。
 会额外读取前几个公开网页正文，提高回答质量，但速度会慢一点；本机、局域网、链路本地和保留地址会被安全拦截。
+传感器行由 8 个开关循环生成，无稳定行边界
+位于「高级设置」展开器内，折叠时不组合
 低相关
 使用说明
+使用说明是可展开区块，折叠时行未组合，无法滚动定位
 供同一台设备上的客户端、浏览器或本机组件访问。
 保存
 健康 ${item.healthLabel} ${item.healthScore}/100
@@ -82,28 +99,41 @@ http://本机局域网IP:11435/v1
 先测试完整 URL 直读，再测试关键词搜索，最后回到聊天页确认来源卡片。
 先用手机浏览器打开任意公网网页；仍失败时检查应用联网权限、Wi-Fi 登录页、私人 DNS、VPN、代理和系统安全中心。
 光线
+全自动
+全自动会跳过所有确认，包括可能产生费用的操作；请确认任务来源可信。
 公共 SearxNG 可能限流，稳定使用建议自建或使用带 Key 的搜索服务。Jina 配置 Key 后可在普通网页抓取内容不足时用 Reader 增强正文读取。
 公开 JSON
 公开 JSON 自检源
 公开 JSON 自检源只适合验证链路
 公开协议自检无需 Key，用于验证 JSON 接入、上下文注入、来源卡片和诊断链路；它不是通用搜索服务。
 公网
-关于
+关闭
+关闭 Star 提示
 关闭时不会发起请求
 关闭时每次查询都会弹一次确认；重启应用后恢复询问。
 关闭设置
+关闭赞助支持
 兼容 messages 里的 image_url，也兼容 Responses 风格 input_image。支持 data:image base64、本地可读路径、file: URL、可访问的 http(s) 图片。
 兼容接口
 内存
 内存不足，建议换小模型或降低上下文。
 冲突/不确定性: ${researchConflictWarnings.joinToString(
+决定 Agent 调用工具前是否需要你确认。改动立即生效，下一轮运行就会使用。
+分享 MCA
+分享项目
 刷新
+前往助手编辑器管理记忆
+前往联网检索设置
 前缀内容变化 × 3
 加载中
 加速度
 协议自检
 协议自检、研究闭环、清空记录
+去点 Star
 去系统设置
+去赞助
+发现新版本 v${latest.orEmpty()}
+发现新版本 v${latestVersion.orEmpty()}
 取消
 取消下载
 取消导入
@@ -113,7 +143,9 @@ http://本机局域网IP:11435/v1
 只取最近已知位置，不主动发起新定位；需要「位置」权限
 只在本轮开关或助手默认开启时联网
 只影响显示；每条消息仍可点「查看原文」回到 Markdown。
+只读与常规工具直接执行；截图、联网、命令这类可能产生费用或触达外部的动作仍需确认。
 只读查询最近短信（最多 20 条），返回号码后 4 位、接收时间和 120 字预览；
+只读说明卡，未接入 reveal（下一轮）
 可填写实例根地址，MCA 会自动请求 /search?format=json。公共实例经常限流或关闭 JSON，产品化使用建议自建，必要时再配置带 Key 的备用搜索源。
 可安装
 可恢复
@@ -122,6 +154,8 @@ http://本机局域网IP:11435/v1
 同网段连接
 同设备连接
 后续扩展
+启动图
+启用开关在页首固定段，未接入 reveal（下一轮）
 启用联网检索
 命中率 $hitRatePercent% · 命中 $hits / 尝试 $attempts 次 · 复用 ${formatTokenCount(reusedTokens)} tokens
 命中调研、评测、方案、对比等问题时启用多源研究
@@ -131,19 +165,27 @@ http://本机局域网IP:11435/v1
 在本机保存 llama.cpp 的前缀 KV 缓存，用于减少重复预填充。
 在线
 填入公开 JSON 协议自检源
+壁纸
+处理中…
 处理建议
 处理建议:
 备份
 备份与恢复
+备份卡之前有若干条件 item，静态下标不成立
 备用 1
 备用 2
 备用 3
 备用搜索源
+备用搜索源是可展开容器，折叠时不组合
 复制
 复制 API Key
 复制诊断
+复制链接
+外观
+外观行由 :core:designsystem 的共享控件渲染，本轮不改该模块
 失败
 如何获取搜索源
+如果 MCA 帮到了你
 如果同设备 127.0.0.1 不通，通常改用同网段地址即可定位问题。开放端口用完后建议关闭。
 如果客户端必须手动填写模型名，可复制 /v1/models 返回的 id。
 如果返回 503，说明接口已连通但本地聊天模型尚未加载。
@@ -154,26 +196,32 @@ http://本机局域网IP:11435/v1
 安全拦截
 安全边界
 安装
+安装包：$size
 安装包：${state.apkSizeText}
 安装包：${state.apkSizeText} · 已下载 ${formatBytes(state.downloadedBytes)} / ${formatBytes(state.downloadTotalBytes)}
+安装更新
 完成
 完成一次测试或聊天联网后会显示在这里。
 完整信息已保留在诊断报告中。
 完整聊天接口
 完整记录只保存在本机，可按需导出。
+完整设置见 关于
 定位
 定位只取最近已知位置，不主动发起新定位以免耗电。
 实时负载
 实验功能
+审批档位：${preset.title}
 客户端和 MCA 在同一台 Android 设备上运行时优先使用。若客户端无法访问 127.0.0.1，可开启“开放端口”后改用同网段地址。
 客户端的 Key、Token 或 Authorization 字段填写这个值。请求头格式：Authorization: Bearer <api-key>。
 富文本块显示
+对话与生成
 导出
 导出备份包（JSON）
 导出备份包：包含格式版本、导出时间、应用版本、五张数据库表的行数据（凭据列会被剔除并记录）与非敏感设置。
 将用备份里的行数据替换当前数据库中的对话、消息、助手、知识库与知识库文档。
 尚未授予系统「短信」权限
 尚未检查
+尚未检查更新
 尚未测试 /v1/chat/completions。
 尚未测试 /v1/models。
 尚未测试图片输入接口。
@@ -182,18 +230,25 @@ http://本机局域网IP:11435/v1
 展开
 展开全部
 工作方式
+工作方式卡是只读说明，不是可定位的行
 工具 / MCP
+已下载 ${formatUpdateBytes(update.downloadedBytes)} / 
 已停用
+已关闭
 已加入故障接力链路
 已启用 ${listOf(backup0Enabled, backup1Enabled, backup2Enabled).count { it }} 个
 已启用：可读取网页链接
 已安装
+已定位到「$title」
+已开启
 已执行（无公开占用率）
+已是最新版本 v${latest ?: update.currentVersionName.ifBlank { 
 已是最新稳定版
 已生成，可复制或导出
 已生成，复制后填入客户端 Key/Token
 已索引 ${state.fileAssetCount} 个文件
 已记录 $attempts 次缓存尝试。
+已跳过 v${latestVersion.orEmpty()}，可在检查更新后重新查看。
 已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。
 已配置
 已配置真实搜索：${state.realSearchProviderLabel.ifBlank { state.providerLabel }}
@@ -203,6 +258,7 @@ http://本机局域网IP:11435/v1
 已预留助手记忆入口
 常见错误
 常规搜索推荐：https://api.search.brave.com/res/v1/web/search；直接填写 https://api.search.brave.com 时 MCA 会自动补全到 Web Search。AI grounding/RAG 可填写：https://api.search.brave.com/res/v1/llm/context。MCA 会使用 X-Subscription-Token 发送 Key。$keyHint 如果你使用自建代理并返回兼容 JSON，也可以改用“自定义”。
+应用图标
 应用更新
 应用联网权限
 建议：$it
@@ -210,9 +266,13 @@ http://本机局域网IP:11435/v1
 开启后同网段设备可通过 HTTP 访问本机模型服务。
 开放端口
 开放端口已开启，请只在可信网络中使用。
+开源仓库
+开源许可
+开源项目的持续维护离不开每一份支持。可以点 Star、分享项目，或前往 GitHub 赞助页支持持续开发。
 引擎后端没有初始化，请重启 APP 或重新加载模型。
 引用
 引用审计
+当前 v$currentVersion · 最新 v${latestVersion.orEmpty()}
 当前优先保持 MCA 本地模型、API 服务和助手角色卡主线稳定。
 当前使用的是公开 JSON 协议自检源。
 当前填写的是公开协议自检源，只适合测试链路，不建议保存为日常搜索服务。
@@ -221,6 +281,7 @@ http://本机局域网IP:11435/v1
 当前服务建议
 当前未填写 API Key。
 当前模型
+当前模型、性能、内存、实时负载，以及应用更新与离线翻译包。
 当前测试结果
 当前版本
 当前版本先提供助手侧的记忆开关；后续会在这里集中查看、编辑和删除本机记忆。
@@ -228,23 +289,34 @@ http://本机局域网IP:11435/v1
 待安装
 待机
 待配置
+微信支付
 快速可用选 Tavily 或 Brave：到服务商官网注册并创建 Search API Key。
+怎么点 Star？
 性能
 恢复会覆盖当前对话、消息、助手、知识库与知识库文档的数据库记录；失败时整批回滚，原数据不变。
 恢复前会先把当前数据导出到应用缓存备份；恢复失败会整批回滚，现有数据保持不变。
 恢复备份会覆盖当前数据
 恢复（覆盖当前数据）
+意见反馈
 手动
 手机端本地 AI 生图方案优缺点 生态 可行性 最新评测
 手电筒
+打开 GitHub Release
 打开 Release
+打开$SEARCH_TITLE
+打开${hit.entry.section.title}
 打开${section.title}
+打开仓库并点 Star
 打开网络设置
+打开项目主页
+扫码赞助（国内可直连）
 把当前问题扩展为官方、评测、限制和社区等多角度查询
 把模型、数据与联网能力的边界留在设备上。
 抓取网页正文
 报告包含引擎、模型、内存、参数和最近错误，默认不直接展示。
+报告问题或提交建议
 持久化前缀缓存
+按钮变成 Starred 就表示点 Star 成功。
 按问题判断是否需要联网
 换更明确的关键词，加入官网/文档/评测等限定词；如果公共 SearxNG 返回空结果，建议自建或切换 Brave/Tavily/Jina。
 授予权限
@@ -260,15 +332,20 @@ http://本机局域网IP:11435/v1
 搜索服务、触发策略与来源质量。
 搜索服务端暂时异常，先切换备用源或稍后重试；自建服务请检查服务日志和反代状态。
 搜索源配置、测试步骤、隐私边界
+搜索设置
+支付宝
+支持项目持续开发
 收起
+收起离线赞赏码
 文件不是可加载的 GGUF 模型。
 文件库索引
+新手引导
 无响应正文
 无法恢复
 无法解析
 无结果
 日志/诊断
-日志与诊断
+日志与排错
 时间: $createdAtText
 时间、算式和骰子全部在设备本地执行，不联网、不读写文件、不改动聊天记录；只把结果回填给当轮回复。
 普通
@@ -281,10 +358,18 @@ http://本机局域网IP:11435/v1
 暂无记录
 暂无运行日志
 更多测试
+更换壁纸
+更新与关于
 更新中
+更新包已就绪，可安装
+更新卡是本轮 D2 收敛目标，行级 reveal 随 D2 一起接线
+更新记录
+更新记录 · v$version
 更新说明
 最新版本
+最新版本 v$latestVersion
 最近检索
+最近检索是可展开容器，折叠时不组合
 最近问题
 有可用更新
 服务: $providerLabel
@@ -317,10 +402,11 @@ http://本机局域网IP:11435/v1
 本地生图速度取决于设备、模型包和分辨率；生成任务应在图片页显示状态、耗时、取消和失败重试。
 本机
 本机 Base URL
-本机数据清理与缓存边界。
+本机数据清理、缓存边界与 DSH 设备能力授权。
 本机调用
 本机调用已开启；同设备客户端优先使用 127.0.0.1 地址。
 本次运行内不再询问短信确认
+本版本不提供应用图标切换；图标随安装包发布。
 来源:
 来源数: $sourceCount
 来源相关性不足时，尝试把问题改成具体产品名、版本号、接口名或错误码，必要时开启研究模式。
@@ -333,6 +419,9 @@ http://本机局域网IP:11435/v1
 检查 Base URL 和协议路径是否是搜索接口，不要把聊天模型接口、控制台页面或网页地址填到联网检索服务里。
 检查中
 检查协议类型和 Base URL 是否匹配；自建网关可使用 /search?q={query}&limit={max_results} 这类 URL 模板，返回 results/items/data/hits/organic_results 等常见 JSON 结构。
+检查更新
+检查更新失败
+检查更新失败，请稍后重试。
 检索
 检索 · ${search.hubStatusLabel()}
 检索健康
@@ -344,20 +433,28 @@ http://本机局域网IP:11435/v1
 检索词：${item.searchedQueries.joinToString(
 模型 · ${stats.hubModelLabel()}
 模型、数据与联网能力的一站式控制台。
+模型与运行
 模型列表请求成功
-模型加载、生成参数、后端与内存。
 模型已加载。
+正在下载更新…
+正在处理所选图片…
+正在校验更新包…
+正在检查 GitHub Releases…
 正在测试...
 步数
+每次工具调用都先询问；只读工具自动放行，因为读没有可批准的动作。
 每轮非空问题都会先检索
 气压
 没有可用来源
 没有可评估来源
 没有命中自动联网线索
+没有找到匹配的设置项，换个关键词试试。
 没有活动网络
+没有账号可以现场注册，只需一个邮箱。
 流式聊天接口请求成功
 流式输出
 测试会使用当前表单内容，不需要先保存。
+测试区是可展开容器，折叠时不组合
 测试当前填写
 测试检索
 测试模型列表
@@ -374,9 +471,13 @@ http://本机局域网IP:11435/v1
 清空文件库
 清空聊天
 清空记录
+清除
+点 Star 只需要登录 GitHub，不会修改代码，也不会产生任何费用。
 点击刷新读取本机运行记录；生成诊断可收集引擎与设备信息，便于排查问题。
+点击右上角的 Star
 点击在应用内查看
 版本
+版本信息
 版本更新、开源许可与项目信息。
 状态 · ${stats.hubRuntimeLabel()}
 状态: ${if (success) 
@@ -384,9 +485,11 @@ http://本机局域网IP:11435/v1
 生成诊断
 用于确认 Base URL、Key 和模型列表路径是否正确。
 用途
+登录或注册 GitHub
 相关性较弱
 相关性过滤
 省电策略
+短信区行由权限状态动态生成，无稳定行边界
 短信只读查询（DSH 能力）
 短信权限被拒绝或系统未授予：DSH 查询会返回未授权。可重新授权，或到系统设置中打开。
 研究协议自检
@@ -404,6 +507,7 @@ http://本机局域网IP:11435/v1
 移动数据
 空结果
 空问题
+立即更新
 粘贴服务商 Key
 精确位置
 系统尚未验证
@@ -411,6 +515,7 @@ http://本机局域网IP:11435/v1
 系统设置
 结果: $message
 结果数量
+给 MCA 点个 Star
 综合建议: ${researchSynthesisGuidance.joinToString(
 缓存: $cacheStatus
 缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}
@@ -429,9 +534,12 @@ http://本机局域网IP:11435/v1
 聊天 ${state.chatSessionCount} 条 · 图片 ${state.imageAssetCount} 张 · 文件 ${state.fileAssetCount} 个
 聊天接口已连接，但流式响应缺少 [DONE] 终止帧，请检查本地 API 服务状态。
 聊天本地工具
+聊天本地工具、富文本显示与能力说明。
+联网与检索
 联网检索
 脚本与样式永不执行：script/style 整段丢弃，事件属性与危险链接不会进入界面。
 自动
+自动检查
 自定义
 自定义 JSON 适合自建搜索网关
 自定义接口需要鉴权时填写
@@ -452,6 +560,7 @@ http://本机局域网IP:11435/v1
 让通用第三方 OpenAI-compatible 客户端调用 MCA 已加载的本地聊天模型。
 记录只保存在本机，包含检索词、来源数、耗时和失败摘要，不保存 API Key。
 记忆管理
+记忆管理占位卡无点击目标，尚未接入 reveal
 设备传感器与位置（DSH 能力）
 设置中心 / ${section.title}
 证据分组: ${researchEvidenceGroups.joinToString(
@@ -459,8 +568,11 @@ http://本机局域网IP:11435/v1
 识图接口请求成功
 诊断
 诊断报告
+该版本没有填写发布说明。
+该行只在有诊断报告时才插入 LazyColumn，item 下标不稳定，无法按下标滚动
 请先
 请先在模型页加载模型。
+请在 GitHub 点个 Star，这对我们意义重大
 请求参数
 请求示例
 请求超时通常来自移动网络波动、公共实例拥堵或正文抓取过慢；可关闭抓取网页正文、降低结果数量或换更稳定的搜索源。
@@ -472,20 +584,29 @@ http://本机局域网IP:11435/v1
 读取一次大气压（hPa）
 读取一次环境光强度（lux）
 读取今日累计步数；需要「身体活动」权限
+调参记录区仅在非空时插入，item 下标随运行态变化
 调参记录（最近 ${visibleAgentLogs.size} 条 / 共 ${state.agentLogs.size} 条）
+谨慎（默认）
 质量 ${item.qualityLabel} ${item.qualityScore}/100
 质量依据: ${qualityReasons.joinToString(
 资料质量: $qualityLabel ($qualityScore/100)
+赞助完全自愿，不影响任何功能。感谢每一份支持！
+赞助支持
 超时
+跟随系统的深色/浅色设置显示对应的启动背景色，与应用首帧一致。
+跟随系统，或固定浅色与深色。
 路径不存在
+跳过此版本
 身体活动
+输入关键词搜索设置项。
+输入关键词，例如 模型、缓存、外观
 输出 ${log.genTokens} · RSS ${formatKb(rssKb ?: log.nativePssKb)} · PSS ${formatKb(log.nativePssKb)}
-运行
 运行中
-运行日志、API 日志与诊断导出。
+运行日志、诊断导出与备份恢复。
 运行正常
 运行状态
 运行记录
+运行记录区仅在日志非空时插入，item 下标随运行态变化
 运行记录（最近 ${visibleLogs.size} 条 / 共 ${state.logs.size} 条）
 返回
 返回聊天
@@ -497,16 +618,23 @@ http://本机局域网IP:11435/v1
 连接参数、接口路径、流式输出与排错
 连接自检
 适用于同一设备、本地浏览器、同网段电脑或其他受信任设备；模型仍在手机端本地运行。
+选一张图片作为全局背景。图片会被压缩后保存在应用私有目录，不会上传。
+选择图标
+选择壁纸
 速度 ${
 配置中心
 配置即时生效，敏感数据留在本机。
 配置步骤
 重新复制 API Key，确认账号已开通对应搜索接口和额度；Brave 使用 X-Subscription-Token，Tavily/Jina 使用 Bearer Key。
 重新授权
+重新查看新手引导
+重新走一遍首次启动时的功能说明；不会清除聊天记录、模型或已保存的设置。
+重试
 重试下载
 鉴权失败
 鉴权或权限
 链接可用
+链接已复制
 错误
 闭环
 闭环自检
@@ -516,17 +644,21 @@ http://本机局域网IP:11435/v1
 问题：${latestDiagnostic.query}
 陀螺仪
 限流
+除危险操作外不再询问，包括支付与外部动作；只在完全信任的任务里使用。
 隐私与数据
 隐私可控选自建 SearxNG；网页正文增强选 Jina；团队或高级用户可接自建 JSON 网关。公开 JSON 自检源只验证链路，不能当正式搜索源。
 需检查
 需要 MNN 多模态包或 GGUF+mmproj
 需要启用或配置搜索服务
 需要在联网检索页配置服务
-需要排错时，可到“日志与接口”导出完整诊断。
+需要排错时，可到“日志与诊断”导出完整诊断。
 音频
+页内固定卡，未接入 reveal（下一轮）
+页内固定段，未接入 reveal（下一轮）
 预览
 首 token ${state.stats.ttftMs} ms · 速度 ${
 高级设置
+高级设置是可展开容器，需先展开才能定位子行
 默认全部关闭，由你逐项打开。每次请求只读取一次数据，不会持续采集；
 ：选择 
 ；实际 

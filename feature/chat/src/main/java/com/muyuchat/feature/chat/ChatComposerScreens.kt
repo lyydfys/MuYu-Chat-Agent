@@ -163,6 +163,11 @@ internal fun ChatInputBar(
     onToggleWebSearchForTurn: () -> Unit,
     onSelectWebSearchResearchMode: (String) -> Unit,
     onOpenWebSearchSettings: () -> Unit,
+    /** `+` menu "转为 Agent 任务"; durable app state, so the toggle is reported upward. */
+    agentMode: Boolean = false,
+    onAgentModeChange: (Boolean) -> Unit = {},
+    /** Clears the next-turn research override when Agent mode is armed instead. */
+    onClearWebSearchResearchMode: () -> Unit = {},
     /** One-turn quote shown above the input; null hides the bar. */
     quotedMessage: ChatQuotedMessage? = null,
     onDismissQuote: () -> Unit = {},
@@ -175,7 +180,36 @@ internal fun ChatInputBar(
     val composerMenu = rememberSaveable(saver = ComposerMenuLifecycle.LifecycleSaver) {
         ComposerMenuLifecycle()
     }
+    // The three composer modes are mutually exclusive; [ChatComposerModes] owns that rule.
+    //
+    // Ownership is split on purpose:
+    // - agent mode is durable app state (`MainUiState.agentModeEnabled`) because the app layer's send
+    //   path reads it after the session is saved;
+    // - the image-prompt draft belongs to this screen and is discarded with it;
+    // - research is derived from the app-state override, so it is read-only here.
+    // Toggles therefore report upward (agent) or write the local draft, and the plain booleans below
+    // are only *reads* of the three owners. They cannot disagree, because every write goes through
+    // the single exclusion rule in ChatComposerModes.
     var imagePromptMode by rememberSaveable { mutableStateOf(false) }
+    val composerModes = ChatComposerModes(
+        agentMode = agentMode,
+        imagePromptMode = imagePromptMode,
+        researchMode = webSearchResearchOverridden
+    )
+    // One place that applies a transition to all three owners: the local draft is written here, the
+    // durable agent flag is reported upward, and the research override is cleared through its own
+    // owner. Every enable-path below funnels through this, so the three can never disagree.
+    val applyModes: (ChatComposerModes) -> Unit = { next ->
+        imagePromptMode = next.imagePromptMode
+        if (next.agentMode != agentMode) onAgentModeChange(next.agentMode)
+    }
+    // Selecting a research mode arms that mode and clears the other two first. Both entry points
+    // (the sheet row and the floating capsule) use this same wrapper, so "research on + agent on"
+    // cannot be produced by whichever one the user happened to tap.
+    val selectResearchMode: (String) -> Unit = { mode ->
+        applyModes(ChatComposerModes(researchMode = true))
+        onSelectWebSearchResearchMode(mode)
+    }
     var showAutoImageApprovalConfirmation by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
@@ -247,7 +281,12 @@ internal fun ChatInputBar(
         onPhoto = onOpenPhoto,
         onFile = onOpenFile,
         onLibrary = onOpenFileLibrary,
-        onImagePromptMode = { imagePromptMode = !imagePromptMode },
+        onImagePromptMode = {
+            val next = composerModes.toggle(ChatComposerMode.IMAGE_PROMPT)
+            // Only the enabling transition clears the other two; leaving a mode arms nothing.
+            if (next.imagePromptMode) onClearWebSearchResearchMode()
+            applyModes(next)
+        },
         assistantImageToolAvailable = assistantImageToolAvailable,
         assistantImageToolUnavailableReason = assistantImageToolUnavailableReason,
         assistantImageToolAutoApproval = assistantImageToolAutoApproval,
@@ -259,9 +298,20 @@ internal fun ChatInputBar(
                 onSetAssistantImageToolAutoApproval(false)
             }
         },
+        agentMode = composerModes.agentMode,
+        onToggleAgentMode = {
+            val next = composerModes.toggle(ChatComposerMode.AGENT)
+            if (next.agentMode) onClearWebSearchResearchMode()
+            applyModes(next)
+        },
         imagePromptMode = imagePromptMode,
-        onWebSearch = onToggleWebSearchForTurn,
-        onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
+        onWebSearch = {
+            // Enabling web search is also "this is a normal chat turn": the two exclusive modes leave
+            // through the same applier instead of silently staying armed.
+            if (!webSearchEnabledForTurn) applyModes(ChatComposerModes())
+            onToggleWebSearchForTurn()
+        },
+        onSelectWebSearchResearchMode = selectResearchMode,
         onOpenWebSearchSettings = onOpenWebSearchSettings,
         webSearchEnabled = webSearchEnabled,
         webSearchConfigured = webSearchConfigured,
@@ -279,7 +329,7 @@ internal fun ChatInputBar(
         menu = composerMenu,
         selected = webSearchResearchMode,
         overridden = webSearchResearchOverridden,
-        onSelect = onSelectWebSearchResearchMode,
+        onSelect = selectResearchMode,
         modifier = modifier
     )
     Surface(
@@ -560,7 +610,7 @@ internal fun ChatInputBar(
                     ) {
                         if (visibleInput.isBlank()) {
                             Text(
-                                if (imagePromptMode) "描述要生成的图片" else "问问 MCA",
+                                ChatComposerModes.composerPlaceholder(composerModes),
                                 color = inputPlaceholderColor,
                                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp)
                             )

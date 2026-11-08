@@ -460,6 +460,12 @@ internal class AgentHostAssembly(
         // Outermost decorator: records the immutable catalogHash/tool surface this run executed
         // with, and drops it when the coordinator releases the run-scoped catalog.
         val catalogProvider = AgentRunCatalogSnapshotRecorder(packageReadyProvider)
+        // Durable task -> conversation map plus the sink that writes a finished run's summary back.
+        // Both are app-owned: the runtime only ever sees the ids.
+        val chatSessionDao = McaRoomDatabase.get(application).chatSessionDao()
+        val chatBindingStore = com.muyuchat.mca.agent.projection.FileAgentTaskChatBindingStore(
+            java.io.File(application.filesDir, "agent/chat-bindings")
+        )
         AgentRuntimeAssembly(
             data = data,
             modelPort = modelPort,
@@ -490,7 +496,18 @@ internal class AgentHostAssembly(
             parkWakeScheduler = com.muyuchat.mca.WorkManagerAgentParkWakeScheduler(application),
             // Explicit user preferences: extracted from a task goal on the same store this port reads.
             preferencePort = agentPreferencePort,
-            preferenceMemory = agentPreferenceMemory
+            preferenceMemory = agentPreferenceMemory,
+            // A finished run's summary lands back in the conversation it was started from. The
+            // binding store is written when the task is created; an unbound run (scheduled, intent,
+            // workflow) resolves to null and writes nothing at all.
+            taskChatBindingStore = chatBindingStore,
+            agentTurnSummarySink = com.muyuchat.mca.agent.projection.RoomAgentTurnSummarySink(
+                journal = data.journal,
+                dao = chatSessionDao,
+                lastPositionOf = { sessionId ->
+                    chatSessionDao.messages(sessionId).lastOrNull()?.position ?: -1
+                }
+            )
         ).also { runtime ->
             agentRuntimeRef = runtime
             McaGenerationForegroundService.agentStopActionHandler = { intent ->

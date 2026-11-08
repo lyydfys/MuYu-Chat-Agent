@@ -267,6 +267,9 @@ val UiStateFields.prefixCacheTelemetry: PrefixCacheTelemetryState
 val UiStateFields.chatLocalToolsEnabled: Boolean
     get() = snapshot.chatLocalToolsEnabled
 
+val UiStateFields.richBlocksEnabled: Boolean
+    get() = snapshot.richBlocksEnabled
+
 val UiStateFields.models: List<ModelManifest>
     get() = snapshot.models
 
@@ -452,6 +455,9 @@ val UiStateFields.webSearchConfig: WebSearchConfig
 
 val UiStateFields.webSearchTurnMode: WebSearchTurnMode
     get() = snapshot.webSearchTurnMode
+
+val UiStateFields.agentModeEnabled: Boolean
+    get() = snapshot.agentModeEnabled
 
 val UiStateFields.webSearchResearchModeOverride: WebSearchResearchMode?
     get() = snapshot.webSearchResearchModeOverride

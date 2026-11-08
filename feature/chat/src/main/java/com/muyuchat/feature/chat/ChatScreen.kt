@@ -171,6 +171,8 @@ fun ChatScreen(
     val onOpenBrowserTask = actions.shell.onOpenBrowserTask
     val onSelectWebSearchResearchMode = actions.shell.onSelectWebSearchResearchMode
     val onToggleWebSearchForTurn = actions.shell.onToggleWebSearchForTurn
+    val onChangeAgentMode = actions.shell.onChangeAgentMode
+    val onClearWebSearchResearchMode = actions.shell.onClearWebSearchResearchMode
     val onDeleteFileAsset = actions.shell.onDeleteFileAsset
     val onUseFileAsset = actions.shell.onUseFileAsset
     val onDownloadOfflineTranslation = actions.shell.onDownloadOfflineTranslation
@@ -562,6 +564,9 @@ fun ChatScreen(
                 visionCapabilityDetail = state.visionCapabilityDetail,
                 visionCapabilityReady = state.visionCapabilityReady,
                 onToggleWebSearchForTurn = onToggleWebSearchForTurn,
+                agentMode = state.agentModeEnabled,
+                onAgentModeChange = onChangeAgentMode,
+                onClearWebSearchResearchMode = onClearWebSearchResearchMode,
                 onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
                 quotedMessage = state.quotedMessage,

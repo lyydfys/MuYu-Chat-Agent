@@ -178,6 +178,12 @@ internal class WebSearchWorkflowCoordinator(
     /** 切换下一轮检索开关。 */
     fun toggleWebSearchForNextTurn() = applyToggleWebSearchForNextTurn(port)
 
+    /** `+` menu Agent mode: mutually exclusive with image-prompt/research (ChatComposerModes). */
+    fun changeAgentMode(enabled: Boolean) = applyChangeAgentMode(port, enabled)
+
+    /** Drops the next-turn research override without touching the saved default. */
+    fun clearWebSearchResearchModeForNextTurn() = applyClearWebSearchResearchModeForNextTurn(port)
+
     /** 循环切换研究模式。 */
     fun cycleWebSearchResearchModeForNextTurn() = applyCycleWebSearchResearchModeForNextTurn(port)
 

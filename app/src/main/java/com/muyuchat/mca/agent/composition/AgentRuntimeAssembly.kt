@@ -159,7 +159,7 @@ class AgentRuntimeAssembly(
      * it the summary writer correctly stays silent rather than guessing a session.
      */
     private val taskChatBindingStore: com.muyuchat.mca.agent.projection.AgentTaskChatBindingStore? = null,
-    /** Session the caller is creating the task from; ignored when no store is wired. */
+    /** Fallback session when the command carries none; tests and single-conversation hosts use it. */
     private val chatSessionIdForNewTask: String? = null
 ) : AgentWorkspaceCommands {
 
@@ -173,7 +173,17 @@ class AgentRuntimeAssembly(
      * nothing until a task→conversation binding exists (see [AgentTurnSummarySink]).
      */
     private val journal = data.journal
-        .reportingAgentTurnSummaries(agentTurnSummarySink)
+        .reportingAgentTurnSummaries(
+            sink = agentTurnSummarySink,
+            // run -> task -> conversation. The binding store is the only place the conversation id
+            // lives; an unbound run (scheduled, intent, workflow frame) answers null and writes
+            // nothing, which keeps an agent summary out of whichever chat happens to be open.
+            resolveChatSession = { runId ->
+                val store = taskChatBindingStore ?: return@reportingAgentTurnSummaries null
+                val taskId = data.journal.readRun(runId)?.run?.taskId ?: return@reportingAgentTurnSummaries null
+                store.chatFor(taskId)
+            }
+        )
         .let { observed ->
             if (runObserver == null) observed else ObservingAgentJournal(observed, runObserver)
         }
@@ -376,7 +386,9 @@ class AgentRuntimeAssembly(
                 // the run terminates, and a replay must not create a second binding.
                 if (!outcome.idempotentReplay) {
                     val store = taskChatBindingStore
-                    val session = chatSessionIdForNewTask
+                    // Per-command value wins: the same host can start tasks from different
+                    // conversations, and a fixed construction-time value would bind them all to one.
+                    val session = command.chatSessionId ?: chatSessionIdForNewTask
                     if (store != null && !session.isNullOrBlank()) {
                         runCatching { store.bind(outcome.task.taskId, session, clock.nowMillis()) }
                     }
