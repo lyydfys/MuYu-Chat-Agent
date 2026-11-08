@@ -1,0 +1,27 @@
+{
+  "schema": "mca.website.release.v1",
+  "generated_at": "2026-11-07T04:42:20Z",
+  "source": "https://api.github.com/repos/lyydfys/MuYu-Chat-Agent/releases/latest",
+  "tag": "v0.4.1",
+  "name": "MCA v0.4.1 — DSH 内核升级到官方 0.2.2-rc.1",
+  "published_at": "2026-11-07T04:42:20Z",
+  "published_date": "2026-11-07",
+  "asset_name": "MCA-v0.4.1-arm64-v8a.apk",
+  "size_bytes": 642510504,
+  "size_label": "612.7 MB",
+  "sha256": "4320a4ef2d7424e38a3afed2b2ccfee5e42713e8cb982d629e21c605f8c0e6f4",
+  "abi": "arm64-v8a",
+  "min_sdk": 26,
+  "min_android": "Android 8.0",
+  "license": "Apache-2.0",
+  "download_url": "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk",
+  "releases_url": "https://github.com/lyydfys/MuYu-Chat-Agent/releases",
+  "latest_url": "https://github.com/lyydfys/MuYu-Chat-Agent/releases/latest",
+  "mirrors": [
+    {
+      "label": "gh-proxy.com",
+      "url": "https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk",
+      "note": "第三方加速，与应用内更新器一致；安装前核对 SHA-256"
+    }
+  ]
+}

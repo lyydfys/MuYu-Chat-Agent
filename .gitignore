@@ -64,3 +64,15 @@ tmp_*/
 /app/src/main/assets/offline/
 /artifacts/offline-runtime/
 
+# ---- MCA website: track source, ignore working artefacts ----------------------------------
+#
+# docs/website/ is the production site (deployed to mca.mac-api.xyz). Its source and shipped
+# assets are tracked. These are NOT site content and must stay out of the repo:
+#
+#   assets/device/  116 PNGs (~65 MB) captured by scripts/device-*.py while producing the rail
+#   preview/        verification captures written by the checks in .tmp/
+#   assets/retired/ superseded media kept only for reference
+#
+/docs/website/assets/device/
+/docs/website/preview/
+/docs/website/assets/retired/

@@ -1,0 +1,1294 @@
+<!doctype html>
+<html lang="zh-CN" data-static="0">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MCA — 断网也能用的 Android AI 工作台</title>
+<meta name="description" content="MCA 是 Android 上的本地优先 AI 工作台：本地模型、角色卡、云端接口、生图、生视频、DSH 工作台、联网检索与 OpenAI 兼容的 Local API。断网也能用，模型在设备上。">
+<meta name="theme-color" content="#F8F9FA">
+<meta property="og:title" content="MCA — 断网也能用">
+<meta property="og:description" content="把本地模型、角色卡、生图、生视频、DSH 工作台与 Local API 装进一台 Android 手机。">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="MCA — MuYu Chat Agent">
+<meta property="og:image" content="og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="MCA 分享卡片：断网，也能用。">
+<meta property="og:locale" content="zh_CN">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="MCA — 断网也能用">
+<meta name="twitter:description" content="把本地模型、角色卡、生图、生视频、DSH 工作台与 Local API 装进一台 Android 手机。">
+<meta name="twitter:image" content="og.png">
+<!-- 上线前必改：把 SITE_ORIGIN 换成正式域名（不带斜杠），并取消下面 canonical 的注释。
+     预览阶段刻意不写 canonical，避免把 locahost/示例域名当成正式规范地址。 -->
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="favicon.svg">
+<link rel="preload" as="style" href="site.min.css">
+  <link rel="preload" as="image" imagesrcset="assets/hero-1080.webp 1080w, assets/hero-720.webp 720w" imagesizes="(max-width: 720px) 270px, (max-width: 1024px) 300px, 300px" type="image/webp">
+  <link rel="stylesheet" href="site.min.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "MCA — MuYu Chat Agent",
+  "alternateName": "MuYu Chat Agent",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Android 8.0+",
+  "softwareVersion": "0.4.1",
+  "fileSize": "642510504",
+  "downloadUrl": "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk",
+  "installUrl": "https://github.com/lyydfys/MuYu-Chat-Agent/releases/latest",
+  "softwareHelp": "https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/README.md",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+  "description": "Android 本地优先 AI 工作台：本地模型、角色卡、云端接口、生图、生视频、DSH 工作台、联网检索与 OpenAI 兼容 Local API。",
+  "featureList": [
+    "本地推理（MNN / llama.cpp）",
+    "角色卡与世界书导入",
+    "云端 OpenAI 兼容 / Anthropic Messages",
+    "本地与云端生图（文生图 / 图生图 / 局部重绘）",
+    "Wan 2.2 生视频工作流（可编辑节点图）",
+    "DSH 工作台（预览）",
+    "OpenAI 兼容 Local API"
+  ],
+  "author": { "@type": "Organization", "name": "MCA contributors", "url": "https://github.com/lyydfys/MuYu-Chat-Agent" }
+}
+</script>
+<script>
+/* Theme must resolve BEFORE first paint, or the page flashes the wrong background.
+   Order: ?theme= override -> saved choice -> system preference -> light. */
+(function () {
+  var root = document.documentElement;
+  var q = new URLSearchParams(location.search).get('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('mca.theme'); } catch (e) {}
+  var system = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var VALID = { light: 1, dark: 1, glass: 1 };
+  var theme = VALID[q] ? q : (VALID[saved] ? saved : (system ? 'dark' : 'light'));
+  root.dataset.theme = theme;
+  var meta = document.querySelector('meta[name="theme-color"]');
+  var COLOR = { light: '#F8F9FA', dark: '#0B0D10', glass: '#EDF1F9' };
+  if (meta) meta.setAttribute('content', COLOR[theme] || COLOR.light);
+  // The atmosphere layer is glass-only; set the class before paint so a reload in
+  // the glass theme does not flash the plain light background first.
+  document.documentElement.classList.toggle('is-glass', theme === 'glass');
+})();
+</script>
+<script>
+(function () {
+  var root = document.documentElement;
+  var params = new URLSearchParams(location.search);
+  var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var saveData = navigator.connection && navigator.connection.saveData;
+  var seen = false;
+  try { seen = sessionStorage.getItem('mca.opening') === '1'; } catch (e) {}
+  var freeze = params.get('t');
+  var forceReplay = params.get('replay') === '1';
+  var hasHash = location.hash && location.hash.length > 1;
+  var skip = params.get('skipOpening') === '1' || reduced || saveData || (hasHash && !forceReplay);
+  if (seen && !forceReplay) skip = true;
+  if (freeze !== null) { skip = false; root.dataset.openingT = freeze; }
+  if (!skip) root.classList.add('has-opening');
+  if (params.get('static') === '1') root.dataset.static = '1';
+  if (params.get('clean') === '1') root.dataset.clean = '1';
+  // If site.js fails to load, never leave the dark stage in front of the page.
+  window.setTimeout(function () {
+    if (root.dataset.openingT !== undefined) return;
+    if (!root.classList.contains('has-opening')) return;
+    var o = document.getElementById('opening');
+    if (o) o.remove();
+    root.classList.remove('has-opening');
+    root.classList.remove('js');
+    var p = document.getElementById('page');
+    if (p) p.removeAttribute('inert');
+    var brand = document.querySelector('.nav .brand');
+    if (brand) brand.style.opacity = '';
+    var hero = document.querySelectorAll('[data-open-reveal]');
+    for (var i = 0; i < hero.length; i++) {
+      hero[i].style.opacity = '';
+      hero[i].style.transform = '';
+    }
+  }, 3400);
+})();
+</script>
+
+  <!-- ══ 上线前必改 ══════════════════════════════════════════════════════
+       正式域名：mca.mac-api.xyz。同一域名也出现在 robots.txt 与 sitemap.xml，
+       三处必须保持一致。
+       ═══════════════════════════════════════════════════════════════════ -->
+  <link rel="canonical" href="https://mca.mac-api.xyz/">
+  <meta property="og:url" content="https://mca.mac-api.xyz/">
+  <link rel="manifest" href="site.webmanifest">
+</head>
+<body>
+
+<!-- Ambient bloom the glass panels refract. Glass-only; hidden otherwise and
+     removed entirely under prefers-reduced-transparency. -->
+<div class="g-atmos" aria-hidden="true"></div>
+
+<!-- ─────────────────────────  OPENING  ───────────────────────── -->
+<div class="opening" id="opening">
+  <div class="opening-veil" id="openingVeil" aria-hidden="true"></div>
+  <div class="opening-grain" aria-hidden="true"></div>
+
+  <div class="opening-corner opening-corner--tl" aria-hidden="true">MCA / MUYU CHAT AGENT</div>
+  <div class="opening-corner opening-corner--bl" aria-hidden="true">LOCAL-FIRST · ON-DEVICE</div>
+
+  <div class="opening-stage" id="openingStage">
+    <svg class="opening-svg" id="openingSvg" viewBox="20 20 68 68" width="240" height="240" overflow="visible" aria-hidden="true">
+      <defs>
+        <filter id="goo" filterUnits="userSpaceOnUse" x="-20" y="-20" width="148" height="148">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="1.15" result="blur"></feGaussianBlur>
+          <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10" result="goo"></feColorMatrix>
+          <feComposite in="SourceGraphic" in2="goo" operator="atop"></feComposite>
+        </filter>
+        <radialGradient id="coreGlowGrad">
+          <stop offset="0" stop-color="var(--op-glow-core)" stop-opacity="0.95"></stop>
+          <stop offset="0.18" stop-color="var(--op-glow-mid)" stop-opacity="0.55"></stop>
+          <stop offset="0.5" stop-color="var(--op-glow-outer)" stop-opacity="0.16"></stop>
+          <stop offset="1" stop-color="var(--op-glow-outer)" stop-opacity="0"></stop>
+        </radialGradient>
+      </defs>
+
+      <circle id="coreGlow" cx="54" cy="50" r="16" fill="url(#coreGlowGrad)" opacity="0"></circle>
+
+      <g class="opening-rings" id="openingRings" fill="none" stroke="var(--op-ring)" stroke-width="0.3">
+        <circle cx="54" cy="50" r="18"></circle>
+        <circle cx="54" cy="50" r="27"></circle>
+        <circle cx="54" cy="50" r="36"></circle>
+      </g>
+
+      <g id="openingTrails" stroke="var(--op-trail)" stroke-width="0.45" stroke-linecap="round" opacity="0">
+        <line id="trail0" x1="54" y1="50" x2="54" y2="50"></line>
+        <line id="trail1" x1="54" y1="50" x2="54" y2="50"></line>
+        <line id="trail2" x1="54" y1="50" x2="54" y2="50"></line>
+        <line id="trail3" x1="54" y1="50" x2="54" y2="50"></line>
+      </g>
+
+      <g id="openingMotes" filter="url(#goo)" fill="var(--op-mote)">
+        <circle id="mote0" cx="54" cy="50" r="0"></circle>
+        <circle id="mote1" cx="54" cy="50" r="0"></circle>
+        <circle id="mote2" cx="54" cy="50" r="0"></circle>
+        <circle id="mote3" cx="54" cy="50" r="0"></circle>
+        <circle id="openingCore" cx="54" cy="50" r="0"></circle>
+      </g>
+
+      <circle id="shockRing" cx="54" cy="50" r="0" fill="none" stroke="var(--op-shock)" stroke-width="0.4" opacity="0"></circle>
+
+      <g id="openingIcon">
+        <path id="openingBubble" d="M54,20 C35.22,20 20,33.43 20,50 C20,59.39 24.87,67.76 32.22,73.19 L28,88 L43.55,83.33 C46.86,84.45 50.36,85 54,85 C72.78,85 88,71.57 88,55 C88,38.43 72.78,20 54,20 Z"
+              fill="var(--op-bubble-fill)" fill-opacity="0" stroke="var(--op-ring)" stroke-width="0.5"
+              pathLength="1" stroke-dasharray="1" stroke-dashoffset="1"></path>
+        <path id="openingStar" d="M54,34 L57,47 L70,50 L57,53 L54,66 L51,53 L38,50 L51,47 Z" fill="#FFFFFF" opacity="0"></path>
+        <circle id="openDot0" cx="54" cy="50" r="3.5" fill="#FFFFFF" fill-opacity="0.8" opacity="0"></circle>
+        <circle id="openDot1" cx="54" cy="50" r="3.5" fill="#FFFFFF" fill-opacity="0.8" opacity="0"></circle>
+        <circle id="openDot2" cx="54" cy="50" r="2.5" fill="#FFFFFF" fill-opacity="0.5" opacity="0"></circle>
+        <circle id="openDot3" cx="54" cy="50" r="2" fill="#FFFFFF" fill-opacity="0.5" opacity="0"></circle>
+      </g>
+    </svg>
+
+    <div class="opening-wordmark" id="openingWordmark" aria-hidden="true">
+      <span class="opening-name" id="openingName">MCA</span>
+      <span class="opening-sub">MUYU CHAT AGENT</span>
+    </div>
+  </div>
+
+  <div class="opening-flash" id="openingFlash" aria-hidden="true"></div>
+  <div class="opening-meta" id="openingMeta" aria-hidden="true">v0.4.1 / ANDROID</div>
+  <button class="opening-skip" id="openingSkip" type="button">跳过 <span aria-hidden="true">→</span></button>
+</div>
+
+<!-- ─────────────────────────  PAGE  ───────────────────────── -->
+<div id="page">
+<a class="skip-link" href="#main">跳到主要内容</a>
+
+<header class="nav" id="nav">
+  <div class="nav-progress" id="navProgress"></div>
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top" aria-label="MCA 首页">
+      <svg class="brand-mark" viewBox="28.5 28.5 51 51" aria-hidden="true">
+        <use href="#icon-mca"></use>
+      </svg>
+      <span class="brand-name">MCA</span>
+      <span class="brand-sub">MuYu Chat Agent</span>
+    </a>
+
+    <nav class="nav-links" aria-label="主导航">
+      <a href="#capabilities">能力</a>
+      <a href="#workspaces">工作台</a>
+      <a href="#routing">路径</a>
+      <a href="#models">模型</a>
+      <a href="#limits">边界</a>
+      <a href="#faq">常见问题</a>
+    </nav>
+
+    <div class="nav-actions">
+      <div class="theme-switch" role="group" aria-label="配色主题">
+        <button type="button" data-theme-set="glass" aria-pressed="false" aria-label="柔光玻璃" title="柔光玻璃">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+            <path d="M12 3.2c4 2.6 6.6 6 6.6 9.4a6.6 6.6 0 0 1-13.2 0c0-3.4 2.6-6.8 6.6-9.4Z"></path>
+            <path d="M9.4 12.6c.5 1.9 1.9 3 3.8 3.2"></path>
+          </svg>
+        </button>
+        <button type="button" data-theme-set="light" aria-pressed="false" aria-label="纯白" title="纯白">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4.2"></circle>
+            <path d="M12 2.6v2.2M12 19.2v2.2M4.6 12H2.4M21.6 12h-2.2M6.4 6.4 4.9 4.9M19.1 19.1l-1.5-1.5M17.6 6.4l1.5-1.5M4.9 19.1l1.5-1.5"></path>
+          </svg>
+        </button>
+        <button type="button" data-theme-set="dark" aria-pressed="false" aria-label="深色" title="深色">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+            <path d="M20.2 14.6A8.4 8.4 0 0 1 9.4 3.8 8.6 8.6 0 1 0 10.8 20.3a8.4 8.4 0 0 1 9.4-5.7Z"></path>
+          </svg>
+        </button>
+      </div>
+      <a class="nav-text" href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/README.md" target="_blank" rel="noopener">文档</a>
+      <a class="nav-text" href="https://github.com/lyydfys/MuYu-Chat-Agent" target="_blank" rel="noopener">GitHub <span class="arrow">↗</span></a>
+      <a class="btn btn--primary btn--sm" href="https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk" data-download>下载 APK</a>
+      <button class="nav-toggle" id="navToggle" type="button" aria-expanded="false" aria-controls="navMobile">
+        <span class="nav-toggle-lines" aria-hidden="true"></span><span class="sr-only">打开菜单</span>
+      </button>
+    </div>
+  </div>
+  <div class="nav-mobile" id="navMobile" hidden>
+    <a href="#capabilities">能力</a>
+    <a href="#workspaces">工作台</a>
+    <a href="#routing">路径</a>
+    <a href="#models">模型</a>
+    <a href="#limits">边界</a>
+    <a href="#faq">常见问题</a>
+    <a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/README.md" target="_blank" rel="noopener">文档 ↗</a>
+    <a href="https://github.com/lyydfys/MuYu-Chat-Agent" target="_blank" rel="noopener">GitHub ↗</a>
+    <!-- Same control as the nav one. It lives here too because at the narrowest
+         widths the segmented switch does not fit beside the download CTA and menu
+         button — moving it into the drawer keeps every theme reachable instead of
+         shrinking targets below 30px or dropping the switch entirely.
+         Both copies are bound by [data-theme-set], so aria-pressed stays in sync. -->
+    <div class="theme-switch theme-switch--drawer" role="group" aria-label="配色主题">
+      <button type="button" data-theme-set="glass" aria-pressed="false" aria-label="柔光玻璃" title="柔光玻璃">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 3.2c4 2.6 6.6 6 6.6 9.4a6.6 6.6 0 0 1-13.2 0c0-3.4 2.6-6.8 6.6-9.4Z"></path>
+          <path d="M9.4 12.6c.5 1.9 1.9 3 3.8 3.2"></path>
+        </svg>
+        <span class="theme-switch-label">柔光玻璃</span>
+      </button>
+      <button type="button" data-theme-set="light" aria-pressed="false" aria-label="纯白" title="纯白">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2"></circle>
+          <path d="M12 2.6v2.2M12 19.2v2.2M4.6 12H2.4M21.6 12h-2.2M6.4 6.4 4.9 4.9M19.1 19.1l-1.5-1.5M17.6 6.4l1.5-1.5M4.9 19.1l1.5-1.5"></path>
+        </svg>
+        <span class="theme-switch-label">纯白</span>
+      </button>
+      <button type="button" data-theme-set="dark" aria-pressed="false" aria-label="深色" title="深色">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <path d="M20.2 14.6A8.4 8.4 0 0 1 9.4 3.8 8.6 8.6 0 1 0 10.8 20.3a8.4 8.4 0 0 1 9.4-5.7Z"></path>
+        </svg>
+        <span class="theme-switch-label">深色</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- HERO -->
+<section class="hero" id="top">
+  <div class="hero-grid-bg" aria-hidden="true"></div>
+  <div class="wrap hero-wrap">
+    <div class="hero-copy">
+      <p class="eyebrow" data-open-reveal data-delay="0">
+        <span class="spark" aria-hidden="true"></span>
+        ANDROID · LOCAL-FIRST AI WORKSPACE
+      </p>
+      <h1 data-open-reveal data-delay="40">断网，<br>也能用<span class="dot">。</span></h1>
+      <p class="lead" data-open-reveal data-delay="100">MCA 把本地模型、角色卡、生图、生视频、DSH 工作台与 Local API 装进一台 Android 手机。模型在你手里，密钥在你设备里；云端接口是可选项，不是前提。</p>
+
+      <div class="hero-actions" data-open-reveal data-delay="150">
+        <a class="btn btn--primary" href="https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk" data-download>
+          下载 Android 版
+          <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8.5M4.5 7L8 10.5 11.5 7M3 13.5h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </a>
+        <a class="text-link" href="https://github.com/lyydfys/MuYu-Chat-Agent" target="_blank" rel="noopener">
+          在 GitHub 查看源码 <span class="arrow">↗</span>
+        </a>
+      </div>
+
+      <p class="release-line" data-open-reveal data-delay="200">
+        <span class="mono">v0.4.1</span><span class="sep">/</span><span class="mono">arm64-v8a</span><span class="sep">/</span><span class="mono">612.7 MB</span>
+        <span class="sep">·</span>
+        <a href="#faq-size" class="inline-link">为什么这么大？</a>
+      </p>
+
+      <ul class="fact-rail" data-open-reveal data-delay="240">
+        <li><span class="fact-k">账号</span><span class="fact-v">不需要</span></li>
+        <li><span class="fact-k">密钥</span><span class="fact-v">本机加密</span></li>
+        <li><span class="fact-k">许可</span><span class="fact-v">Apache-2.0</span></li>
+        <li><span class="fact-k">系统</span><span class="fact-v">Android 8.0+</span></li>
+      </ul>
+    </div>
+
+    <div class="hero-visual" data-open-reveal data-delay="0">
+      <div class="phone-wrap">
+        <figure class="phone">
+          <div class="phone-screen">
+            <picture>
+              <source srcset="assets/hero-1080.webp 1080w, assets/hero-720.webp 720w"
+                      sizes="(max-width: 720px) 270px, (max-width: 1024px) 300px, 300px" type="image/webp">
+              <img src="../assets/screenshots/01-home.png" width="1440" height="3200"
+                   alt="MCA 聊天界面真机截图：顶部显示本地模型 Qwen3.5-0.8B 与 11.0 token/s，对话在断网状态下生成。"
+                   fetchpriority="high" decoding="sync">
+            </picture>
+            <span class="phone-notch" aria-hidden="true"></span>
+          </div>
+        </figure>
+
+        <div class="spec-rail" aria-hidden="true">
+          <div class="rail-head">REAL DEVICE<br><span>NO CLOUD REQUIRED</span></div>
+
+          <div class="rail-row" style="--y:58px">
+            <span class="rail-dot"></span><span class="rail-leader"></span>
+            <span class="rail-copy"><b>01</b>模型在本地<i>11.0 tok/s</i></span>
+          </div>
+          <div class="rail-row" style="--y:214px">
+            <span class="rail-dot"></span><span class="rail-leader"></span>
+            <span class="rail-copy"><b>02</b>回复在本地<i>流式输出</i></span>
+          </div>
+          <div class="rail-row" style="--y:536px">
+            <span class="rail-dot"></span><span class="rail-leader"></span>
+            <span class="rail-copy"><b>03</b>输入不出设备<i>断网可用</i></span>
+          </div>
+
+          <div class="rail-foot">SCREENSHOT / 2026</div>
+        </div>
+      </div>
+      <p class="phone-caption">真机截图 · 飞行模式 · 模型完整加载后</p>
+    </div>
+  </div>
+
+  <div class="wrap engine-wrap">
+    <div class="engine-strip" data-open-reveal data-delay="300">
+      <span class="engine-label">运行时</span>
+      <span class="engine-item">MNN</span>
+      <span class="engine-item">llama.cpp</span>
+      <span class="engine-item">OpenAI</span>
+      <span class="engine-item">Anthropic</span>
+      <span class="engine-item">stable-diffusion.cpp</span>
+      <span class="engine-item">QNN / HTP</span>
+      <span class="engine-item">MediaTek NPU</span>
+      <span class="engine-item">Wan 2.2</span>
+    </div>
+  </div>
+</section>
+
+<!-- 01 FOUR SOURCES -->
+<section class="section" id="capabilities">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>01 / FOUR SOURCES</div>
+      <div class="sec-body">
+        <h2>四源归一<span class="dot">。</span></h2>
+        <p class="sec-lead">开屏里的四束光，对应四种能力：本地推理、云端接入、图像与视频、Agent 与 API。它们分开时是零件，合起来才是一次完整的对话。</p>
+      </div>
+    </div>
+
+    <div class="source-grid">
+      <article class="source reveal">
+        <div class="source-top">
+          <span class="source-num">01</span>
+          <svg class="source-icon" viewBox="0 0 28 28" aria-hidden="true"><path d="M14 3l2.6 8.4L25 14l-8.4 2.6L14 25l-2.6-8.4L3 14l8.4-2.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>
+        </div>
+        <h3>本地推理与角色卡</h3>
+        <p>MNN 优先，GGUF 兼容；支持 PNG / CC_V3 角色卡与世界书直导、KV 前缀缓存复用。模型加载后，飞行模式也能继续聊。</p>
+        <div class="source-foot"><span class="mono">MNN · llama.cpp · CC_V3</span><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/MODEL_COMPATIBILITY.md" target="_blank" rel="noopener">本地引擎 <span class="arrow">→</span></a></div>
+      </article>
+
+      <article class="source reveal">
+        <div class="source-top">
+          <span class="source-num">02</span>
+          <svg class="source-icon" viewBox="0 0 28 28" aria-hidden="true"><path d="M10 21h10a4.5 4.5 0 0 0 .4-9A6.5 6.5 0 0 0 8 13.4 3.8 3.8 0 0 0 10 21z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>
+        </div>
+        <h3>云端接入与联网检索</h3>
+        <p>OpenAI 兼容与 Anthropic Messages 协议，配合 SearxNG / Brave / Tavily / Jina 智能联网检索与来源卡片，随时可切回本地。</p>
+        <div class="source-foot"><span class="mono">OpenAI · Anthropic · Search</span><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/WEB_SEARCH.md" target="_blank" rel="noopener">联网与协议 <span class="arrow">→</span></a></div>
+      </article>
+
+      <article class="source reveal">
+        <div class="source-top">
+          <span class="source-num">03</span>
+          <svg class="source-icon" viewBox="0 0 28 28" aria-hidden="true"><rect x="4" y="5" width="20" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect><circle cx="10" cy="11" r="1.6" fill="currentColor"></circle><path d="M4 18l6-5 5 4 3-2 6 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></svg>
+        </div>
+        <h3>图像与视频</h3>
+        <p>stable-diffusion.cpp、MNN-Diffusion、QNN 与 MediaTek 后端，断网也能给角色配图；生图与 Wan 2.2 视频为实验能力，取决于完整模型包。</p>
+        <div class="source-foot"><span class="mono">SD · MNN · QNN · Wan 2.2</span><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/MODEL_COMPATIBILITY.md" target="_blank" rel="noopener">图像引擎 <span class="arrow">→</span></a></div>
+      </article>
+
+      <article class="source reveal">
+        <div class="source-top">
+          <span class="source-num">04</span>
+          <svg class="source-icon" viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M7 10l4 4-4 4M13 18h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </div>
+        <h3>Agent 与 API</h3>
+        <p>本地工具、MCP、记忆、DSH 0.2.2-rc.1 预览工作台，以及 11435 端口的 OpenAI 兼容 Local API，让电脑或脚本直接调用这台手机。</p>
+        <div class="source-foot"><span class="mono">AGENT · DSH · LOCAL API</span><a href="#local-api">开发者接口 <span class="arrow">→</span></a></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- 02 WORKSPACES -->
+<section class="section section--paper" id="workspaces">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>02 / WORKSPACES</div>
+      <div class="sec-body">
+        <h2>不止会聊天<span class="dot">。</span></h2>
+        <p class="sec-lead">同一个底座上还有三个独立工作台：DSH、生图、生视频。它们各有自己的入口、自己的模型包和自己的边界。下面不是三句简介，是三个能展开看的页面。</p>
+      </div>
+    </div>
+
+    <div class="ws-grid reveal">
+      <div class="ws-tabs" role="tablist" aria-orientation="vertical" aria-label="选择工作台">
+        <button class="ws-tab is-active" id="wsTabDsh" type="button" role="tab" aria-selected="true" aria-controls="wsPanel" data-ws="dsh">
+          <span class="ws-num">01</span>
+          <span class="ws-name">DSH 工作台 <i class="ws-flag">预览</i></span>
+          <span class="ws-meta">AGENT KERNEL · 0.2.2-rc.1</span>
+        </button>
+        <button class="ws-tab" id="wsTabImage" type="button" role="tab" aria-selected="false" aria-controls="wsPanel" data-ws="image">
+          <span class="ws-num">02</span>
+          <span class="ws-name">生图 <i class="ws-flag">实验性</i></span>
+          <span class="ws-meta">LOCAL / CLOUD IMAGE</span>
+        </button>
+        <button class="ws-tab" id="wsTabVideo" type="button" role="tab" aria-selected="false" aria-controls="wsPanel" data-ws="video">
+          <span class="ws-num">03</span>
+          <span class="ws-name">生视频 <i class="ws-flag">实验性</i></span>
+          <span class="ws-meta">WAN 2.2 · GRAPH</span>
+        </button>
+
+
+      </div>
+
+      <div class="ws-stage" id="wsPanel" role="tabpanel" aria-labelledby="wsTabDsh" data-ws="dsh">
+
+        <!-- ─────────────── DSH ─────────────── -->
+        <div class="ws-pane is-active" data-ws="dsh">
+          <div class="pane-head">
+            <h3>官方内核，跑在手机里</h3>
+            <p>DSH 不是把网页塞进 WebView。它有一份独立的 Node 内核、独立的会话数据、独立的网关；启动过程分六个阶段，任何一步失败都会停在真实的失败点，而不是继续假装“加载中”。</p>
+          </div>
+
+          <div class="shot-row shot-row--stack">
+                        <div class="shot-col">
+  <figure class="shot-card">
+                <div class="shot-box is-wide">
+                  <img src="assets/dsh-home.webp" width="760" height="726" loading="lazy" decoding="async"
+                       alt="DSH 工作台真机截图：官方 DeepSeek Harness 起始页「探索未至之境」，底部已绑定本地模型 Ling-3.0-tiny-abliterated-APEX-I-Compact。">
+                  <span class="shot-chrome" aria-hidden="true"></span>
+                  <span class="shot-name">DSH 起始页</span>
+                </div>
+                <figcaption><span class="mono">FIG. 02</span> DSH 起始页 · 平板真机，已绑定本地模型</figcaption>
+              </figure>
+              <figure class="shot-card">
+                <div class="shot-box is-wide">
+                  <img src="assets/dsh-settings.webp" width="720" height="1078" loading="lazy" decoding="async"
+                       alt="DSH 设置页真机截图：通用设置下的权限、语言、外观、字号大小、工作步骤展示与快捷键等选项。">
+                  <span class="shot-chrome" aria-hidden="true"></span>
+                  <span class="shot-name">设置页</span>
+                </div>
+                <figcaption><span class="mono">FIG. 05</span> DSH 设置页 · 真机，权限与外观</figcaption>
+              </figure>
+            </div>
+            <div class="shot-col">
+              <figure class="shot-card">
+                <div class="shot-box is-portrait">
+                  <img src="assets/models-720.webp" width="720" height="1600" loading="lazy" decoding="async"
+                       alt="模型页真机截图：本地模型列表与已加载模型的状态、参数量与量化信息。">
+                <span class="shot-notch" aria-hidden="true"></span>
+                <span class="shot-name">模型页</span>
+              </div>
+                <figcaption><span class="mono">FIG. 03</span> 模型页 · 真机</figcaption>
+              </figure>
+              <figure class="shot-card">
+                <div class="shot-box is-wide">
+                  <img src="assets/dsh-console.webp" width="720" height="691" loading="lazy" decoding="async"
+                       alt="DSH 控制台真机截图：运行阶段、页面来源、首帧渲染、模型绑定，以及手机能力里 Android 系统、特权 Shell、无障碍、虚拟屏、浏览器、工作区终端的注册状态。">
+                <span class="shot-chrome" aria-hidden="true"></span>
+                <span class="shot-name">DSH 控制台</span>
+              </div>
+                <figcaption><span class="mono">FIG. 04</span> DSH 控制台 · 真机</figcaption>
+              </figure>
+            </div>
+          </div>
+
+          <div class="dsh-split">
+            <div class="dsh-left">
+              <h4 class="mini-h">六阶段启动</h4>
+              <div class="console">
+                <ol class="boot">
+                  <li><span class="boot-k">NODE_PROCESS_ALIVE</span><span class="boot-v">内核进程起来</span></li>
+                  <li><span class="boot-k">PORT_LISTENING</span><span class="boot-v">本地网关监听</span></li>
+                  <li><span class="boot-k">HTTP_AUTHENTICATED</span><span class="boot-v">令牌校验通过</span></li>
+                  <li><span class="boot-k">PLUGINS_LOADED</span><span class="boot-v">插件装载完成</span></li>
+                  <li><span class="boot-k">READY</span><span class="boot-v">可接收任务</span></li>
+                  <li><span class="boot-k">FIRST_FRAME_RENDERED</span><span class="boot-v">首帧呈现</span></li>
+                </ol>
+                <p class="boot-foot">六阶段全部出现，才允许说“DSH 起来了”。</p>
+              </div>
+
+              <h4 class="mini-h">能力注册去哪看</h4>
+              <dl class="rows">
+                <div><dt>Android 系统</dt><dd>可用 · 工具已注册</dd></div>
+                <div><dt>特权 Shell</dt><dd>未启用 · 无 root 或 Shizuku 通道</dd></div>
+                <div><dt>无障碍</dt><dd>未启用 · 服务未开启</dd></div>
+                <div><dt>虚拟屏</dt><dd>未启用 · 桥接未运行</dd></div>
+                <div><dt>工作区终端</dt><dd>可用 · real pty · seam=active</dd></div>
+              </dl>
+            </div>
+
+            <div class="dsh-right">
+              <h4 class="mini-h">设备接入通道</h4>
+              <ul class="channel-list">
+                <li><span class="ch-name">Root</span><span class="ch-desc">可获得高信任执行与虚拟屏；没有 root 时如实报不可用。</span></li>
+                <li><span class="ch-name">Shizuku</span><span class="ch-desc">通知、剪贴板、改系统设置等 4 个工具经授权通道调用。</span></li>
+                <li><span class="ch-name">ADB 配对</span><span class="ch-desc">无线调试 + 6 位配对码；可自动配置端点、断开与重连。</span></li>
+                <li><span class="ch-name">无障碍</span><span class="ch-desc">点按、滑动、输入、返回等 12 个屏幕操作工具，需单独授权。</span></li>
+              </ul>
+
+              <h4 class="mini-h">工具总量</h4>
+              <div class="tool-tally">
+                <div><b>2</b><span>系统工具</span></div>
+                <div><b>4</b><span>Shizuku</span></div>
+                <div><b>12</b><span>无障碍</span></div>
+                <div><b>6</b><span>虚拟屏</span></div>
+              </div>
+
+              <h4 class="mini-h">维护与边界</h4>
+              <ul class="plain-list">
+                <li>控制台可备份、恢复、移入回收站、彻底删除与补丁回滚。</li>
+                <li>虚拟屏 6 个工具只在 root 或 Shizuku 下注册，否则打警告。</li>
+                <li>内核 0.2.2-rc.1 仍有上游破坏性变更，第三方插件升级需注意。</li>
+              </ul>
+
+              <p class="ws-note">DSH 是<b>开发预览</b>内核。它也是安装包体积的主要来源之一——612.7 MB 里有很大一块是它。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ─────────────── IMAGE ─────────────── -->
+        <div class="ws-pane" data-ws="image">
+          <div class="pane-head">
+            <h3>给角色配一张图</h3>
+            <p>图片工作台有自己的引擎、自己的模型包、自己的图库。可以在页面里生成，也可以在聊天中直接让角色画一张。</p>
+          </div>
+
+          <div class="tpl-strip">
+            <figure class="tpl">
+              <img src="assets/tpl-1.webp" width="292" height="396" loading="lazy" decoding="async" alt="MCA 图片模板卡「液态金属花园」缩略图：金属质感的角色立在玻璃温室里。">
+              <figcaption>液态金属花园</figcaption>
+            </figure>
+            <figure class="tpl">
+              <img src="assets/tpl-2.webp" width="288" height="396" loading="lazy" decoding="async" alt="MCA 图片模板卡「晨光工作岛」缩略图：阳光下的悬浮工作台。">
+              <figcaption>晨光工作岛</figcaption>
+            </figure>
+            <figure class="tpl">
+              <img src="assets/tpl-3.webp" width="288" height="396" loading="lazy" decoding="async" alt="MCA 图片模板卡「山海便签」缩略图：手账质感的山水拼贴。">
+              <figcaption>山海便签</figcaption>
+            </figure>
+            <figure class="tpl">
+              <img src="assets/tpl-4.webp" width="286" height="396" loading="lazy" decoding="async" alt="MCA 图片模板卡「纸雕分身」缩略图：纸雕风格的少年坐在书架上。">
+              <figcaption>纸雕分身</figcaption>
+            </figure>
+          </div>
+          <p class="tpl-cap"><span class="mono">FIG. 05</span> 八张模板卡里的前四张，取自平板真机截图；点击即把提示词带进输入框。</p>
+
+          <div class="shot-row">
+            <figure class="shot-card">
+              <div class="shot-box is-portrait">
+                <img src="assets/image-workspace.webp" width="760" height="881" loading="lazy" decoding="async"
+                     alt="平板真机图片工作台：顶部引擎下拉选中 Anima Preview Q4（本地导入、CPU），生成方式提供文生图/图生图/局部重绘，八个模板卡，下方「我的图片」图库带搜索框与八个筛选器，显示共 24 张图片。">
+                <span class="shot-notch" aria-hidden="true"></span>
+                <span class="shot-name">图片工作台</span>
+              </div>
+              <figcaption><span class="mono">FIG. 06</span> 图片工作台 · 平板真机，24 张图片与八张模板卡</figcaption>
+            </figure>
+            <figure class="shot-card shot-card--showcase">
+              <div class="shot-box shot-box--plain is-wide">
+                <img src="assets/image-result-tablet.webp" width="760" height="645" loading="lazy" decoding="async"
+                     alt="平板真机本地生图结果：Anima Preview Q4（CPU）按提示词 1girl, silver hair, blue dress, cherry blossom, sunset sky 生成的蓝裙角色全身像，画面下方提示「已生成图片并保存到图片库」。">
+                <span class="shot-chrome" aria-hidden="true"></span>
+                <span class="shot-name">平板出图</span>
+              </div>
+              <figcaption><span class="mono">FIG. 07</span> 平板真机出图 · Anima Preview Q4（CPU），提示词原样可见</figcaption>
+            </figure>
+          </div>
+
+          <figure class="shot-wide shot-wide--showcase">
+            <div class="shot-box shot-box--plain is-portrait">
+              <img src="assets/image-showcase-900.webp" width="900" height="988" loading="lazy" decoding="async"
+                   alt="手机真机本地生图成果：Animagine XL v4 生成的白发角色全身立绘，右下角是同角色的近景版本；图片底部标注「手机真机生成 · Animagine XL v4」。">
+                <span class="shot-notch" aria-hidden="true"></span>
+                <span class="shot-name">手机出图</span>
+              </div>
+            <figcaption><span class="mono">FIG. 08</span> 手机真机出图 · Animagine XL v4，自带出处标注</figcaption>
+          </figure>
+
+          <div class="video-split">
+            <div class="video-left">
+              <h4 class="mini-h">引擎对照</h4>
+                            <div class="table-wrap">
+<table class="engine-table">
+                <caption class="sr-only">生图引擎与运行位置</caption>
+                <thead><tr><th scope="col">引擎</th><th scope="col">位置</th><th scope="col">说明</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">stable-diffusion.cpp</th><td>本地</td><td>主力路径，支持 SDXL 系</td></tr>
+                  <tr><th scope="row">MNN-Diffusion</th><td>本地</td><td>移动端加速路径</td></tr>
+                  <tr><th scope="row">QNN / HTP</th><td>本地</td><td>骁龙 NPU，需 QAIRT SDK</td></tr>
+                  <tr><th scope="row">LiteRT Qualcomm</th><td>本地</td><td>LiteRT 加速后端</td></tr>
+                  <tr><th scope="row">MediaTek NPUG/DLA</th><td>本地</td><td>天玑 NPU 适配</td></tr>
+                  <tr><th scope="row">OpenAI Images</th><td>云端</td><td>用你自己的 key</td></tr>
+                  <tr><th scope="row">DashScope Image</th><td>云端</td><td>阿里云百炼</td></tr>
+                </tbody>
+              </table>
+              </div>
+            </div>
+            <div class="video-right">
+              <h4 class="mini-h">一次生成里真正发生的事</h4>
+              <ol class="phase-list">
+                <li><span class="ph-n">01</span><span class="ph-t">提交</span><span class="ph-d">参数校验 + 模型包完整性检查</span></li>
+                <li><span class="ph-n">02</span><span class="ph-t">加载</span><span class="ph-d">真实 native 加载，失败即报失败</span></li>
+                <li><span class="ph-n">03</span><span class="ph-t">采样</span><span class="ph-d">逐步显影，第 N/M 步与已等待秒数实时可见</span></li>
+                <li><span class="ph-n">04</span><span class="ph-t">落盘</span><span class="ph-d">VAE 解码后写入图库，可保存、分享与编辑</span></li>
+              </ol>
+
+              <h4 class="mini-h">三种生成方式</h4>
+              <dl class="ws-facts">
+                <div><dt>文生图</dt><dd>纯提示词起步</dd></div>
+                <div><dt>图生图</dt><dd>以已有图片为底</dd></div>
+                <div><dt>局部重绘</dt><dd>只改涂抹区域</dd></div>
+              </dl>
+
+              <h4 class="mini-h">图库不是一堆文件</h4>
+              <ul class="plain-list">
+                <li>可按<b>模型</b>、<b>模式</b>、<b>尺寸</b>、<b>操作</b>、<b>日期</b>、Scheduler、Runtime、执行设备筛选，也能全文搜提示词。</li>
+                <li>图片可收藏，可整库<b>备份与恢复</b>——换机不用重跑。</li>
+                <li>提示词翻译（Hy-MT2）是可选组件：没装时如实显示「未安装」并给出下载入口，不会静默把中文提示词送进英文模型。</li>
+              </ul>
+
+              <p class="ws-note">本地生图是<b>实验能力</b>：需要完整模型包（扩散主模型 + VAE/AE + 文本编码器），以真实 native 加载与出图为准，不保证每台设备都能跑。上面两张成果图分别来自平板（Anima Preview Q4 / CPU）与手机（Animagine XL v4）。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ─────────────── VIDEO ─────────────── -->
+        <div class="ws-pane" data-ws="video">
+          <div class="pane-head">
+            <h3>一张可编辑的节点图</h3>
+            <p>生视频不是一个“输入框 + 生成按钮”。它把 Wan 2.2 的推理拆成七个可编辑节点：改分辨率、改帧数、换 LoRA、重排版，都在图上完成。</p>
+          </div>
+
+          <figure class="shot-wide">
+            <div class="shot-box is-wide">
+              <img src="assets/video-canvas.webp" width="760" height="348" loading="lazy" decoding="async"
+                   alt="视频画布真机截图：六个节点卡片横向排布，每张卡片显示输入端口与当前参数，如 480×832、33 帧、euler、20 步。">
+                <span class="shot-chrome" aria-hidden="true"></span>
+                <span class="shot-name">画布节点</span>
+              </div>
+            <figcaption><span class="mono">FIG. 09</span> 画布节点 · 真机，可拖动重排</figcaption>
+          </figure>
+
+          <div class="shot-row">
+            <figure class="shot-card">
+              <div class="shot-box is-portrait">
+                <img src="assets/video-ready.webp" width="760" height="925" loading="lazy" decoding="async"
+                     alt="平板真机视频工作台：引擎与解码开关、Wan2.2 TI2V-5B 五个组件全部标注「SHA-256 已确认」（DiT Q4_0 2.8 GB、文本编码器 Q4_K_M 3.4 GB、VAE fp16 1.3 GB、Turbo LoRA 317 MB、TAE 22 MB），下方最近运行列出五条 COMPLETED · FINALIZE · 已出片。">
+                <span class="shot-notch" aria-hidden="true"></span>
+                <span class="shot-name">组件校验</span>
+              </div>
+              <figcaption><span class="mono">FIG. 10</span> 组件校验与运行记录 · 平板真机，7.9 GB 全部通过 SHA-256</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <div class="shot-box is-portrait">
+                <img src="assets/video-gallery.webp" width="760" height="769" loading="lazy" decoding="async"
+                     alt="平板真机视频作品库：25 个视频，每条标注 480×832 · 24 fps 与真实文件体积（41.7 KB / 25.3 KB / 61.9 KB），并提供播放、分享、另存、删除四个动作。">
+                <span class="shot-notch" aria-hidden="true"></span>
+                <span class="shot-name">作品库</span>
+              </div>
+              <figcaption><span class="mono">FIG. 11</span> 作品库 · 平板真机，25 个 480×832 视频</figcaption>
+            </figure>
+          </div>
+
+          <div class="shot-row">
+            <figure class="shot-card">
+              <div class="shot-box is-wide">
+                <img src="assets/video-completed.webp" width="760" height="402" loading="lazy" decoding="async"
+                     alt="视频输出预览真机截图：状态已完成、阶段收尾、资源已释放，并给出修订号 rev-api-…、尝试号 v-bcfd… 与已发布的输出媒体 media-55a9…，注明「已发布，可在作品库中播放」。">
+                <span class="shot-chrome" aria-hidden="true"></span>
+                <span class="shot-name">输出预览</span>
+              </div>
+              <figcaption><span class="mono">FIG. 12</span> 输出预览 · 480×832 真机跑完，资源已释放</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <div class="shot-box is-wide">
+                <img src="assets/video-download.webp" width="720" height="500" loading="lazy" decoding="async"
+                     alt="视频组件下载中真机截图：进度条与字节计数，正在下载 DiT 权重文件，下方是暂停下载按钮。">
+                <span class="shot-chrome" aria-hidden="true"></span>
+                <span class="shot-name">组件下载</span>
+              </div>
+              <figcaption><span class="mono">FIG. 13</span> 组件下载 · 真机，带字节进度与暂停</figcaption>
+            </figure>
+          </div>
+
+          <figure class="shot-wide">
+            <div class="shot-box is-wide">
+              <img src="assets/video-nodes.webp" width="720" height="713" loading="lazy" decoding="async"
+                   alt="视频工作台节点列表真机截图：文生视频/图生视频切换、导入 ComfyUI 入口，以及文字输入、Wan2.2 TI2V-5B 模型、条件构建、采样器、视频解码、MP4 编码、保存视频七行节点。">
+                <span class="shot-chrome" aria-hidden="true"></span>
+                <span class="shot-name">节点列表</span>
+              </div>
+            <figcaption><span class="mono">FIG. 14</span> 节点列表 · 真机，七行节点与「导入 ComfyUI」入口</figcaption>
+          </figure>
+
+          <div class="graph" role="img" aria-label="视频工作流的七段节点链：文字输入、Wan2.2 TI2V-5B 模型、条件构建、采样器、视频解码、MP4 编码、保存视频；图生视频另有一路输入图片">
+            <svg viewBox="0 0 760 100" class="graph-svg" aria-hidden="true">
+              <g class="graph-line">
+                <path d="M84 30 H132"></path>
+                <path d="M194 30 H230"></path>
+                <path d="M310 30 H346"></path>
+                <path d="M414 30 H450"></path>
+                <path d="M526 30 H562"></path>
+                <path d="M638 30 H674"></path>
+                <path d="M270 60 V47"></path>
+              </g>
+              <g class="graph-node">
+                <rect x="8" y="14" width="76" height="32" rx="8"></rect>
+                <text x="46" y="34">文字输入</text>
+                <rect x="132" y="14" width="62" height="32" rx="8"></rect>
+                <text x="163" y="34">模型</text>
+                <rect x="230" y="14" width="80" height="32" rx="8"></rect>
+                <text x="270" y="34">条件构建</text>
+                <rect x="346" y="14" width="68" height="32" rx="8"></rect>
+                <text x="380" y="34">采样器</text>
+                <rect x="450" y="14" width="76" height="32" rx="8"></rect>
+                <text x="488" y="34">视频解码</text>
+                <rect x="562" y="14" width="76" height="32" rx="8"></rect>
+                <text x="600" y="34">MP4 编码</text>
+                <rect x="674" y="14" width="76" height="32" rx="8" class="node-last"></rect>
+                <text x="712" y="34" class="node-last-text">保存视频</text>
+                <rect x="230" y="60" width="80" height="32" rx="8" class="node-branch"></rect>
+                <text x="270" y="80" class="node-branch-text">输入图片</text>
+              </g>
+            </svg>
+          </div>
+          <ol class="graph-list" aria-label="视频工作流节点顺序">
+            <li><span class="gl-n">01</span>文字输入</li>
+            <li><span class="gl-n">02</span>Wan2.2 TI2V-5B 模型</li>
+            <li><span class="gl-n">03</span>条件构建</li>
+            <li><span class="gl-n">04</span>采样器</li>
+            <li><span class="gl-n">05</span>视频解码</li>
+            <li><span class="gl-n">06</span>MP4 编码</li>
+            <li><span class="gl-n">07</span>保存视频</li>
+            <li><span class="gl-n">08</span>输入图片 · 图生视频时挂在这一路</li>
+          </ol>
+          <p class="graph-cap"><span class="mono">FIG. 15</span> 七节点默认链；图生视频会额外挂上「输入图片」支线。</p>
+
+          <div class="video-split">
+            <div class="video-left">
+              <h4 class="mini-h">默认参数</h4>
+              <dl class="ws-facts">
+                <div><dt>模型</dt><dd>Wan 2.2 TI2V-5B 文/图生视频，外部 <span class="mono">stable-diffusion.cpp</span></dd></div>
+                <div><dt>分辨率</dt><dd><span class="mono">480×832</span>，宽高须为 32 的倍数</dd></div>
+                <div><dt>帧数</dt><dd><span class="mono">4k+1</span>，如 5 / 33 / 81</dd></div>
+                <div><dt>步数</dt><dd>4 步，24 fps</dd></div>
+                <div><dt>采样</dt><dd>euler · guidance 6.0 · flow shift 3.0</dd></div>
+                <div><dt>LoRA</dt><dd>Wan 2.2 Turbo LoRA（可选）</dd></div>
+                <div><dt>导入</dt><dd>ComfyUI API 格式工作流，单文件 ≤ 4 MiB</dd></div>
+              </dl>
+
+              <h4 class="mini-h">运行状态是逐阶段记录的</h4>
+              <p class="ws-note">每次提交在「最近运行」里留有<b>阶段 + 终态 + 修订号</b>：<span class="mono">COMPLETED · FINALIZE · 已出片</span> 与 <span class="mono">CANCELLED · DECODE · CANCELLED_AFTER_NATIVE_STOP</span> 都照实显示。取消不会伪装成完成，完成也不会只显示一个转圈。</p>
+            </div>
+
+            <div class="video-right">
+              <h4 class="mini-h">四个示范提示词</h4>
+              <div class="prompt-list">
+                <article class="prompt-card">
+                  <span class="pc-tag">雨夜霓虹</span>
+                  <p>雨夜的旧城街道，霓虹招牌在积水里晃动，一把红伞缓缓穿过画面，镜头保持不动。</p>
+                </article>
+                <article class="prompt-card">
+                  <span class="pc-tag">清晨微距</span>
+                  <p>清晨窗台上的柠檬与玻璃杯，阳光缓慢移动，细小尘埃在光束里漂浮，浅景深特写。</p>
+                </article>
+                <article class="prompt-card">
+                  <span class="pc-tag">海岸黄昏</span>
+                  <p>黄昏的海岸线，云层缓慢流动，海浪一层层推上礁石，海面泛着金色反光。</p>
+                </article>
+                <article class="prompt-card">
+                  <span class="pc-tag">雪原旅人</span>
+                  <p>穿白色风衣的旅人站在雪原中央，围巾被风轻轻吹起，镜头从远处缓慢推近。</p>
+                </article>
+              </div>
+              <p class="prompt-hint">四个示例都来自 app 内置的示范提示词：单镜头、短动作，不带字幕、不带多镜头切换。</p>
+            </div>
+          </div>
+
+          <p class="ws-note">视频是<b>实验能力</b>：APK 从不内置 Wan 权重，7.9 GB 组件需单独下载，并逐件通过大小与 SHA-256 校验才允许提交（FIG. 10 就是全部通过的状态）。执行未接入时提交会被明确拒绝，不会伪造进度。上面那 25 个 480×832 视频是在一台平板上真实跑出来的，不是渲染图。</p>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="ws-foot reveal">
+      <p>三个工作台与聊天共用同一套本地模型所有权；切走页面不会多起一套运行时。</p>
+      <a class="text-link" href="https://github.com/lyydfys/MuYu-Chat-Agent/releases" target="_blank" rel="noopener">版本说明 <span class="arrow">↗</span></a>
+    </div>
+
+    <!-- 设备展台：同一份安装，平板与手机上都一样 -->
+    <div class="device-rail reveal">
+      <div class="rail-top">
+        <div class="rail-intro">
+          <h3>同一份安装，换台设备也一样<span class="dot">。</span></h3>
+          <p>MCA 不按机型、芯片或白名单开权限。平板和手机装的是同一个包、跑的是同一套本地模型所有权：图片工作台、视频工作流、DSH 内核、Local API 全都在。下面都是真实截屏，不是渲染图。</p>
+          <dl class="rail-facts">
+            <div><dt>分发</dt><dd><span class="mono">arm64-v8a</span> · 单包</dd></div>
+            <div><dt>系统</dt><dd>Android 8.0+</dd></div>
+            <div><dt>准入</dt><dd>无机型白名单</dd></div>
+          </dl>
+        </div>
+
+        <figure class="rail-device rail-device--tablet">
+          <div class="rail-frame rail-frame--tablet" tabindex="0" aria-label="平板截图，聚焦后滚动显示下半屏">
+            <div class="rail-tablet-bar" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="rail-screen rail-screen--tablet">
+              <img src="assets/rail-tablet.webp" width="1240" height="605" loading="lazy" decoding="async"
+                   alt="平板真机图片工作台：八张模板卡与「我的图片」图库，24 张图片、八个筛选器与备份恢复入口。">
+              <img src="assets/rail-tablet-lower.webp" width="1240" height="605" loading="lazy" decoding="async" class="rail-second"
+                   alt="平板真机图片工作台下半屏：已生成的图片与图库缩略图。">
+            </div>
+            <div class="rail-tablet-base" aria-hidden="true"></div>
+          </div>
+          <figcaption>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="2.6" y="4" width="18.8" height="16" rx="2.4"/><path d="M8 20h8"/></svg>
+            <b>平板</b> Xiaomi Pad 8 Pro · 2136×3200
+          </figcaption>
+        </figure>
+      </div>
+
+      <div class="rail-phones">
+        <figure class="rail-device">
+          <div class="rail-frame rail-frame--phone" tabindex="0" aria-label="设备截图，聚焦后滚动显示下半屏">
+            <div class="rail-screen">
+              <img src="assets/rail-phone-entry.webp" width="720" height="1600" loading="lazy" decoding="async"
+                   alt="手机真机侧栏：图片、Agent、DSH、视频四个工作区入口与最近会话列表。">
+              <i class="rail-notch" aria-hidden="true"></i>
+              <span class="rail-screen-name">入口 · 图片 / Agent / DSH / 视频</span>
+            </div>
+          </div>
+          <figcaption>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="6" y="2.2" width="12" height="19.6" rx="2.6"/><path d="M10 18.6h4"/></svg>
+            图片 · Agent · DSH · 视频
+          </figcaption>
+        </figure>
+        <figure class="rail-device">
+          <div class="rail-frame rail-frame--phone" tabindex="0" aria-label="设备截图，聚焦后滚动显示下半屏">
+            <div class="rail-screen">
+              <img src="assets/rail-phone-video.webp" width="720" height="1600" loading="lazy" decoding="async"
+                   alt="手机真机视频工作台：文生视频/图生视频切换，Wan2.2 TI2V-5B 五个组件全部标注「SHA-256 已确认」。">
+              <i class="rail-notch" aria-hidden="true"></i>
+              <span class="rail-screen-name">视频 · SHA-256 校验</span>
+            </div>
+          </div>
+          <figcaption>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="6" y="2.2" width="12" height="19.6" rx="2.6"/><path d="M10 18.6h4"/></svg>
+            7.9 GB 组件通过 SHA-256
+          </figcaption>
+        </figure>
+        <figure class="rail-device">
+          <div class="rail-frame rail-frame--phone" tabindex="0" aria-label="设备截图，聚焦后滚动显示下半屏">
+            <div class="rail-screen">
+              <img src="assets/rail-phone-settings.webp" width="720" height="1600" loading="lazy" decoding="async"
+                   alt="手机真机系统设置页：运行、日志、诊断与高级设置等六个分区，滚动可展开下半屏。">
+              <i class="rail-notch" aria-hidden="true"></i>
+              <span class="rail-screen-name">设置与诊断</span>
+            </div>
+          </div>
+          <figcaption>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="6" y="2.2" width="12" height="19.6" rx="2.6"/><path d="M10 18.6h4"/></svg>
+            系统设置与诊断
+          </figcaption>
+        </figure>
+        <figure class="rail-device">
+          <div class="rail-frame rail-frame--phone" tabindex="0" aria-label="设备截图，聚焦后滚动显示下半屏">
+            <div class="rail-screen">
+              <img src="assets/models-720.webp" width="720" height="1600" loading="lazy" decoding="async"
+                   alt="手机真机模型页：本地模型列表，显示已加载模型的参数量、量化方式与运行状态。">
+              <i class="rail-notch" aria-hidden="true"></i>
+              <span class="rail-screen-name">本地模型</span>
+            </div>
+          </div>
+          <figcaption>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="6" y="2.2" width="12" height="19.6" rx="2.6"/><path d="M10 18.6h4"/></svg>
+            本地模型列表
+          </figcaption>
+        </figure>
+      </div>
+
+      <p class="rail-hint">悬停或聚焦任一台设备，屏幕会向下滚动露出下半屏。</p>
+
+      <p class="rail-note">平板与手机截自两台不同的真机；平板的视频成果见上面 FIG. 10–13。截图里的「未加载模型 / 未启用」按实际状态保留，没有修饰成满状态。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 03 ROUTING -->
+<section class="section section--paper" id="routing">
+  <div class="wrap routing-grid">
+    <div class="routing-copy reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>03 / ROUTING</div>
+      <h2>同一条消息，<br>两条路径<span class="dot">。</span></h2>
+      <p class="sec-lead">本地优先不是一句口号。切换下面对照，看看一次请求到底去了哪里，以及代价是什么。</p>
+
+      <div class="seg" role="tablist" aria-label="选择推理路径">
+        <button class="seg-btn is-active" id="tabLocal" type="button" role="tab" aria-selected="true" aria-controls="tracePanel" data-path="local">本地</button>
+        <button class="seg-btn" id="tabCloud" type="button" role="tab" aria-selected="false" aria-controls="tracePanel" data-path="cloud">云端</button>
+        <span class="seg-thumb" aria-hidden="true"></span>
+      </div>
+
+      <dl class="compare">
+        <div><dt>本地</dt><dd>不需要网络 · 占用设备算力 · 无 token 费用</dd></div>
+        <div><dt>云端</dt><dd>需要网络 · 使用你的密钥 · 由服务商计费</dd></div>
+      </dl>
+
+      <p class="fineprint">速度示例来自真机截图：Qwen3.5-0.8B Q4_K_M，约 11.0 tok/s。不同设备、模型与后端差异很大，这不是性能承诺。</p>
+      <a class="text-link" href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/MODEL_COMPATIBILITY.md" target="_blank" rel="noopener">阅读推理与后端说明 <span class="arrow">→</span></a>
+    </div>
+
+    <div class="trace-wrap reveal">
+      <div class="trace" id="tracePanel" data-path="local" role="tabpanel" aria-live="polite">
+      <div class="trace-head">
+        <span class="trace-title">TRACE <b id="traceMode">LOCAL</b></span>
+        <span class="trace-badge" id="traceBadge">ON DEVICE</span>
+      </div>
+
+      <ol class="trace-list">
+        <li class="trace-row">
+          <span class="trace-node">01</span>
+          <span class="trace-label">INPUT</span>
+          <span class="trace-value">“用中文一句话介绍本地助手好处”</span>
+          <span class="trace-where">DEVICE</span>
+        </li>
+        <li class="trace-row">
+          <span class="trace-node">02</span>
+          <span class="trace-label">CONTEXT</span>
+          <span class="trace-value">会话历史 · 角色设定 · 搜索结果</span>
+          <span class="trace-where">DEVICE</span>
+        </li>
+        <li class="trace-row trace-row--infer">
+          <span class="trace-node">03</span>
+          <span class="trace-label">INFERENCE</span>
+          <span class="trace-value">
+            <span class="local-only">MNN CPU · Qwen3.5-0.8B Q4_K_M<i>11.0 tok/s</i></span>
+            <span class="cloud-only">你的 endpoint · OpenAI 兼容<i>需要网络</i></span>
+          </span>
+          <span class="trace-where">
+            <span class="local-only">DEVICE</span>
+            <span class="cloud-only">NETWORK</span>
+          </span>
+        </li>
+        <li class="trace-row">
+          <span class="trace-node">04</span>
+          <span class="trace-label">OUTPUT</span>
+          <span class="trace-value">流式返回 · 可随时停止</span>
+          <span class="trace-where">DEVICE</span>
+        </li>
+      </ol>
+
+      <div class="trace-foot">
+        <span>模型、密钥、会话不出设备</span>
+        <span class="local-only">无 token 费用</span>
+        <span class="cloud-only">请求发往你配置的服务商</span>
+      </div>
+      </div>
+      <p class="trace-caption"><span class="mono">FIG. 16</span> 一次本地请求的路径；示例内容来自真机截图。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 04 MODELS -->
+<section class="section" id="models">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>04 / MODELS</div>
+      <div class="sec-body">
+        <h2>模型，是你选的<span class="dot">。</span></h2>
+        <p class="sec-lead">不内置权重，不锁定来源。MNN 优先，GGUF 兼容；ModelScope 推荐、Hugging Face 镜像与本地导入都能进同一个库。</p>
+      </div>
+    </div>
+
+    <div class="models-grid">
+      <div class="models-left reveal">
+        <table class="spec-table">
+          <caption class="sr-only">模型来源与处理方式</caption>
+          <thead>
+            <tr><th scope="col">来源</th><th scope="col">格式</th><th scope="col">处理</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">ModelScope 推荐</th><td>MNN 完整包</td><td>完整性校验 · 断点续传</td></tr>
+            <tr><th scope="row">本地导入</th><td>GGUF / MNN</td><td>分类 · 入库 · 绑定视觉投影</td></tr>
+            <tr><th scope="row">Hugging Face</th><td>GGUF</td><td>hf-mirror 优先 · 官方回退</td></tr>
+            <tr><th scope="row">角色卡与预设</th><td>PNG / CC_V3 / JSON</td><td>保留完整字段 · 绑定生成预设</td></tr>
+            <tr><th scope="row">云端引擎</th><td>OpenAI / Anthropic</td><td>密钥本机加密 · 独立目录</td></tr>
+          </tbody>
+        </table>
+
+        <div class="chip-row" aria-label="支持的引擎">
+          <span class="chip">MNN</span><span class="chip">llama.cpp</span><span class="chip">stable-diffusion.cpp</span><span class="chip">QNN / HTP</span><span class="chip">MediaTek NPU</span><span class="chip">Wan 2.2</span>
+        </div>
+
+        <div class="model-notes">
+          <p>下载的推荐资产走 SHA-256 校验；Hugging Face 资源优先尝试 <span class="mono">hf-mirror.com</span>，失败再回退官方地址。</p>
+          <p>同一个模型目录里，本地与云端引擎各自独立；切换不会改写彼此的凭据与参数。</p>
+        </div>
+        <a class="text-link" href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/MODEL_COMPATIBILITY.md" target="_blank" rel="noopener">查看兼容性矩阵 <span class="arrow">→</span></a>
+      </div>
+
+      <figure class="shot reveal">
+        <div class="shot-frame is-portrait">
+          <picture>
+            <source srcset="assets/models-720.webp" type="image/webp">
+            <img src="../assets/screenshots/04-model-management.png" width="720" height="1600" loading="lazy" decoding="async"
+                 alt="MCA 模型管理页面的推荐分栏截图：推荐优先走 ModelScope，展示 Qwen3.5 0.8B Q4 模型卡、适合本机标记与下载按钮。">
+          </picture>
+            <span class="shot-notch" aria-hidden="true"></span>
+            <span class="shot-name">推荐模型</span>
+        </div>
+        <figcaption><span class="mono">FIG. 17</span> 推荐模型 · 真机截图，下载后仍保存到 MCA 的受管模型目录</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- 05 LOCAL API (dark) -->
+<section class="section section--night" id="local-api">
+  <div class="wrap">
+    <div class="sec-head sec-head--night reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>05 / LOCAL API</div>
+      <div class="sec-body">
+        <h2>它还是一台，<br>能对话的服务器<span class="dot">。</span></h2>
+        <p class="sec-lead">模型加载后，Local API 在 11435 端口提供 OpenAI 兼容接口。手机上的浏览器、同网段的电脑、你自己的脚本，都可以直接调用。</p>
+      </div>
+    </div>
+
+    <div class="api-grid">
+      <div class="terminal reveal">
+        <div class="terminal-head">
+          <span class="terminal-title"><span class="terminal-dot" aria-hidden="true"></span>MCA LOCAL API <span class="terminal-dim">/ v1/chat/completions</span></span>
+          <button class="copy-btn" id="copyCurl" type="button" data-copy-target="curlCode">复制</button>
+        </div>
+        <pre class="terminal-body" id="curlCode" tabindex="0"><code><span class="t-cmd">curl</span> http://127.0.0.1:11435/v1/chat/completions \
+  -H <span class="t-str">"Authorization: Bearer $MCA_API_KEY"</span> \
+  -H <span class="t-str">"Content-Type: application/json"</span> \
+  -d <span class="t-str">'{
+    "model": "&lt;model-id&gt;",
+    "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'</span></code></pre>
+        <div class="terminal-foot">
+          <span class="mono">SSE</span>
+          <code>data: {"choices":[{"delta":{"content":"你"}}]}</code>
+        </div>
+      </div>
+
+      <div class="api-copy reveal">
+        <dl class="api-facts">
+          <div><dt>协议</dt><dd>OpenAI 兼容<br><span class="mono">/v1/models · /v1/chat/completions</span></dd></div>
+          <div><dt>流式</dt><dd>SSE，支持中途停止</dd></div>
+          <div><dt>认证</dt><dd>在设置中生成 API Key</dd></div>
+          <div><dt>默认</dt><dd>关闭。仅在你确认可信的网络里开启同网段访问</dd></div>
+        </dl>
+        <div class="api-health">
+          <span class="mono">GET /health</span>
+          <code>{"status":"ok","name":"MuYu Chat Agent"}</code>
+        </div>
+        <p class="night-note">MCA 不会替你打开端口。开启同网段访问前，请先确认网络可信；密钥只保存在本机。</p>
+        <a class="text-link text-link--light" href="https://github.com/lyydfys/MuYu-Chat-Agent#local-api" target="_blank" rel="noopener">Local API 使用说明 <span class="arrow">→</span></a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 06 LIMITS -->
+<section class="section section--paper" id="limits">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>06 / LIMITS</div>
+      <div class="sec-body">
+        <h2>先把边界说清楚<span class="dot">。</span></h2>
+        <p class="sec-lead">MCA 还在快速迭代。下面这些不是免责声明，是你在下载前就应该知道的事实。</p>
+      </div>
+    </div>
+
+    <div class="limit-grid">
+      <article class="limit reveal"><div class="limit-head"><h3>本地生图</h3><span class="status status--exp">实验性</span></div><p>需要完整模型包，真实 native 加载通过才算可用。不保证每台设备都能出图。</p></article>
+      <article class="limit reveal"><div class="limit-head"><h3>视频与 DSH</h3><span class="status">条件可用</span></div><p>依赖运行环境；DSH 是开发预览内核，也是安装包体积的主要来源之一。</p></article>
+      <article class="limit reveal"><div class="limit-head"><h3>模型与密钥</h3><span class="status">自备</span></div><p>APK 与仓库都不含权重、密钥或账号体系。云端费用由你的服务商收取。</p></article>
+      <article class="limit reveal"><div class="limit-head"><h3>设备兼容</h3><span class="status">真机判定</span></div><p>一次真机加载通过，就对所有兼容设备开放。没有设备白名单，也不按芯片型号隐藏入口。</p></article>
+    </div>
+
+    <div class="datasheet reveal">
+      <div class="datasheet-head"><span class="mono">DATASHEET / LATEST RELEASE</span><a href="https://github.com/lyydfys/MuYu-Chat-Agent/releases" target="_blank" rel="noopener">全部版本 <span class="arrow">↗</span></a></div>
+      <dl class="datasheet-grid">
+        <div><dt>版本</dt><dd>v0.4.1</dd></div>
+        <div><dt>发布</dt><dd>2026-11-07</dd></div>
+        <div><dt>包体</dt><dd>612.7 MB</dd></div>
+        <div><dt>ABI</dt><dd>arm64-v8a</dd></div>
+        <div><dt>最低系统</dt><dd>Android 8.0 (26)</dd></div>
+        <div><dt>许可</dt><dd>Apache-2.0</dd></div>
+      </dl>
+      <p class="datasheet-note">体积主要来自内置的 DSH 预览内核与多套原生推理库，不包含任何模型权重。模型在安装后由你自行下载或导入。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 07 START -->
+<section class="start" id="start">
+  <div class="start-watermark" aria-hidden="true">
+    <svg viewBox="28.5 28.5 51 51"><use href="#icon-mca"></use></svg>
+  </div>
+  <div class="wrap start-inner">
+    <div class="sec-index reveal"><span class="spark" aria-hidden="true"></span>07 / START</div>
+    <h2 class="reveal">把 AI，拿回来<span class="dot">。</span></h2>
+    <p class="sec-lead reveal">下载、放模型、断网试一次。三步就知道它适不适合你。</p>
+
+    <ol class="steps reveal">
+      <li><span class="step-n">01</span><span class="step-t">下载安装</span><span class="step-d">arm64-v8a · Android 8.0+</span></li>
+      <li><span class="step-n">02</span><span class="step-t">放入模型或角色卡</span><span class="step-d">ModelScope 推荐下载，或本地导入</span></li>
+      <li><span class="step-n">03</span><span class="step-t">断网试试</span><span class="step-d">飞行模式下继续对话</span></li>
+    </ol>
+
+    <div class="start-actions reveal">
+      <a class="btn btn--primary btn--lg" href="https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk" data-download>下载 Android 版</a>
+      <a class="btn btn--ghost btn--lg" href="https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.1/MCA-v0.4.1-arm64-v8a.apk" target="_blank" rel="noopener noreferrer">国内加速下载 <span class="btn-tag">第三方镜像</span></a>
+      <a class="text-link" href="https://qm.qq.com/q/QpooZX8f0O" target="_blank" rel="noopener">加入交流群 1062951314 <span class="arrow">↗</span></a>
+    </div>
+
+    <div class="delivery-box reveal">
+      <div class="delivery-main">
+        <div class="delivery-head">
+          <span class="mono">RELEASE ASSET · v0.4.1 · 612.7 MB · Apache-2.0</span>
+          <span class="delivery-hint">若使用第三方镜像加速，安装前请核对下方 SHA-256</span>
+        </div>
+        <div class="sha-row">
+          <span class="sha-label mono">SHA-256</span>
+          <code class="sha-val mono" id="apkSha">4320a4ef2d7424e38a3afed2b2ccfee5e42713e8cb982d629e21c605f8c0e6f4</code>
+          <button class="sha-copy" id="copySha" type="button" data-copy-target="apkSha">复制校验值</button>
+        </div>
+      </div>
+
+      <div class="delivery-qr">
+        <svg class="qr-svg" viewBox="0 0 37 37" shape-rendering="crispEdges" role="img" aria-label="手机扫码打开 MCA GitHub Releases 最新版本页">
+          <rect width="37" height="37" fill="#FFFFFF"></rect>
+          <path fill="#17191C" d="M2 2h7v1h-7zM12 2h1v1h-1zM16 2h1v1h-1zM21 2h1v1h-1zM23 2h2v1h-2zM28 2h7v1h-7zM2 3h1v1h-1zM8 3h1v1h-1zM11 3h1v1h-1zM15 3h1v1h-1zM21 3h6v1h-6zM28 3h1v1h-1zM34 3h1v1h-1zM2 4h1v1h-1zM4 4h3v1h-3zM8 4h1v1h-1zM10 4h1v1h-1zM13 4h1v1h-1zM17 4h1v1h-1zM20 4h2v1h-2zM25 4h1v1h-1zM28 4h1v1h-1zM30 4h3v1h-3zM34 4h1v1h-1zM2 5h1v1h-1zM4 5h3v1h-3zM8 5h1v1h-1zM11 5h1v1h-1zM14 5h2v1h-2zM20 5h1v1h-1zM24 5h1v1h-1zM28 5h1v1h-1zM30 5h3v1h-3zM34 5h1v1h-1zM2 6h1v1h-1zM4 6h3v1h-3zM8 6h1v1h-1zM11 6h1v1h-1zM14 6h2v1h-2zM18 6h1v1h-1zM20 6h3v1h-3zM25 6h2v1h-2zM28 6h1v1h-1zM30 6h3v1h-3zM34 6h1v1h-1zM2 7h1v1h-1zM8 7h1v1h-1zM12 7h3v1h-3zM16 7h2v1h-2zM19 7h3v1h-3zM23 7h4v1h-4zM28 7h1v1h-1zM34 7h1v1h-1zM2 8h7v1h-7zM10 8h1v1h-1zM12 8h1v1h-1zM14 8h1v1h-1zM16 8h1v1h-1zM18 8h1v1h-1zM20 8h1v1h-1zM22 8h1v1h-1zM24 8h1v1h-1zM26 8h1v1h-1zM28 8h7v1h-7zM10 9h1v1h-1zM13 9h1v1h-1zM17 9h8v1h-8zM2 10h3v1h-3zM6 10h5v1h-5zM14 10h1v1h-1zM19 10h1v1h-1zM27 10h2v1h-2zM32 10h1v1h-1zM5 11h1v1h-1zM7 11h1v1h-1zM11 11h1v1h-1zM13 11h3v1h-3zM18 11h1v1h-1zM22 11h1v1h-1zM24 11h1v1h-1zM26 11h3v1h-3zM31 11h1v1h-1zM34 11h1v1h-1zM6 12h3v1h-3zM12 12h3v1h-3zM16 12h1v1h-1zM22 12h1v1h-1zM24 12h1v1h-1zM28 12h1v1h-1zM31 12h1v1h-1zM33 12h2v1h-2zM2 13h1v1h-1zM4 13h1v1h-1zM6 13h1v1h-1zM9 13h1v1h-1zM11 13h2v1h-2zM14 13h3v1h-3zM19 13h1v1h-1zM22 13h4v1h-4zM28 13h1v1h-1zM30 13h2v1h-2zM33 13h1v1h-1zM2 14h3v1h-3zM8 14h2v1h-2zM12 14h2v1h-2zM16 14h1v1h-1zM19 14h1v1h-1zM21 14h3v1h-3zM25 14h1v1h-1zM27 14h2v1h-2zM31 14h1v1h-1zM34 14h1v1h-1zM2 15h3v1h-3zM6 15h1v1h-1zM11 15h3v1h-3zM16 15h1v1h-1zM18 15h2v1h-2zM22 15h3v1h-3zM26 15h4v1h-4zM31 15h2v1h-2zM34 15h1v1h-1zM4 16h5v1h-5zM10 16h2v1h-2zM15 16h1v1h-1zM26 16h2v1h-2zM33 16h2v1h-2zM2 17h1v1h-1zM10 17h4v1h-4zM17 17h8v1h-8zM26 17h1v1h-1zM28 17h2v1h-2zM31 17h1v1h-1zM33 17h1v1h-1zM4 18h1v1h-1zM6 18h1v1h-1zM8 18h5v1h-5zM14 18h1v1h-1zM18 18h2v1h-2zM22 18h3v1h-3zM26 18h3v1h-3zM33 18h2v1h-2zM3 19h2v1h-2zM6 19h2v1h-2zM9 19h1v1h-1zM12 19h4v1h-4zM18 19h2v1h-2zM22 19h1v1h-1zM26 19h3v1h-3zM32 19h1v1h-1zM34 19h1v1h-1zM2 20h8v1h-8zM12 20h3v1h-3zM16 20h1v1h-1zM18 20h1v1h-1zM20 20h1v1h-1zM26 20h2v1h-2zM29 20h3v1h-3zM33 20h2v1h-2zM2 21h3v1h-3zM7 21h1v1h-1zM10 21h3v1h-3zM14 21h7v1h-7zM22 21h5v1h-5zM31 21h1v1h-1zM33 21h1v1h-1zM7 22h2v1h-2zM10 22h1v1h-1zM12 22h2v1h-2zM16 22h1v1h-1zM19 22h1v1h-1zM22 22h1v1h-1zM26 22h1v1h-1zM28 22h2v1h-2zM33 22h2v1h-2zM3 23h1v1h-1zM6 23h2v1h-2zM11 23h3v1h-3zM16 23h1v1h-1zM18 23h3v1h-3zM22 23h2v1h-2zM26 23h3v1h-3zM32 23h1v1h-1zM34 23h1v1h-1zM2 24h1v1h-1zM4 24h2v1h-2zM7 24h3v1h-3zM11 24h2v1h-2zM15 24h1v1h-1zM19 24h2v1h-2zM23 24h2v1h-2zM27 24h1v1h-1zM30 24h2v1h-2zM33 24h2v1h-2zM3 25h2v1h-2zM6 25h2v1h-2zM9 25h1v1h-1zM11 25h3v1h-3zM17 25h1v1h-1zM19 25h3v1h-3zM23 25h3v1h-3zM28 25h3v1h-3zM33 25h1v1h-1zM2 26h1v1h-1zM5 26h1v1h-1zM8 26h3v1h-3zM14 26h1v1h-1zM18 26h2v1h-2zM22 26h2v1h-2zM25 26h6v1h-6zM10 27h2v1h-2zM13 27h3v1h-3zM18 27h2v1h-2zM21 27h2v1h-2zM26 27h1v1h-1zM30 27h1v1h-1zM33 27h2v1h-2zM2 28h7v1h-7zM10 28h1v1h-1zM13 28h2v1h-2zM16 28h1v1h-1zM18 28h1v1h-1zM24 28h3v1h-3zM28 28h1v1h-1zM30 28h2v1h-2zM33 28h2v1h-2zM2 29h1v1h-1zM8 29h1v1h-1zM10 29h1v1h-1zM12 29h1v1h-1zM14 29h10v1h-10zM26 29h1v1h-1zM30 29h1v1h-1zM33 29h2v1h-2zM2 30h1v1h-1zM4 30h3v1h-3zM8 30h1v1h-1zM10 30h1v1h-1zM12 30h2v1h-2zM16 30h4v1h-4zM21 30h3v1h-3zM26 30h5v1h-5zM2 31h1v1h-1zM4 31h3v1h-3zM8 31h1v1h-1zM11 31h3v1h-3zM16 31h1v1h-1zM18 31h3v1h-3zM23 31h1v1h-1zM29 31h4v1h-4zM34 31h1v1h-1zM2 32h1v1h-1zM4 32h3v1h-3zM8 32h1v1h-1zM10 32h2v1h-2zM15 32h1v1h-1zM19 32h2v1h-2zM22 32h1v1h-1zM24 32h1v1h-1zM29 32h4v1h-4zM34 32h1v1h-1zM2 33h1v1h-1zM8 33h1v1h-1zM10 33h1v1h-1zM12 33h2v1h-2zM18 33h7v1h-7zM26 33h1v1h-1zM28 33h2v1h-2zM33 33h1v1h-1zM2 34h7v1h-7zM10 34h1v1h-1zM12 34h1v1h-1zM14 34h1v1h-1zM17 34h4v1h-4zM23 34h1v1h-1zM25 34h2v1h-2zM28 34h4v1h-4zM33 34h2v1h-2z"></path>
+        </svg>
+        <div class="qr-caption">
+          <b>手机扫码获取</b>
+          <span>打开 GitHub Releases</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section class="section faq" id="faq">
+  <div class="wrap faq-grid">
+    <div class="faq-copy reveal">
+      <div class="sec-index"><span class="spark" aria-hidden="true"></span>FAQ</div>
+      <h2>下载之前，<br>先看这几条<span class="dot">。</span></h2>
+      <p class="sec-lead">如果这里没有你的问题，去 GitHub Issues 或交流群里问；附上机型和日志，会快很多。</p>
+    </div>
+
+    <div class="faq-list reveal">
+      <details open>
+        <summary>本地聊天真的不用联网吗？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>模型完整下载并加载后，本地对话不需要网络。下载模型、使用云端引擎、联网搜索时需要网络。飞行模式是验证它最直接的方式。</p></div>
+      </details>
+      <details id="faq-size">
+        <summary>为什么 APK 有 612.7 MB？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>包内含多套原生推理库和内置的 DSH 预览内核；不包含模型权重。模型在安装后由你自行下载或导入，因此首次使用还需要额外的模型下载空间。</p></div>
+      </details>
+      <details id="faq-download">
+        <summary>GitHub 下载 612.7 MB 太慢或中断怎么办？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>可使用上方标注「第三方镜像」的国内加速通道下载，安装前核对页面给出的 SHA-256 校验值；支持断点续传的下载器也能显著降低重下概率。安装完成后，后续版本可在「设置 → 关于」内通过应用内置的并行断点续传与镜像回退机制更新。</p></div>
+      </details>
+      <details id="faq-first-step">
+        <summary>安装后没有内置模型，第一步怎么最快用起来？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>打开「模型管理 → 推荐」，优先下载带适合本机标记的 ModelScope MNN 完整包（自带断点续传与 SHA-256 校验）。如果你手里已有 GGUF 模型或 PNG / CC_V3 角色卡，也可以直接从本机文件导入。</p></div>
+      </details>
+      <details>
+        <summary>我的手机能装吗？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>Android 8.0+、arm64-v8a。能否跑动某个模型取决于内存与完整包；MCA 不按机型白名单隐藏入口，首次真实加载决定兼容性。未知设备会走通用兼容路径。</p></div>
+      </details>
+      <details>
+        <summary>对话会被上传吗？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>本地模型不会离开设备。只有你配置的云端端点或联网检索服务会收到对应请求；API Key 使用 Android Keystore 加密保存在本机。本网站本身不设 Cookie，也不收集任何对话内容。</p></div>
+      </details>
+      <details>
+        <summary>怎么反馈问题或参与测试？<span class="faq-plus" aria-hidden="true"></span></summary>
+        <div class="faq-a"><p>GitHub Issues 或 QQ 群 1062951314。请附上 MCA 版本、机型、芯片、Android 版本、模型名称、运行后端与错误截图；不要公开 API Key 或包含隐私的日志。</p></div>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- FOOTER -->
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <svg class="footer-mark" viewBox="28.5 28.5 51 51" aria-hidden="true"><use href="#icon-mca"></use></svg>
+        <div><div class="footer-name">MCA</div><div class="footer-sub">MuYu Chat Agent</div></div>
+      </div>
+      <p class="footer-line">一台手机，一个自己的工作台。</p>
+    </div>
+
+    <div class="footer-grid">
+      <div><h3>产品</h4><a href="#capabilities">能力</a><a href="#routing">路径</a><a href="#models">模型</a><a href="#local-api">Local API</a></div>
+      <div><h4>文档</h4><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/README.md" target="_blank" rel="noopener">README</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/WEB_SEARCH.md" target="_blank" rel="noopener">联网搜索</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/MODEL_COMPATIBILITY.md" target="_blank" rel="noopener">模型兼容性</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/PERMISSIONS.md" target="_blank" rel="noopener">权限说明</a></div>
+      <div><h4>社区</h4><a href="https://github.com/lyydfys/MuYu-Chat-Agent" target="_blank" rel="noopener">GitHub</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/issues" target="_blank" rel="noopener">Issues</a><a href="https://qm.qq.com/q/QpooZX8f0O" target="_blank" rel="noopener">QQ 群 1062951314</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/DONATE.md" target="_blank" rel="noopener">赞助</a></div>
+      <div><h4>法律</h4><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/LICENSE" target="_blank" rel="noopener">Apache-2.0</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/PRIVACY.md" target="_blank" rel="noopener">隐私</a><a href="https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener">第三方声明</a></div>
+    </div>
+
+    <div class="footer-bottom">
+      <span>© 2026 MCA contributors</span>
+      <span>独立开源项目，与 Google LLC 无关联。</span>
+      <span class="footer-bottom-actions">
+        <button class="footer-replay" id="replayOpening" type="button">重播开屏</button>
+        <span class="mono">SITE / PROPOSAL PROTOTYPE</span>
+      </span>
+    </div>
+  </div>
+</footer>
+</div><!-- /#page -->
+
+<!-- Icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <g id="icon-mca">
+      <g transform="translate(54 54) scale(0.74) translate(-54 -54)">
+        <path fill="#1A73E8" d="M54,20 C35.22,20 20,33.43 20,50 C20,59.39 24.87,67.76 32.22,73.19 L28,88 L43.55,83.33 C46.86,84.45 50.36,85 54,85 C72.78,85 88,71.57 88,55 C88,38.43 72.78,20 54,20 Z"></path>
+        <path fill="#FFFFFF" d="M54,34 L57,47 L70,50 L57,53 L54,66 L51,53 L38,50 L51,47 Z"></path>
+        <circle fill="#FFFFFF" fill-opacity="0.8" cx="36" cy="38" r="3.5"></circle>
+        <circle fill="#FFFFFF" fill-opacity="0.8" cx="72" cy="62" r="3.5"></circle>
+        <circle fill="#FFFFFF" fill-opacity="0.5" cx="42" cy="68" r="2.5"></circle>
+        <circle fill="#FFFFFF" fill-opacity="0.5" cx="66" cy="36" r="2"></circle>
+      </g>
+    </g>
+  </defs>
+</svg>
+
+<script src="site.js"></script>
+</body>
+</html>

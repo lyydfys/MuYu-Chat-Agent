@@ -1,0 +1,12 @@
+{
+  "name": "mca-website",
+  "private": true,
+  "version": "1.0.0",
+  "description": "MCA official site — static, no build step required",
+  "type": "module",
+  "scripts": {
+    "serve": "python -m http.server 8080 --directory ..",
+    "fetch:release": "node scripts/fetch-release.mjs",
+    "check": "node scripts/check-site.mjs"
+  }
+}

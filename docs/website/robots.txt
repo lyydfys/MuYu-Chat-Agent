@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /preview/
+Disallow: /scripts/
+
+Sitemap: https://mca.mac-api.xyz/sitemap.xml
