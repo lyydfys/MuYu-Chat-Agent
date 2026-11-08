@@ -3665,3 +3665,28 @@ html {
     margin: 16mm 14mm;
   }
 }
+
+/* ---------- mobile: workspace pane scroll cost ---------- */
+/*
+  Measured at 504px, glass theme: `.ws-grid` is the largest single blurred surface on the page
+  (1.28 M px² of backdrop at blur(22px)), and it sits in the workspace section that stutters
+  while scrolling on a phone.
+
+  Its backdrop is a smooth section gradient — there is no high-frequency detail for a wide
+  radius to smear. Reducing the radius therefore looks identical while cutting the fill rate
+  the compositor pays on every frame.
+
+  Scope note: ONLY `.ws-grid` is touched. `.ws-pane` has no backdrop-filter of its own (the
+  pane's glass comes from the grid), so adding one there measured as +1.09 M px² of NEW blur
+  area — a regression, not an optimisation. Verified by diffing the per-element blur list
+  before/after.
+*/
+:root[data-theme="glass"] .ws-grid {
+  backdrop-filter: blur(8px) saturate(1.12);
+  -webkit-backdrop-filter: blur(8px) saturate(1.12);
+}
+
+/* Two further properties were tried and BOTH measured worse, so neither is used:
+     contain: paint                -> blur area 3.74 -> 4.83 M px² (changes the sampled box)
+     will-change: backdrop-filter  -> keeps a larger composited layer alive (84 -> 85 layers)
+*/

@@ -65,7 +65,9 @@
   try { saved = localStorage.getItem('mca.theme'); } catch (e) {}
   var system = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   var VALID = { light: 1, dark: 1, glass: 1 };
-  var theme = VALID[q] ? q : (VALID[saved] ? saved : (system ? 'dark' : 'light'));
+  // 默认主题是柔光玻璃（本站主视觉）。显式选择（?theme= 或用户上次选过的）优先；
+  // prefers-color-scheme 不再决定默认，仅作兜底。
+  var theme = VALID[q] ? q : (VALID[saved] ? saved : 'glass');
   root.dataset.theme = theme;
   var meta = document.querySelector('meta[name="theme-color"]');
   var COLOR = { light: '#F8F9FA', dark: '#0B0D10', glass: '#EDF1F9' };
