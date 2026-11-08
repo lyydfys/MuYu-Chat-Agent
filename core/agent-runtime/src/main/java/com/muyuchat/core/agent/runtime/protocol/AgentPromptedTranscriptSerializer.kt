@@ -100,6 +100,16 @@ class AgentPromptedTranscriptSerializer(
                         )
                     )
                 )
+                is AgentTranscriptEntry.UserInterjection -> message(
+                    index = messages.size,
+                    role = AgentTranscriptRole.USER,
+                    content = encodeObservation(
+                        AgentJsonValues.obj(
+                            "record" to AgentJsonValue.Str("user_interjection"),
+                            "text" to AgentJsonValue.Str(entry.text)
+                        )
+                    )
+                )
             }
         }
         return AgentTranscriptSerialization(messages = messages)

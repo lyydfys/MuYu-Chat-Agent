@@ -2,6 +2,15 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    // Screenshot (golden) baselines. Applied here and nowhere else, on purpose:
+    //   * the plugin registers its tasks per module, so only this module gets
+    //     :core:designsystem:recordRoborazziDebug / :core:designsystem:verifyRoborazziDebug and the
+    //     other modules keep the exact task graph and build cost they had;
+    //   * it also keeps the plugin classpath off the root build, so no other module resolves it.
+    // The goldens cover the two stateless design-system surfaces that have no Activity or store
+    // dependency (onboarding pages, appearance section). Workflow and review rules:
+    // src/test/java/com/muyuchat/core/designsystem/golden/GOLDEN.md
+    alias(libs.plugins.roborazzi)
 }
 
 android {
@@ -20,6 +29,22 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    testOptions {
+        unitTests {
+            // Robolectric renders the real Compose surface, which needs the merged resources and
+            // manifest of this module's debug variant. Without it the goldens fail to inflate.
+            isIncludeAndroidResources = true
+        }
+    }
+}
+
+// Where the committed baselines live. This directory is the golden set itself: it is reviewed in a
+// diff, not regenerated blindly. The plugin turns this into the `roborazzi.output.dir` system
+// property it hands to the test JVM, and GoldenHarness reads that property so the harness never
+// depends on the JVM working directory.
+roborazzi {
+    outputDir.set(layout.projectDirectory.dir("src/test/screenshots"))
 }
 
 // G00/Q01: Compose compiler reports + metrics for stability/jank triage (diagnostics only; the
@@ -58,5 +83,24 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Golden screenshots (see src/test/java/com/muyuchat/core/designsystem/golden/GOLDEN.md).
+    //
+    // How to run them, as whole-module tasks:
+    //   record : gradlew.bat :core:designsystem:recordRoborazziDebug    (writes/updates the PNGs)
+    //   verify : gradlew.bat :core:designsystem:verifyRoborazziDebug    (fails on pixel drift)
+    //   diff   : gradlew.bat :core:designsystem:compareRoborazziDebug   (writes _compare images)
+    //   reset  : gradlew.bat :core:designsystem:clearRoborazziDebug     (deletes every baseline)
+    // A single test class can be narrowed with --tests, e.g.
+    //   gradlew.bat :core:designsystem:recordRoborazziDebug --tests '*OnboardingGoldenTest'
+    //
+    // These captures are inert under a plain `:core:designsystem:testDebugUnitTest`: Roborazzi only
+    // captures when one of the tasks above sets roborazzi.test.record/verify/compare, so a green
+    // testDebugUnitTest does NOT mean the goldens matched.
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.test.ext.junit)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

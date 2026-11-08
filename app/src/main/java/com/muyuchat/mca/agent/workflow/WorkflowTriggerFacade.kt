@@ -1,4 +1,4 @@
-﻿package com.muyuchat.mca.agent.workflow
+package com.muyuchat.mca.agent.workflow
 
 import com.muyuchat.core.agent.contract.AgentContract
 import com.muyuchat.core.agent.runtime.AgentJsonParseResult
@@ -59,15 +59,39 @@ data class WorkflowScheduledRunCommand(
 }
 
 /**
+ * One external-intent run request.
+ *
+ * [commandId] is the caller-supplied idempotency key (the trigger derives it from the intent
+ * identity), so a duplicated broadcast returns the original receipt instead of starting a second
+ * run. There is no slot: an intent is an explicit, one-off request.
+ */
+data class WorkflowIntentRunCommand(
+    val commandId: String,
+    val definitionId: String,
+    val version: Long,
+    val runId: String? = null,
+    val agentTask: WorkflowAgentTaskPlan? = null,
+    val toolScope: WorkflowToolScope? = null
+) {
+    init {
+        AgentContract.requireId(commandId, "intent commandId")
+        require(definitionId.isNotBlank()) { "intent definitionId must not be blank" }
+        require(version >= 1L) { "intent version must be positive" }
+    }
+}
+
+/**
  * Manual/schedule entry facade over [WorkflowEntryService] and [WorkflowScheduleTrigger] (N20/N22).
  *
  * This is the admin service the user-facing entry calls, not a UI: it owns no ViewModel, no
- * WorkManager and no second scheduler. Manual and scheduled runs share one execution port and one
- * receipt store, so:
+ * WorkManager and no second scheduler. Manual, scheduled and intent runs share one execution port
+ * and one receipt store, so:
  * - a repeated [WorkflowManualRunCommand.commandId] returns the stored receipt (`idempotentReplay`);
  * - a repeated run id (double click, replay after a lost response) is matched by run id;
  * - a scheduled wake goes through [WorkflowScheduleTrigger] with the same receipt check, while the
- *   slot claim in the schedule store stays the at-most-once authority.
+ *   slot claim in the schedule store stays the at-most-once authority;
+ * - an external intent goes through [runIntent] with a command id the trigger derived from the
+ *   intent identity, so a duplicated broadcast is a replay and not a second run.
  *
  * Receipts are evidence of a terminal result. The run checkpoint remains the authority that prevents
  * node re-execution, so a receipt-store outage does not turn a replay into a second execution.
@@ -98,6 +122,18 @@ class WorkflowTriggerFacade(
         slotMillis = command.slotMillis,
         requestedRunId = command.runId
             ?: defaultScheduledRunId(command.definitionId, command.version, command.slotMillis),
+        agentTask = command.agentTask,
+        toolScope = command.toolScope
+    )
+
+    /** External-intent entry (registered trigger). Same idempotency, no schedule slot. */
+    suspend fun runIntent(command: WorkflowIntentRunCommand): WorkflowEntryReceipt = runCommand(
+        commandId = command.commandId,
+        definitionId = command.definitionId,
+        version = command.version,
+        trigger = WorkflowTriggerKind.INTENT,
+        slotMillis = null,
+        requestedRunId = command.runId,
         agentTask = command.agentTask,
         toolScope = command.toolScope
     )
@@ -180,6 +216,14 @@ class WorkflowTriggerFacade(
 
         val result = when (trigger) {
             WorkflowTriggerKind.MANUAL -> entry.runManual(
+                definitionId = definitionId,
+                version = version,
+                agentTask = agentTask,
+                runId = requestedRunId,
+                toolScope = toolScope
+            )
+
+            WorkflowTriggerKind.INTENT -> entry.runIntent(
                 definitionId = definitionId,
                 version = version,
                 agentTask = agentTask,

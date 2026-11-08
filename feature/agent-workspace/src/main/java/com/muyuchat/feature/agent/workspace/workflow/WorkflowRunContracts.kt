@@ -28,7 +28,7 @@ data class WorkflowRunDefinitionUi(
 }
 
 /** Trigger kind of one run; mirrors the existing entry/history projection without importing it. */
-enum class WorkflowRunTrigger { MANUAL, SCHEDULE }
+enum class WorkflowRunTrigger { MANUAL, SCHEDULE, INTENT }
 
 /** Terminal/live status of one history row. */
 enum class WorkflowRunStatus { STARTED, COMPLETED, FAILED, REJECTED }

@@ -165,6 +165,42 @@ class AgentPromptedLoopCoordinatorTest {
     }
 
     @Test
+    fun anInterjectionIsDeliveredAtTheNextStepBoundaryAndDrained() = runTest {
+        val (journal, task, run) = setup()
+        val port = QueueModelPort(
+            mutableListOf(
+                AgentModelResult.Success(AgentTestFixtures.toolEnvelope()),
+                AgentModelResult.Success(AgentTestFixtures.finalEnvelope("已按新要求完成。"))
+            )
+        )
+        val executor = RecordingToolExecutor(descriptor)
+        val queues = AgentInterjectionQueues()
+        val loop = coordinator(
+            journal,
+            port,
+            FakeToolCatalog(mapOf(descriptor.toolKey to executor)),
+            interjectionQueues = queues
+        )
+        assertTrue(queues.enqueue(run.runId, "顺便把标题也改一下", atMillis = 1L))
+
+        val result = loop.execute(run, task, null, AgentModelProgressSink { })
+
+        assertTrue(result is AgentLoopResult.Completed)
+        // The interjection was buffered before this run's first step, so the first model request must
+        // already carry it as a user-role record, and the queue must be empty afterwards.
+        val firstRequest = port.requests[0]
+        val interjectionMessage = firstRequest.messages.first { it.content.contains("user_interjection") }
+        assertEquals(AgentTranscriptRole.USER, interjectionMessage.role)
+        assertTrue(interjectionMessage.content.contains("顺便把标题也改一下"))
+        assertTrue("the drained queue must be empty", queues.queueFor(run.runId).isEmpty())
+        assertEquals(
+            "history is cumulative: the interjection appears once, not once per step",
+            1,
+            port.requests[1].messages.count { it.content.contains("顺便把标题也改一下") }
+        )
+    }
+
+    @Test
     fun aNativeTurnIsExecutedWithoutPromptedDecoding() = runTest {
         val (journal, task, run) = setup()
         val nativeTurn = AgentModelTurn(
@@ -892,7 +928,8 @@ class AgentPromptedLoopCoordinatorTest {
         hook: RecordingFrozenCommandHook = RecordingFrozenCommandHook(ledger = journal),
         verifier: FakeArtifactVerifier = FakeArtifactVerifier(),
         attemptRegistry: AgentActiveAttemptRegistry = AgentActiveAttemptRegistry(),
-        provider: AgentRunToolCatalogProvider? = null
+        provider: AgentRunToolCatalogProvider? = null,
+        interjectionQueues: AgentInterjectionQueues = AgentInterjectionQueues()
     ): AgentPromptedLoopCoordinator {
         return AgentPromptedLoopCoordinator(
             decoderFactory = { keys -> PromptedV1TurnDecoder(PromptedV1Decoder({ keys }, codec)) },
@@ -913,7 +950,8 @@ class AgentPromptedLoopCoordinatorTest {
             artifactVerifier = verifier,
             ids = ids,
             clock = clock,
-            attemptRegistry = attemptRegistry
+            attemptRegistry = attemptRegistry,
+            interjectionQueues = interjectionQueues
         )
     }
 

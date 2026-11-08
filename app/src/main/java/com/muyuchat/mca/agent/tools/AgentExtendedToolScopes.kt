@@ -23,9 +23,28 @@ import com.muyuchat.mca.agent.security.AgentCanonicalJson
  */
 object AgentExtendedToolScopes {
     /** Scope of one approved `http.get`: the exact canonical origin, method GET, NETWORK_READ. */
-    fun httpGet(normalizedArgumentsJson: String): AgentScopePrecondition? {
+    fun httpGet(normalizedArgumentsJson: String): AgentScopePrecondition? =
+        networkReadScope(normalizedArgumentsJson, AgentHttpDestinationRules::check)
+
+    /**
+     * Scope of one approved `web.fetch`: the same NETWORK_READ scope shape as `http.get`, built from
+     * the *web fetch* destination policy (it also accepts plain http pages).
+     */
+    fun webFetch(normalizedArgumentsJson: String): AgentScopePrecondition? =
+        networkReadScope(normalizedArgumentsJson) { url ->
+            when (val checked = AgentWebFetchDestinationRules.check(url)) {
+                is AgentWebFetchUrlResult.Valid -> AgentHttpUrlResult.Valid(checked.url, checked.origin)
+                is AgentWebFetchUrlResult.Invalid ->
+                    AgentHttpUrlResult.Invalid(checked.code, checked.safeMessage)
+            }
+        }
+
+    private fun networkReadScope(
+        normalizedArgumentsJson: String,
+        check: (String) -> AgentHttpUrlResult
+    ): AgentScopePrecondition? {
         val url = readText(normalizedArgumentsJson, "url") ?: return null
-        val destination = when (val checked = AgentHttpDestinationRules.check(url)) {
+        val destination = when (val checked = check(url)) {
             is AgentHttpUrlResult.Valid -> checked
             is AgentHttpUrlResult.Invalid -> return null
         }

@@ -112,7 +112,12 @@ fun extendedAgentToolCatalog(
         executors += AgentDeviceNotificationSettingsTool(deviceSettingsLauncher)
     }
     if (deviceScreenPort != null) executors += AgentScreenTool(deviceScreenPort)
-    if (httpClient != null) executors += AgentHttpGetTool(httpClient, httpGate)
+    if (httpClient != null) {
+        executors += AgentHttpGetTool(httpClient, httpGate)
+        // Same transport and the same per-run egress gate; `web.fetch` only changes the projection
+        // (HTML → plain text). Registered together so a run never has the reader without the fetcher.
+        executors += AgentWebFetchTool(httpClient, httpGate)
+    }
     if (terminalSandbox.isAvailable) executors += AgentTerminalExecTool(terminalSandbox, terminalWhitelist)
     return BuiltInAgentToolCatalog(executors)
 }

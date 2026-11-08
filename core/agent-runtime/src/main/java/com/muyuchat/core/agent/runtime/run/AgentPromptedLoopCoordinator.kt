@@ -75,7 +75,20 @@ class AgentPromptedLoopCoordinator(
      * Dispatcher for the bounded read-only batch (N06). Null keeps the caller's execution context,
      * so the production assembly is unchanged; the coordinator never creates its own dispatcher.
      */
-    internal val parallelDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null
+    internal val parallelDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
+    /**
+     * Interjections typed while the run is in flight (Mika's "read at the next step boundary").
+     *
+     * Shared with the owner through the same registry instance; tests inject their own so a case can
+     * assert the exact drained text without touching process-wide state.
+     */
+    private val interjectionQueues: AgentInterjectionQueues = AgentInterjectionQueues.global,
+    /**
+     * Optional operation knowledge for the SYSTEM prompt. [AgentKnowledgePort.NONE] is the default,
+     * so a run built without an app-side provider produces byte-identical prompts.
+     */
+    private val knowledgePort: com.muyuchat.core.agent.contract.AgentKnowledgePort =
+        com.muyuchat.core.agent.contract.AgentKnowledgePort.NONE
 ) : AgentRunExecutor {
 
     internal val codec: StrictJsonCodec = StrictAgentJsonCodec()
@@ -351,11 +364,19 @@ class AgentPromptedLoopCoordinator(
                     .exceededOrNull()?.let { exceeded ->
                         return pause(currentRun, entries, stepIndex, repairs, spent, exceeded)
                     }
+                // Step boundary: everything typed while the previous step ran is delivered once, in
+                // arrival order, as user text before the model sees this step.
+                val drained = interjectionQueues.drainAsEntries(currentRun.runId, clock.nowMillis())
+                if (drained.isNotEmpty()) entries.addAll(drained)
+                // Operation knowledge is resolved once per step from the run's own goal, so a
+                // retry inside the step cannot see a different fragment than the first attempt.
+                val operationKnowledge = resolveOperationKnowledge(task.goal)
                 val systemPrompt = systemPromptBuilder.build(
                     catalog.snapshot(),
                     currentRun.policy.policyVersion,
                     budgetSummaryJson(currentRun.budget),
-                    currentRun.modelBinding.protocolMode
+                    currentRun.modelBinding.protocolMode,
+                    operationKnowledge
                 )
                 val assembly = contextAssembler.assemble(
                     AgentContextAssemblyRequest(

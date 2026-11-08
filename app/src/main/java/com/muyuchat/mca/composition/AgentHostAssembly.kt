@@ -355,6 +355,10 @@ internal class AgentHostAssembly(
             cloud = cloudModelPort
         )
         val broker = AgentPermissionBroker(data.approvalStore)
+        // One persisted document: global ALLOW/ASK/FORBID default + per-tool exceptions. Absent or
+        // corrupt values decode to "everything asks", which is the pre-policy behaviour.
+        val approvalPolicyStore =
+            com.muyuchat.mca.agent.security.AgentToolApprovalPolicyStore(application)
         val hook = AgentToolPermissionHook(
             // The default factory stays built-in-only for tests/other callers; production injects
             // the composite that also validates memory.search before an approval is created.
@@ -362,7 +366,8 @@ internal class AgentHostAssembly(
                 normalizer = AgentToolNormalizerRoutes.production()
             ),
             broker = broker,
-            invocations = data.toolInvocationLedger
+            invocations = data.toolInvocationLedger,
+            approvalPolicySource = approvalPolicyStore
         ).hook()
         // Base catalog (N04): built-ins + the Skills enabled when THIS run starts. The snapshot is
         // resolved per run, so enabling/disabling/updating a Skill affects the next run and never
@@ -382,7 +387,16 @@ internal class AgentHostAssembly(
             // DshA11yController the DSH capability lane uses, so there is exactly one tapper and one
             // typer in the app. Registered unconditionally — with the service disabled every call
             // answers SCREEN_SERVICE_DISABLED instead of silently succeeding.
-            deviceScreenPort = com.muyuchat.mca.agent.tools.AndroidAgentScreenPort()
+            deviceScreenPort = com.muyuchat.mca.agent.tools.AndroidAgentScreenPort(),
+            // `terminal.exec` rides the app-private workspace as its cwd. The sandbox reports
+            // isAvailable only after a real probe (workspace writable + a known binary actually runs),
+            // so on a device/ABI where that fails the tool stays unregistered instead of advertising
+            // a capability it cannot honour. The whitelist stays DEFAULT; EXTENDED is opt-in.
+            terminalSandbox = com.muyuchat.mca.agent.tools.AndroidAgentTerminalSandbox(
+                workspace = runCatching {
+                    java.io.File(application.filesDir, "agent/terminal").also { it.mkdirs() }
+                }.getOrElse { java.io.File(application.filesDir, "agent") }
+            )
         )
             .augmentedWithPackageTools { packageExecutorSnapshot.current() }
         val skillCatalogProvider = RunScopedSkillCatalogProvider(
@@ -438,6 +452,7 @@ internal class AgentHostAssembly(
             toolCatalogProvider = catalogProvider,
             commandHook = hook,
             permissionBroker = broker,
+            approvalPolicySource = approvalPolicyStore,
             scope = agentOwnerScope,
             stopSettlementSource = stopSettlementSource,
             // A cancel must reach the exact engine request before the owner cancels the job: a

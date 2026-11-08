@@ -1,4 +1,4 @@
-﻿package com.muyuchat.mca.agent.composition
+package com.muyuchat.mca.agent.composition
 
 import com.muyuchat.mca.agent.reliability.AgentApprovalOutboxLedger
 import com.muyuchat.mca.agent.reliability.AgentOutboxBackgroundLoop
@@ -61,6 +61,8 @@ import com.muyuchat.core.agent.runtime.run.UuidAgentIdGenerator
 import com.muyuchat.core.agent.runtime.validation.SupportedToolSchemaValidator
 import com.muyuchat.mca.agent.data.AgentTaskCreationOutcome
 import com.muyuchat.mca.agent.data.ObservingAgentJournal
+import com.muyuchat.mca.agent.data.reportingAgentTurnSummaries
+import com.muyuchat.mca.agent.projection.AgentTurnSummarySink
 import com.muyuchat.mca.agent.data.export.AgentPackageResult
 import com.muyuchat.mca.agent.data.quota.AgentCancelOutcome
 import com.muyuchat.mca.agent.data.quota.AgentTaskDeletionResult
@@ -95,6 +97,13 @@ class AgentRuntimeAssembly(
      */
     private val stopSettlementSource: AgentRunStopSettlementSource? = null,
     /**
+     * The user's persisted ALLOW/ASK/FORBID policy. The hook denies/auto-allows before a prompt is
+     * created, and the authorization adapter re-reads it so a FORBID written while a prompt was
+     * visible also stops the click. Default: everything asks.
+     */
+    private val approvalPolicySource: com.muyuchat.mca.agent.security.AgentToolApprovalPolicySource =
+        com.muyuchat.mca.agent.security.AgentToolApprovalPolicySource.DEFAULT,
+    /**
      * Dispatches the exact engine stop for a run's live model attempt before the owner cancels the
      * execution job. The owner's own cancel only cancels the coroutine; a local runner that ignores
      * coroutine cancellation would keep its lease and the run could never leave STOPPING.
@@ -111,18 +120,30 @@ class AgentRuntimeAssembly(
      * S4 platform wake hint for parks that remain waiting after cold-start recovery. Null keeps
      * harnesses without WorkManager on the in-process sweep only.
      */
-    private val parkWakeScheduler: com.muyuchat.mca.agent.workflow.AgentParkWakeScheduler? = null
+    private val parkWakeScheduler: com.muyuchat.mca.agent.workflow.AgentParkWakeScheduler? = null,
+    /**
+     * Chat-timeline hand-off for a finished Agent run. Defaults to the intentional no-op: no Agent
+     * contract type carries a conversation id yet, so a real sink could not resolve one (see
+     * [com.muyuchat.mca.agent.projection.AgentTurnSummarySink]).
+     */
+    private val agentTurnSummarySink: AgentTurnSummarySink =
+        com.muyuchat.mca.agent.projection.NoAgentTurnSummarySink
 ) : AgentWorkspaceCommands {
 
     /**
      * Every committed run transition flows through this journal decorator, which is how the app
      * composition drives the foreground-service guard. No polling and no Android type enters runtime.
+     *
+     * The summary reporter sits *under* the observer so a finished run is reported from the
+     * committed `RUN_TERMINAL` append: that append is the only place a run becomes terminal, and
+     * decorating the journal keeps the whole feature outside `core`. Its default sink writes
+     * nothing until a task→conversation binding exists (see [AgentTurnSummarySink]).
      */
-    private val journal = if (runObserver == null) {
-        data.journal
-    } else {
-        ObservingAgentJournal(data.journal, runObserver)
-    }
+    private val journal = data.journal
+        .reportingAgentTurnSummaries(agentTurnSummarySink)
+        .let { observed ->
+            if (runObserver == null) observed else ObservingAgentJournal(observed, runObserver)
+        }
 
     val queries: AgentWorkspaceQueries = data.queries
 
@@ -144,7 +165,11 @@ class AgentRuntimeAssembly(
     // N03 production: approved invocations are enqueued and dispatched by the background loop;
     // the ledger wrapper settles the outbox from the authoritative terminal invocation fact.
     private val toolLedger = AgentApprovalOutboxLedger(data.toolInvocationLedger, data.dispatchOutbox)
-    private val toolAuthorization = BrokerAgentToolAuthorization(toolLedger, permissionBroker)
+    private val toolAuthorization = BrokerAgentToolAuthorization(
+        invocations = toolLedger,
+        broker = permissionBroker,
+        approvalPolicySource = approvalPolicySource
+    )
 
     /** Late-bound so the loop (which needs the owner) can be constructed after the owner. */
     private var dispatchLoop: AgentOutboxBackgroundLoop? = null

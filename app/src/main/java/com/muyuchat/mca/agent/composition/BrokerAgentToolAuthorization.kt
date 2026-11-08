@@ -16,7 +16,10 @@ import com.muyuchat.mca.agent.security.AgentExecutionAuthorization
 import com.muyuchat.mca.agent.security.AgentPermissionCandidate
 import com.muyuchat.mca.agent.security.AgentPermissionPolicy
 import com.muyuchat.mca.agent.security.AgentResolvedToolScope
+import com.muyuchat.mca.agent.security.AgentToolApprovalPolicySource
 import com.muyuchat.mca.agent.security.AgentWorkspaceReadGrant
+import com.muyuchat.mca.agent.security.ToolApprovalMode
+import com.muyuchat.mca.agent.security.ToolApprovalPolicy
 
 /**
  * One-shot authorization adapter for the run owner.
@@ -29,7 +32,12 @@ import com.muyuchat.mca.agent.security.AgentWorkspaceReadGrant
  */
 class BrokerAgentToolAuthorization(
     private val invocations: AgentToolInvocationLedger,
-    private val broker: com.muyuchat.mca.agent.security.AgentPermissionBroker
+    private val broker: com.muyuchat.mca.agent.security.AgentPermissionBroker,
+    /**
+     * Re-read at authorization time so a policy that became `FORBID` after the prompt was shown
+     * also stops the click from executing. Default: unchanged behaviour (never auto-deny).
+     */
+    private val approvalPolicySource: AgentToolApprovalPolicySource = AgentToolApprovalPolicySource.DEFAULT
 ) : AgentToolAuthorizationPort {
 
     override suspend fun authorize(
@@ -118,6 +126,21 @@ class BrokerAgentToolAuthorization(
             networkPolicy = request.run.policy.networkPolicy
         )
         val grant = AgentWorkspaceReadGrant.v1(request.task)
+        val policyNow = try {
+            approvalPolicySource.current()
+        } catch (_: Throwable) {
+            ToolApprovalPolicy.DEFAULT
+        }
+        if (policyNow.decide(candidate.descriptor.toolKey, candidate.descriptor.sideEffect) ==
+            ToolApprovalMode.FORBID
+        ) {
+            broker.invalidateApproval(request.approvalId, request.nowMillis)
+            return notExecuted(
+                AgentErrorCodes.PERMISSION_DENIED,
+                "This tool is forbidden by the current approval policy.",
+                AgentToolResultStatus.DENIED
+            )
+        }
         return when (
             val authorization = broker.authorize(
                 candidate = candidate,

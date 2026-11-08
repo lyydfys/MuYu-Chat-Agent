@@ -62,6 +62,16 @@ interface AgentTerminalSandbox {
 object AgentTerminalWhitelist {
     val DEFAULT: Set<String> = setOf("echo", "pwd", "date")
 
+    /**
+     * Read-mostly toolchain for the production sandbox. **Not wired anywhere by itself**: an
+     * operator/user has to opt in explicitly (a task policy or a setting), so the shipped surface
+     * stays [DEFAULT] until someone chooses otherwise.
+     *
+     * `ls`/`cat`/`wc`/`head`/`grep`/`find` only read; `echo`/`pwd`/`date` are the existing trio. No
+     * interpreter, no shell built-in, no write command is added here on purpose.
+     */
+    val EXTENDED: Set<String> = DEFAULT + setOf("ls", "cat", "wc", "head", "grep", "find")
+
     private val COMMAND = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
     fun isValidCommandName(command: String): Boolean = COMMAND.matches(command)

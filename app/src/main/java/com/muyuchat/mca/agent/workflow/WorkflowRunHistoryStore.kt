@@ -1,6 +1,16 @@
 package com.muyuchat.mca.agent.workflow
 
-enum class WorkflowTriggerKind { MANUAL, SCHEDULE }
+enum class WorkflowTriggerKind {
+    MANUAL,
+    SCHEDULE,
+
+    /**
+     * Started by an external app through the registered intent trigger. It is an entry trigger
+     * only: parsing/registration live in `WorkflowIntentTrigger`, and the run still goes through
+     * the same entry facade, receipt store and checkpoint as a manual run.
+     */
+    INTENT
+}
 
 enum class WorkflowRunStatus { STARTED, COMPLETED, FAILED, REJECTED }
 

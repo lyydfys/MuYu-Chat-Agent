@@ -57,6 +57,28 @@ class WorkflowEntryService(
         slotMillis = slotMillis
     )
 
+    /**
+     * Entry for the registered intent trigger. It has no slot: two different calls are two
+     * intentional runs, and replay protection is the caller's command id (see the facade).
+     */
+    suspend fun runIntent(
+        definitionId: String,
+        version: Long,
+        agentTask: WorkflowAgentTaskPlan? = null,
+        runId: String? = null,
+        toolScope: WorkflowToolScope? = null
+    ): WorkflowExecutionResult = run(
+        request = WorkflowExecutionRequest(
+            definitionId,
+            version,
+            runId = runId,
+            agentTaskPlan = agentTask,
+            toolScope = toolScope
+        ),
+        trigger = WorkflowTriggerKind.INTENT,
+        slotMillis = null
+    )
+
     private suspend fun run(
         request: WorkflowExecutionRequest,
         trigger: WorkflowTriggerKind,

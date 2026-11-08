@@ -43,6 +43,7 @@ class AgentExtendedToolArgumentNormalizer(
                 WORKSPACE_WRITE_TEXT -> normalizeWriteText(fields)
                 WORKSPACE_EDIT_TEXT -> normalizeEditText(fields)
                 HTTP_GET -> normalizeHttpGet(fields)
+                WEB_FETCH -> normalizeWebFetch(fields)
                 TERMINAL_EXEC -> normalizeTerminalExec(fields)
                 else -> AgentArgumentNormalization.Rejected(AgentSecurityErrors.toolNotRegistered())
             }
@@ -118,6 +119,39 @@ class AgentExtendedToolArgumentNormalizer(
             linkedMapOf(
                 FIELD_URL to AgentArgValue.Text(destination.url),
                 FIELD_MAX_BYTES to AgentArgValue.Integer(maxBytes),
+                FIELD_TIMEOUT_MILLIS to AgentArgValue.Integer(timeoutMillis)
+            ),
+            logicalPaths = emptyList(),
+            expectedOldHash = null
+        )
+    }
+
+    private fun normalizeWebFetch(fields: Map<String, AgentArgValue>): AgentArgumentNormalization {
+        requireOnly(fields, setOf(FIELD_URL, FIELD_MAX_CHARS, FIELD_TIMEOUT_MILLIS))
+        val rawUrl = requiredText(fields, FIELD_URL)
+        // Same destination policy the executor re-applies, so the approval binds a canonical page.
+        val destination = when (val checked = AgentWebFetchDestinationRules.check(rawUrl)) {
+            is AgentWebFetchUrlResult.Valid -> checked
+            is AgentWebFetchUrlResult.Invalid -> fail(checked.safeMessage)
+        }
+        val maxChars = optionalInteger(
+            fields,
+            FIELD_MAX_CHARS,
+            DEFAULT_WEB_FETCH_MAX_CHARS,
+            1L,
+            MAX_WEB_FETCH_MAX_CHARS
+        )
+        val timeoutMillis = optionalInteger(
+            fields,
+            FIELD_TIMEOUT_MILLIS,
+            DEFAULT_HTTP_TIMEOUT_MILLIS,
+            MIN_HTTP_TIMEOUT_MILLIS,
+            MAX_HTTP_TIMEOUT_MILLIS
+        )
+        return normalized(
+            linkedMapOf(
+                FIELD_URL to AgentArgValue.Text(destination.url),
+                FIELD_MAX_CHARS to AgentArgValue.Integer(maxChars),
                 FIELD_TIMEOUT_MILLIS to AgentArgValue.Integer(timeoutMillis)
             ),
             logicalPaths = emptyList(),
@@ -226,8 +260,9 @@ class AgentExtendedToolArgumentNormalizer(
         const val WORKSPACE_EDIT_TEXT: String = "workspace.edit_text"
         const val HTTP_GET: String = "http.get"
         const val TERMINAL_EXEC: String = "terminal.exec"
+        const val WEB_FETCH: String = "web.fetch"
 
-        private val KEYS = setOf(WORKSPACE_WRITE_TEXT, WORKSPACE_EDIT_TEXT, HTTP_GET, TERMINAL_EXEC)
+        private val KEYS = setOf(WORKSPACE_WRITE_TEXT, WORKSPACE_EDIT_TEXT, HTTP_GET, TERMINAL_EXEC, WEB_FETCH)
 
         private const val FIELD_PATH = "path"
         private const val FIELD_CONTENT = "content"
@@ -236,6 +271,7 @@ class AgentExtendedToolArgumentNormalizer(
         private const val FIELD_EXPECTED_OLD_HASH = "expectedOldHash"
         private const val FIELD_URL = "url"
         private const val FIELD_MAX_BYTES = "maxBytes"
+        private const val FIELD_MAX_CHARS = "maxChars"
         private const val FIELD_COMMAND = "command"
         private const val FIELD_ARGS = "args"
         private const val FIELD_TIMEOUT_MILLIS = "timeoutMillis"
@@ -248,6 +284,9 @@ class AgentExtendedToolArgumentNormalizer(
         private const val DEFAULT_HTTP_TIMEOUT_MILLIS = 10_000L
         private const val MIN_HTTP_TIMEOUT_MILLIS = 1_000L
         private const val MAX_HTTP_TIMEOUT_MILLIS = 15_000L
+
+        private const val DEFAULT_WEB_FETCH_MAX_CHARS = 4_000L
+        private const val MAX_WEB_FETCH_MAX_CHARS = 20_000L
 
         private const val DEFAULT_TERMINAL_TIMEOUT_MILLIS = 15_000L
         private const val MIN_TERMINAL_TIMEOUT_MILLIS = 1_000L

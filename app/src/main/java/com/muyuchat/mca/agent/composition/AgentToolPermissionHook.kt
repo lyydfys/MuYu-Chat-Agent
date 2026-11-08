@@ -15,7 +15,9 @@ import com.muyuchat.mca.agent.security.AgentPermissionBroker
 import com.muyuchat.mca.agent.security.AgentPermissionCandidate
 import com.muyuchat.mca.agent.security.AgentPermissionDecision
 import com.muyuchat.mca.agent.security.AgentPermissionPolicy
+import com.muyuchat.mca.agent.security.AgentToolApprovalPolicySource
 import com.muyuchat.mca.agent.security.AgentWorkspaceReadGrant
+import com.muyuchat.mca.agent.security.ToolApprovalPolicy
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -28,12 +30,20 @@ import kotlinx.coroutines.CancellationException
  * to create a PENDING approval. A missing ledger therefore yields a typed `Failed` decision, never a
  * dangling approval. The hook does not consume approvals; the owner handles the user click through
  * the one-shot authorization seam.
+ *
+ * [approvalPolicySource] is the user's global ALLOW/ASK/FORBID policy plus per-tool exceptions. It
+ * is read once per call, after the invocation row exists, so:
+ *  * `FORBID` returns a denial and never inserts a PENDING approval (no prompt, nothing to consume);
+ *  * `ALLOW` returns a ready command without an approval row (the run is not paused);
+ *  * `ASK` keeps the historical behaviour byte-for-byte.
+ * The default source is "everything asks", so a caller that does not pass one is unchanged.
  */
 class AgentToolPermissionHook(
     private val factory: AgentFrozenCommandFactory,
     private val broker: AgentPermissionBroker,
     private val invocations: AgentToolInvocationLedger,
-    private val clockMillis: () -> Long = System::currentTimeMillis
+    private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val approvalPolicySource: AgentToolApprovalPolicySource = AgentToolApprovalPolicySource.DEFAULT
 ) {
     fun hook(): AgentFrozenCommandHook = AgentFrozenCommandHook { request ->
         freezeAndDecide(request)
@@ -119,7 +129,15 @@ class AgentToolPermissionHook(
             policyVersion = request.run.policy.policyVersion,
             networkPolicy = request.run.policy.networkPolicy
         )
-        return when (val decision = broker.decide(candidate, policy, grant, now)) {
+        val approvalPolicy = try {
+            approvalPolicySource.current()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // A broken preference store must not widen access: fall back to "ask".
+            ToolApprovalPolicy.DEFAULT
+        }
+        return when (val decision = broker.decide(candidate, policy, grant, now, approvalPolicy)) {
             is AgentPermissionDecision.AllowForTask ->
                 AgentFrozenCommandDecision.ReadyToExecute(decision.command)
             is AgentPermissionDecision.NeedsApproval ->

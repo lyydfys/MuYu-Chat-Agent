@@ -1,5 +1,9 @@
 package com.muyuchat.api.local
 
+import com.muyuchat.api.local.a2a.A2aErrorCode
+import com.muyuchat.api.local.a2a.A2aMethod
+import com.muyuchat.api.local.a2a.A2aProtocol
+import com.muyuchat.api.local.a2a.AgentCard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
@@ -38,7 +42,15 @@ fun localApiPublicModelId(displayName: String?, internalId: String): String {
 class McaLoopbackServer(
     private val port: Int = 11435,
     private val bindHost: String = "127.0.0.1",
-    internal val apiKey: String = ""
+    internal val apiKey: String = "",
+    /**
+     * A2A 1.0 surface (`/.well-known/agent-card.json` + `POST /a2a`).
+     *
+     * **Off by default**, like every other capability of this server: the app only enables it when the
+     * user turns the corresponding Local API switch on. While false both paths answer 404, so an
+     * existing deployment is unaffected by the code shipping.
+     */
+    private val a2aEnabled: Boolean = false
 ) {
     private var dispatcher: ExecutorCoroutineDispatcher = newDispatcher()
     internal var scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -304,6 +316,13 @@ class McaLoopbackServer(
                         is PreparedGenerationRequest.Rejected -> writePreflightRejection(client, prepared)
                     }
                 }
+                // A2A 1.0: discovery is unauthenticated (see isPublicRoute); the RPC itself is not.
+                a2aEnabled && method == "GET" && path == A2aProtocol.AGENT_CARD_PATH -> {
+                    writeJson(client, a2aAgentCard().toJson())
+                }
+                a2aEnabled && method == "POST" && path == A2aProtocol.RPC_PATH -> {
+                    handleA2aRpc(client, body, headers)
+                }
                 else -> writeError(client, "404 Not Found", "not_found", "接口不存在：$path")
             }
         }
@@ -311,6 +330,8 @@ class McaLoopbackServer(
 
     internal fun isPublicRoute(method: String, path: String): Boolean =
         method == "OPTIONS" ||
+            // A2A discovery cards are world-readable by spec; the RPC endpoint is not.
+            method == "GET" && a2aEnabled && path == A2aProtocol.AGENT_CARD_PATH ||
             method == "HEAD" && path == "/health" ||
             method == "GET" && (
                 path == "/health" ||
@@ -336,8 +357,82 @@ class McaLoopbackServer(
         }
     }
 
-    private companion object {
+    /**
+     * Discovery card published at [A2aProtocol.AGENT_CARD_PATH].
+     *
+     * Capabilities describe what this server can *parse*, not what it can execute yet: no task bridge
+     * exists, so `SendMessage` answers [A2aErrorCode.INTERNAL_ERROR] with
+     * [A2aProtocol.TASK_BRIDGE_NOT_IMPLEMENTED]. The card stays honest about the version it speaks.
+     */
+    internal fun a2aAgentCard(): AgentCard = AgentCard(
+        name = "MCA Agent",
+        version = "1.0.0",
+        capabilities = listOf("SendMessage", "GetTask")
+    )
 
+    /**
+     * `POST /a2a`: version check → JSON-RPC parse → **task bridge (TODO)**.
+     *
+     * The bridge is deliberately absent. Once it exists it must route through the same run owner and
+     * budget/policy gates as the app's own chat path; a second execution path here would bypass every
+     * cancel/approval guarantee.
+     */
+    private fun handleA2aRpc(socket: Socket, body: String, headers: Map<String, String>) {
+        if (!A2aProtocol.acceptsVersion(headers[A2aProtocol.VERSION_HEADER])) {
+            writeA2aJson(
+                socket,
+                A2aProtocol.jsonRpcError(
+                    null,
+                    A2aErrorCode.INVALID_REQUEST,
+                    "A2A-Version ${A2aProtocol.PROTOCOL_VERSION} is required"
+                )
+            )
+            return
+        }
+        val request = A2aProtocol.parseJsonRpc(body)
+        if (request == null) {
+            writeA2aJson(
+                socket,
+                A2aProtocol.jsonRpcError(null, A2aErrorCode.PARSE_ERROR, "invalid JSON-RPC request")
+            )
+            return
+        }
+        val paramsValid = when (request.method) {
+            A2aMethod.SEND_MESSAGE -> request.messageText != null
+            A2aMethod.GET_TASK -> request.taskId != null
+        }
+        if (!paramsValid) {
+            writeA2aJson(
+                socket,
+                A2aProtocol.jsonRpcError(
+                    request.id,
+                    A2aErrorCode.INVALID_PARAMS,
+                    "missing params for ${request.method.wireName}"
+                )
+            )
+            return
+        }
+        // TODO(a2a-bridge): execute through the shared run owner, then answer with taskId + state.
+        writeA2aJson(
+            socket,
+            A2aProtocol.jsonRpcError(
+                request.id,
+                A2aErrorCode.INTERNAL_ERROR,
+                A2aProtocol.TASK_BRIDGE_NOT_IMPLEMENTED
+            )
+        )
+    }
+
+    private fun writeA2aJson(socket: Socket, body: String, status: String = "200 OK") {
+        writeText(
+            socket = socket,
+            body = body,
+            status = status,
+            contentType = "application/json; charset=utf-8"
+        )
+    }
+
+    private companion object {
         private val GENERATION_PATHS = setOf("/v1/chat/completions", "/chat/completions", "/v1/completions", "/completion")
         private val RESPONSES_PATHS = setOf("/v1/responses", "/responses")
         private val IMAGE_GENERATION_PATHS = setOf("/v1/images/generations", "/images/generations")

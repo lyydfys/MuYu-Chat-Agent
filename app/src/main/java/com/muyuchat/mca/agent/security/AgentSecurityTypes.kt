@@ -62,6 +62,19 @@ internal object AgentSecurityErrors {
             "The user denied this tool invocation."
         )
 
+    /**
+     * The persisted approval policy forbids this tool outright
+     * ([ToolApprovalMode.FORBID]). No approval is offered, so retrying only makes sense after the
+     * user changes the policy.
+     */
+    fun permissionForbidden(): AgentSecurityError =
+        error(
+            AgentErrorCodes.PERMISSION_DENIED,
+            AgentErrorCategory.PERMISSION,
+            AgentRetryability.NEVER,
+            "This tool is forbidden by the current approval policy."
+        )
+
     fun permissionExpired(): AgentSecurityError =
         error(
             AgentErrorCodes.PERMISSION_EXPIRED,

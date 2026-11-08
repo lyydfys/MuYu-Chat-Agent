@@ -694,6 +694,9 @@ internal fun AgentRunOwner.releaseActive(runId: String) {
     pendingApprovals.remove(runId)
     pendingResumes.remove(runId)
     stopSettlements.remove(runId)
+    // A terminal run can never consume a buffered interjection; dropping it here keeps the registry
+    // from growing per run and stops stale text from reaching a later run.
+    AgentInterjectionQueues.global.clear(runId)
     scope.launch { clearParkToken(runId) }
     if (current?.runId == runId) {
         active = null

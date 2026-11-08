@@ -25,6 +25,7 @@ internal object AgentExtendedToolSchemas {
     val WORKSPACE_EDIT_TEXT: BuiltInToolSchema = build(editTextSchema())
     val HTTP_GET: BuiltInToolSchema = build(httpGetSchema())
     val TERMINAL_EXEC: BuiltInToolSchema = build(terminalExecSchema())
+    val WEB_FETCH: BuiltInToolSchema = build(webFetchSchema())
 
     private fun build(schema: JSONObject): BuiltInToolSchema {
         val json = AgentToolJson.canonical(schema)
@@ -85,6 +86,18 @@ internal object AgentExtendedToolSchemas {
                 .put("command", stringProperty(minLength = 1, maxLength = 64))
                 .put("args", stringProperty(maxLength = 1_024))
                 .put("timeoutMillis", integerProperty(minimum = 1_000, maximum = 30_000))
+        )
+
+    private fun webFetchSchema(): JSONObject = JSONObject()
+        .put("type", "object")
+        .put("additionalProperties", false)
+        .put("required", JSONArray().put("url"))
+        .put(
+            "properties",
+            JSONObject()
+                .put("url", stringProperty(minLength = 9, maxLength = 2_048))
+                .put("maxChars", integerProperty(minimum = 1, maximum = 20_000))
+                .put("timeoutMillis", integerProperty(minimum = 1_000, maximum = 15_000))
         )
 
     private fun stringProperty(minLength: Int = 0, maxLength: Int): JSONObject {
@@ -161,5 +174,28 @@ internal object AgentExtendedToolDescriptors {
         sideEffect = AgentToolSideEffect.EXTERNAL_SIDE_EFFECT,
         dataClass = AgentDataClass.PRIVATE,
         timeoutMillis = 33_000L
+    )
+
+    /**
+     * `web.fetch`: read one web page as text.
+     *
+     * READ_ONLY: the call reads a public document and changes nothing on the device, so it needs no
+     * approval under ASK. It still carries NETWORK-class data and still requires the same per-run
+     * egress authorization as `http.get`; the difference is the projection (HTML → plain text) and
+     * the model-facing `maxChars` budget.
+     */
+    val WEB_FETCH = AgentToolDescriptor(
+        toolKey = "web.fetch",
+        version = "1",
+        displayName = "Fetch Web Page As Text",
+        description = "Fetch one http/https page and return its readable text: scripts, styles and " +
+            "markup are removed, paragraph boundaries are kept, and the answer is capped at maxChars " +
+            "(4000 by default, 20000 maximum) with an explicit truncation marker. The call requires " +
+            "an active run egress authorization for the exact origin.",
+        schemaJson = AgentExtendedToolSchemas.WEB_FETCH.json,
+        schemaHash = AgentExtendedToolSchemas.WEB_FETCH.schemaHash,
+        sideEffect = AgentToolSideEffect.READ_ONLY,
+        dataClass = AgentDataClass.PRIVATE,
+        timeoutMillis = 26_000L
     )
 }

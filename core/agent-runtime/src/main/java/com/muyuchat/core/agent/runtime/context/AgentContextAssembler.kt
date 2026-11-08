@@ -1,4 +1,4 @@
-﻿package com.muyuchat.core.agent.runtime.context
+package com.muyuchat.core.agent.runtime.context
 
 import com.muyuchat.core.agent.contract.AgentContract
 import com.muyuchat.core.agent.contract.AgentError
@@ -174,6 +174,14 @@ class AgentContextAssembler(
                         return "A protocol error interrupted an accepted envelope before its result."
                     }
                     if (entry.errorCode.isBlank()) return "A protocol error record is missing its code."
+                }
+                is AgentTranscriptEntry.UserInterjection -> {
+                    // Delivered only at a step boundary, where no assistant turn is open. If one is,
+                    // the interjection would sever the call/result pair, so fail closed instead.
+                    if (pendingAssistant) {
+                        return "A user interjection interrupted an accepted envelope before its result."
+                    }
+                    if (entry.text.isBlank()) return "A user interjection is empty."
                 }
             }
         }

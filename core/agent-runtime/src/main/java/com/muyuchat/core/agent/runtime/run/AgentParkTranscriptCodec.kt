@@ -60,6 +60,7 @@ object AgentParkTranscriptCodec {
     private const val TYPE_TOOL_RESULT = "tool_result"
     private const val TYPE_USER_ANSWER = "user_answer"
     private const val TYPE_PROTOCOL_ERROR = "protocol_error"
+    private const val TYPE_USER_INTERJECTION = "user_interjection"
 
     private const val ENCODE_FAILURE =
         "The transcript cannot be written as strict JSON: a value has a duplicate key, an invalid " +
@@ -71,6 +72,7 @@ object AgentParkTranscriptCodec {
         setOf(TYPE, "invocationId", "callHash", "toolKey", "result", "providerCallId")
     private val USER_ANSWER_FIELDS: Set<String> = setOf(TYPE, "questionId", "text")
     private val PROTOCOL_ERROR_FIELDS: Set<String> = setOf(TYPE, "errorCode", "schemaHintJson")
+    private val USER_INTERJECTION_FIELDS: Set<String> = setOf(TYPE, "text", "receivedAtMillis")
 
     /** Counters are plain non-negative integers; exponent/fraction spellings are not accepted. */
     private val NON_NEGATIVE_INTEGER: Regex = Regex("(0|[1-9][0-9]*)")
@@ -164,6 +166,13 @@ object AgentParkTranscriptCodec {
                 "schemaHintJson" to AgentJsonValue.Str(entry.schemaHintJson)
             )
         )
+        is AgentTranscriptEntry.UserInterjection -> AgentJsonValue.Obj(
+            listOf(
+                TYPE to AgentJsonValue.Str(TYPE_USER_INTERJECTION),
+                "text" to AgentJsonValue.Str(entry.text),
+                "receivedAtMillis" to AgentJsonValue.Num(entry.receivedAtMillis.toString())
+            )
+        )
     }
 
     private fun providerCallIdValue(value: String?): AgentJsonValue =
@@ -205,9 +214,17 @@ object AgentParkTranscriptCodec {
                     schemaHintJson = stringField(fields, "schemaHintJson", label)
                 )
             }
+            TYPE_USER_INTERJECTION -> {
+                requireExactFields(fields, USER_INTERJECTION_FIELDS, label)
+                AgentTranscriptEntry.UserInterjection(
+                    text = stringField(fields, "text", label),
+                    receivedAtMillis = longCounter(fields, "receivedAtMillis")
+                )
+            }
             else -> reject(
                 "$label has an unknown 'type'; expected one of $TYPE_ASSISTANT_ENVELOPE, " +
-                    "$TYPE_TOOL_RESULT, $TYPE_USER_ANSWER, $TYPE_PROTOCOL_ERROR."
+                    "$TYPE_TOOL_RESULT, $TYPE_USER_ANSWER, $TYPE_PROTOCOL_ERROR, " +
+                    "$TYPE_USER_INTERJECTION."
             )
         }
     }
@@ -268,7 +285,24 @@ object AgentParkTranscriptCodec {
         }
     }
 
-    private fun counter(fields: Map<String, AgentJsonValue>, name: String): Int {
+    /**
+ * Same validation as [counter] but keeps the full `Long` range.
+ *
+ * Wall-clock millis exceed `Int.MAX_VALUE`, so a timestamp read through the Int helper would be
+ * rejected as "out of range" for every real timestamp — the entry could be written but never read
+ * back. Time fields therefore get their own reader rather than a narrowing cast.
+ */
+private fun longCounter(fields: Map<String, AgentJsonValue>, name: String): Long {
+    val value = fields.getValue(name) as? AgentJsonValue.Num
+        ?: reject("The '$name' counter must be a JSON number.")
+    if (!NON_NEGATIVE_INTEGER.matches(value.literal)) {
+        reject("The '$name' counter must be a non-negative plain integer.")
+    }
+    return value.literal.toLongOrNull()
+        ?: reject("The '$name' counter is out of range.")
+}
+
+private fun counter(fields: Map<String, AgentJsonValue>, name: String): Int {
         val value = fields.getValue(name) as? AgentJsonValue.Num
             ?: reject("The '$name' counter must be a JSON number.")
         if (!NON_NEGATIVE_INTEGER.matches(value.literal)) {

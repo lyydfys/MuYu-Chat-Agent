@@ -13,6 +13,8 @@ import com.muyuchat.mca.agent.tools.AgentDeviceNotificationSettingsTool
 import com.muyuchat.mca.agent.tools.AgentDeviceOpenUrlTool
 import com.muyuchat.mca.agent.tools.AgentDeviceScopes
 import com.muyuchat.mca.agent.tools.AgentDeviceStatusTool
+import com.muyuchat.mca.agent.tools.AgentExtendedToolArgumentNormalizer
+import com.muyuchat.mca.agent.tools.AgentExtendedToolScopes
 
 /**
  * Host-side policy that assigns a typed resource scope to tools whose real resource identity is not
@@ -61,6 +63,12 @@ internal object AgentTypedResourceScopes {
                 AgentDeviceScopes.clipboardWrite(request.normalizedArgumentsJson)
 
             AgentDeviceNotificationSettingsTool.TOOL_KEY -> AgentDeviceScopes.notificationSettings()
+
+            AgentExtendedToolArgumentNormalizer.HTTP_GET ->
+                AgentExtendedToolScopes.httpGet(request.normalizedArgumentsJson)
+
+            AgentExtendedToolArgumentNormalizer.WEB_FETCH ->
+                AgentExtendedToolScopes.webFetch(request.normalizedArgumentsJson)
 
             else -> null
         }

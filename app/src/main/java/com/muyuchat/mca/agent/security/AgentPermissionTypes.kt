@@ -104,7 +104,13 @@ enum class AgentPermissionBasis {
     WORKSPACE_READ_GRANT,
 
     /** Fresh user ALLOW_ONCE, atomically consumed at execution time. */
-    APPROVED_ONCE
+    APPROVED_ONCE,
+
+    /**
+     * The user's persisted approval policy says this tool may run without a prompt
+     * ([ToolApprovalMode.ALLOW]). No approval row exists, so nothing is consumed.
+     */
+    POLICY_ALLOW
 }
 
 sealed interface AgentPermissionDecision {

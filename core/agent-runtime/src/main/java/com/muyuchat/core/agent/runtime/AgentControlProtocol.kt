@@ -164,6 +164,18 @@ sealed interface AgentTranscriptEntry {
         val errorCode: String,
         val schemaHintJson: String
     ) : AgentTranscriptEntry
+
+    /**
+     * Text the user typed **while the run was in flight**, delivered at a step boundary.
+     *
+     * It is a first-class transcript entry, not a tool observation: it survives a park/resume, it is
+     * validated by the pairing rules, and every serializer renders it as one user-role record. It is
+     * drained from [com.muyuchat.core.agent.runtime.run.AgentInterjectionQueue] exactly once per step.
+     */
+    data class UserInterjection(
+        val text: String,
+        val receivedAtMillis: Long
+    ) : AgentTranscriptEntry
 }
 
 data class AgentPromptedTranscriptContext(
@@ -186,10 +198,17 @@ interface AgentTranscriptSerializer {
 
 /** Builds the single explicit SYSTEM prompt; version/hash are recorded by the run. */
 interface AgentSystemPromptBuilder {
+    /**
+     * [operationKnowledge] is the already-resolved fragment from
+     * [com.muyuchat.core.agent.contract.AgentKnowledgePort] (empty when the feature is unwired or
+     * nothing matched). It defaults to empty so every existing caller — and every stored prompt
+     * hash — keeps producing the identical string.
+     */
     fun build(
         tools: List<AgentToolDescriptor>,
         policyVersion: Long,
         budgetSummaryJson: String,
-        protocolMode: AgentProtocolMode = AgentProtocolMode.PROMPTED_V1
+        protocolMode: AgentProtocolMode = AgentProtocolMode.PROMPTED_V1,
+        operationKnowledge: String = ""
     ): String
 }

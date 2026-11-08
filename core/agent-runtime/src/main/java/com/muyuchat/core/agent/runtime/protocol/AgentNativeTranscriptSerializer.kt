@@ -129,6 +129,15 @@ class AgentNativeTranscriptSerializer(
                         )
                     )
                 }
+                is AgentTranscriptEntry.UserInterjection -> {
+                    // An interjection never pairs with a tool call; it is plain user text.
+                    pendingCallId = null
+                    messages += textObservation(
+                        index = messages.size,
+                        record = "user_interjection",
+                        fields = listOf("text" to AgentJsonValue.Str(entry.text))
+                    )
+                }
             }
         }
         return AgentTranscriptSerialization(messages = messages)

@@ -238,6 +238,27 @@ class AgentRunOwner(
 
     fun activeRunId(): String? = activeRunIdValue
 
+    /**
+     * Buffers text the user typed while [runId] is running; the loop reads it at the next step
+     * boundary (Mika's "interject, read before the next step").
+     *
+     * Lives on the owner because it is the only object the UI/host holds for a live run: the queue
+     * itself is process-wide ([AgentInterjectionQueues.global]) so the loop coroutine can reach the
+     * same instance without widening every loop construction site.
+     *
+     * Refused (returns false, nothing queued) when [runId] is not the run currently in the single
+     * admission slot: text typed for a queued or already-finished run would be delivered to the wrong
+     * turn. A false return value from an accepted-but-evicting enqueue is propagated as-is.
+     */
+    fun enqueueInterjection(runId: String, text: String): Boolean {
+        if (activeRunIdValue != runId) return false
+        return AgentInterjectionQueues.global.enqueue(runId, text, clock.nowMillis())
+    }
+
+    /** Read-only view of the pending interjections for [runId]; never consumes them. */
+    fun pendingInterjections(runId: String): List<String> =
+        AgentInterjectionQueues.global.pending(runId)
+
     fun close() {
         synchronized(stopWaiters) {
             stopWaiters.values.forEach { waiter -> waiter.cancel() }

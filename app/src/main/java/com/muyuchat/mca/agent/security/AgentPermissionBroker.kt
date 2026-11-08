@@ -17,8 +17,10 @@ import java.util.concurrent.ConcurrentHashMap
  * Intended flow for K08/K03:
  * 1. K08/K03 freeze the call with [AgentFrozenCommandFactory] and build an
  *    [AgentPermissionCandidate] from the same current descriptor.
- * 2. K03 calls [decide]: ALLOW_FOR_TASK (read-only workspace within the task grant), an approval to
- *    show, or a typed denial. Writes/external effects/network always require a fresh approval.
+ * 2. K03 calls [decide]: ALLOW_FOR_TASK (read-only workspace within the task grant or a policy
+ *    ALLOW), an approval to show, or a typed denial. Writes/external effects/network require a
+ *    fresh approval unless the user's [ToolApprovalPolicy] says otherwise; FORBID is denied
+ *    without creating a prompt.
  * 3. The user click reaches the run owner as `ResolveAgentApproval`. On ALLOW_ONCE the owner calls
  *    [authorize] (the one-shot consume); on DENY it calls [denyPending]. [resolveApproval] is the
  *    idempotent two-step helper used by tests/other callers and never grants execution by itself.
@@ -56,9 +58,24 @@ class AgentPermissionBroker(
         candidate: AgentPermissionCandidate,
         policy: AgentPermissionPolicy,
         grant: AgentWorkspaceReadGrant?,
-        nowMillis: Long
+        nowMillis: Long,
+        approvalPolicy: ToolApprovalPolicy? = null
     ): AgentPermissionDecision {
         revalidate(candidate, policy, grant, nowMillis)?.let { return denied(it) }
+        if (approvalPolicy != null) {
+            // User policy is evaluated before the workspace-read shortcut so a FORBID exception can
+            // also stop a read the task grant would otherwise cover. Null keeps the historical
+            // behavior (no auto-allow), which is what every test/harness without a policy sees.
+            when (approvalPolicy.decide(candidate.descriptor.toolKey, candidate.descriptor.sideEffect)) {
+                ToolApprovalMode.FORBID -> return denied(AgentSecurityErrors.permissionForbidden())
+                ToolApprovalMode.ALLOW ->
+                    return AgentPermissionDecision.AllowForTask(
+                        candidate.command,
+                        AgentPermissionBasis.POLICY_ALLOW
+                    )
+                ToolApprovalMode.ASK -> Unit
+            }
+        }
         if (candidate.descriptor.isWorkspaceRead() && grant != null && grant.covers(candidate.scope)) {
             return AgentPermissionDecision.AllowForTask(candidate.command, AgentPermissionBasis.WORKSPACE_READ_GRANT)
         }

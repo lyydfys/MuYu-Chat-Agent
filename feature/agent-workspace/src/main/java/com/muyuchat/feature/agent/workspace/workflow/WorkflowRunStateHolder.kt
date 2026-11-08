@@ -291,6 +291,7 @@ class WorkflowRunStateHolder(
     private fun triggerLabel(trigger: WorkflowRunTrigger): String = when (trigger) {
         WorkflowRunTrigger.MANUAL -> "手动"
         WorkflowRunTrigger.SCHEDULE -> "定时"
+        WorkflowRunTrigger.INTENT -> "外部调用"
     }
 
     companion object {

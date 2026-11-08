@@ -12,6 +12,7 @@ import com.muyuchat.mca.agent.tools.AgentHttpGetGate
 import com.muyuchat.mca.agent.tools.AgentHttpGetGateDecision
 import com.muyuchat.mca.agent.tools.AgentHttpTextClient
 import com.muyuchat.mca.agent.tools.AgentHttpGetTool
+import com.muyuchat.mca.agent.tools.AgentWebFetchTool
 import com.muyuchat.mca.agent.tools.BuiltInAgentToolCatalog
 import kotlinx.coroutines.CancellationException
 
@@ -39,9 +40,11 @@ class AgentHttpToolCatalogProvider(
         if (run.policy.networkPolicy != AgentNetworkPolicy.NETWORK_ENABLED) return base
         if (run.policy.offlineForced) return base
         val enabled = run.policy.enabledToolKeys ?: return base
-        if (AgentExtendedToolDescriptors.HTTP_GET.toolKey !in enabled) return base
-        val toolKey = AgentExtendedToolDescriptors.HTTP_GET.toolKey
-        if (base.find(toolKey) != null) return base
+        val httpEnabled = AgentExtendedToolDescriptors.HTTP_GET.toolKey in enabled
+        // `web.fetch` is the readable-text sibling of `http.get`; each key is opted in independently
+        // so enabling one never silently installs the other.
+        val webFetchEnabled = AgentExtendedToolDescriptors.WEB_FETCH.toolKey in enabled
+        if (!httpEnabled && !webFetchEnabled) return base
         val existing = base.snapshot().map { descriptor ->
             requireNotNull(base.find(descriptor.toolKey)) {
                 "the base catalog is inconsistent for ${descriptor.toolKey}"
@@ -61,7 +64,16 @@ class AgentHttpToolCatalogProvider(
                     )
                 }
         }
-        return BuiltInAgentToolCatalog(existing + AgentHttpGetTool(client, gate))
+        val installed = ArrayList(existing)
+        val httpKey = AgentExtendedToolDescriptors.HTTP_GET.toolKey
+        val webFetchKey = AgentExtendedToolDescriptors.WEB_FETCH.toolKey
+        if (httpEnabled && base.find(httpKey) == null) {
+            installed += AgentHttpGetTool(client, gate)
+        }
+        if (webFetchEnabled && base.find(webFetchKey) == null) {
+            installed += AgentWebFetchTool(client, gate)
+        }
+        return BuiltInAgentToolCatalog(installed)
     }
 
     override suspend fun catalogForRecorded(

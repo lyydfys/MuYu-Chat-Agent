@@ -29,6 +29,7 @@ object AgentToolNormalizerRoutes {
                 AgentExtendedToolArgumentNormalizer.WORKSPACE_WRITE_TEXT,
                 AgentExtendedToolArgumentNormalizer.WORKSPACE_EDIT_TEXT,
                 AgentExtendedToolArgumentNormalizer.HTTP_GET,
+                AgentExtendedToolArgumentNormalizer.WEB_FETCH,
                 AgentExtendedToolArgumentNormalizer.TERMINAL_EXEC
             ) to AgentExtendedToolArgumentNormalizer()
         ),
