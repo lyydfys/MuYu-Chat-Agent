@@ -32,9 +32,43 @@ import org.json.JSONObject
  */
 class AgentScreenTool(
     private val port: AgentScreenPort
-) : AgentToolExecutor {
+) : AgentToolExecutor,
+    com.muyuchat.core.agent.runtime.run.AgentTypedScopeSource {
 
     override val descriptor: AgentToolDescriptor = DESCRIPTOR
+
+    /**
+     * The screen is not a workspace file, so this tool has no `logicalPaths`.
+     *
+     * Without a typed scope the freeze path rejects the call before it can run: a frozen command
+     * must name at least one resource, and a screen operation names none. [AgentResourceScope.Device]
+     * is the contract's own shape for exactly this case, so the tool declares the device operation it
+     * is about to perform and the human-readable sentence the approval prompt shows.
+     *
+     * Read actions are declared as reads; taps/input/scroll are writes. Keeping that distinction here
+     * means an approval prompt says "read the screen" or "tap on the screen" rather than a generic
+     * "device operation", which is the whole point of carrying a summary.
+     */
+    override fun scopePrecondition(): com.muyuchat.core.agent.contract.AgentScopePrecondition {
+        return com.muyuchat.core.agent.contract.AgentScopePrecondition(
+            scopes = listOf(
+                com.muyuchat.core.agent.contract.AgentResourceScope.Device(
+                    operation = DEVICE_OPERATION,
+                    // No target package: the tool acts on whichever surface is in front. Naming one
+                    // would be a false statement about what the approval covers.
+                    targetPackage = null,
+                    selectorHash = null,
+                    userVisibleSummary = DEVICE_SCOPE_SUMMARY
+                )
+            ),
+            // The tool's maximum reach: it can read the screen and also tap/type on it. Declaring
+            // both is the conservative choice — the approval prompt covers what the tool could do,
+            // not what one particular call happens to ask for.
+            effects = setOf(
+                com.muyuchat.core.agent.contract.AgentEffectKind.DEVICE_ACTION
+            )
+        )
+    }
 
     override suspend fun execute(
         command: FrozenToolCommand,
@@ -130,6 +164,19 @@ class AgentScreenTool(
     companion object {
         const val TOOL_KEY: String = "device.screen"
         const val MAX_TEXT_CHARS: Int = 4_096
+
+        /**
+         * One device-operation token for the whole tool.
+         *
+         * The per-action detail lives in the frozen arguments the approval binds to, so a second
+         * token per action would only add scope versions to migrate; [DEVICE_SCOPE_SUMMARY] is what
+         * the user actually reads.
+         */
+        internal const val DEVICE_OPERATION: String = "screen"
+
+        /** What the approval prompt shows. Deliberately covers the tool's whole reach. */
+        internal const val DEVICE_SCOPE_SUMMARY: String =
+            "读取或操作当前屏幕（点击、输入、滚动、返回、回到桌面、截图）"
 
         /**
          * Largest screenshot `data:` URL this tool will put in a result.
