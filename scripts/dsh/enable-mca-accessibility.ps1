@@ -67,9 +67,9 @@ $ExitNeedsUser = 2
 # The activity/service the `device.screen` tool talks to. Kept in one place so a rename is a
 # one-line change here.
 $PackageName = 'com.muyuchat.mca'
-$ServiceComponent = 'com.muyuchat.mca/.agent.device.AgentAccessibilityService'
-$ServiceShortName = 'AgentAccessibilityService'
-$ServiceLabel = 'MCA Agent UI'
+$ServiceComponent = 'com.muyuchat.mca/com.muyuchat.core.dsh.a11y.android.DshA11yService'
+$ServiceShortName = 'DshA11yService'
+$ServiceLabel = 'DeepSeek Harness 屏幕助手'
 # The DSH screen helper is a different service with its own consent; it is reported but never
 # enabled by this script.
 $OtherServiceLabel = 'DeepSeek Harness'
@@ -310,7 +310,7 @@ Write-Host 'On the device, do exactly this once:'
 Write-Host '  1. Settings (设置)'
 Write-Host '  2. Accessibility (无障碍)'
 Write-Host '  3. Downloaded apps / Installed services (已下载的服务 / 已安装的应用)'
-Write-Host '  4. MCA Agent UI'
+Write-Host '  4. DeepSeek Harness 屏幕助手'
 Write-Host '  5. Turn it ON (打开/使用该服务)'
 Write-Host '  6. Allow / OK on the confirmation dialog (允许)'
 Write-Host ''

@@ -50,7 +50,7 @@ vscreen 的 6 个在无 root/Shizuku 时按设计不注册。载荷 153.4 MB，A
 
 | DSHA 能力 | 状态 | 说明 |
 |---|---|---|
-| 无障碍读屏/点按/输入/滑动/截屏 | ✅ | `AgentAccessibilityService` + `DshA11yController` |
+| 无障碍读屏/点按/输入/滑动/截屏 | ✅ | `DshA11yService` + `DshA11yController`（app 只声明这一个无障碍服务） |
 | 独立虚拟屏 | ✅ | `DshVscreenProjectionHolder` |
 | ADB 无线配对（免 Shizuku） | 🟡 | 真实协议实现（证书 TLS + exporter + Curve25519 SPAKE2 + AES-GCM + protobuf）与实验性入口；**四条线格式假设待真机验证** |
 | 配对后保活 / 重启恢复 | 🟡 | 有自动重连与端点记忆；重启后的自动恢复未验证 |

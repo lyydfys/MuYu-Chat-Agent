@@ -252,32 +252,69 @@
                 android:resource="@xml/image_share_file_paths" />
         </provider>
 
+        <!-- Icon switching (appearance). The launcher entry is an <activity-alias>, not this activity:
+             `PackageManager.setComponentEnabledSetting` can only hide a launcher icon by disabling the
+             component that owns the MAIN/LAUNCHER filter, and disabling the *target* activity would
+             also disable every alias that points at it. So exactly one of the three aliases below is
+             enabled at a time and this activity carries no launcher filter of its own.
+             The manifest default is the "default" alias, so a fresh install shows one icon and the
+             runtime switch only ever has to move that single flag. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize"
             android:supportsPictureInPicture="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboardHidden|uiMode"
-            android:theme="@style/Theme.MuYuChatAgent">
+            android:theme="@style/Theme.MuYuChatAgent" />
+
+        <activity-alias
+            android:name=".MainActivityIconDefault"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
-        <!-- Disabled by default; the user must enable it in system accessibility settings. -->
-        <service
-            android:name=".agent.device.AgentAccessibilityService"
+        <!-- Alternate icons are disabled in the manifest so a fresh install ships exactly one launcher
+             entry; the appearance controller enables one and disables the others at runtime. -->
+        <activity-alias
+            android:name=".MainActivityIconAlt1"
+            android:enabled="false"
             android:exported="true"
-            android:label="MCA Agent UI"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            android:icon="@mipmap/ic_launcher_alt1"
+            android:roundIcon="@mipmap/ic_launcher_alt1"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
             <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/agent_accessibility_service" />
-        </service>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconAlt2"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_alt2"
+            android:roundIcon="@mipmap/ic_launcher_alt2"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- The app declares exactly one accessibility service, `DshA11yService`, in
+             `:core:dsh-a11y`. A second "MCA Agent UI" service used to live here; it had no callers
+             and made users enable the wrong service, so `device.screen` reported
+             SCREEN_SERVICE_DISABLED even after the switch looked ON. Do not add another. -->
         <!-- Iteration-only: runs the fixed container install from one adb broadcast.
              It refuses to act unless the build was made with -PmcaIteration=true. -->
         <receiver
@@ -285,6 +322,19 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.muyuchat.mca.RUN_CONTAINER_INSTALL" />
+            </intent-filter>
+        </receiver>
+        <!-- External workflow triggers. Exported so another app can ask for a registered workflow to
+             run, but the intent-filter names exactly one MCA-owned action and the receiver refuses
+             anything outside `com.muyuchat.mca.action.` plus the in-process registration table; an
+             unregistered action is logged and dropped, never started. `android:permission` is
+             deliberately absent: a normal broadcast cannot be sent with a signature permission by a
+             third-party app, and the real gate is the registry, not the sender. -->
+        <receiver
+            android:name=".agent.platform.WorkflowIntentReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.muyuchat.mca.action.RUN_WORKFLOW" />
             </intent-filter>
         </receiver>
     </application>
