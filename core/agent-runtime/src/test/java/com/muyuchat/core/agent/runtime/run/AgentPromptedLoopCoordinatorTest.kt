@@ -929,7 +929,8 @@ class AgentPromptedLoopCoordinatorTest {
         verifier: FakeArtifactVerifier = FakeArtifactVerifier(),
         attemptRegistry: AgentActiveAttemptRegistry = AgentActiveAttemptRegistry(),
         provider: AgentRunToolCatalogProvider? = null,
-        interjectionQueues: AgentInterjectionQueues = AgentInterjectionQueues()
+        interjectionQueues: AgentInterjectionQueues = AgentInterjectionQueues(),
+        stepWatchdog: AgentStepWatchdog = AgentStepWatchdog()
     ): AgentPromptedLoopCoordinator {
         return AgentPromptedLoopCoordinator(
             decoderFactory = { keys -> PromptedV1TurnDecoder(PromptedV1Decoder({ keys }, codec)) },
@@ -951,7 +952,8 @@ class AgentPromptedLoopCoordinatorTest {
             ids = ids,
             clock = clock,
             attemptRegistry = attemptRegistry,
-            interjectionQueues = interjectionQueues
+            interjectionQueues = interjectionQueues,
+            stepWatchdog = stepWatchdog
         )
     }
 
@@ -999,6 +1001,104 @@ class AgentPromptedLoopCoordinatorTest {
         assertEquals(
             2,
             events.count { it.type == AgentEventTypes.MODEL_ATTEMPT_SETTLED }
+        )
+    }
+
+    @Test
+    fun anOverdueStepPausesWithATimeoutEntryInsteadOfHanging() = runTest {
+        val (journal, task, run) = setup()
+        // A clock the test drives: the step starts at 0, and real time has advanced 10ms by the time
+        // the loop comes back to a step boundary. With a 1ms limit that step is overdue — exactly the
+        // "a step never returned" shape, without actually blocking the test.
+        var nowMillis = 0L
+        val watchdog = AgentStepWatchdog(stepTimeoutMillis = 1L, clock = { nowMillis })
+        val port = QueueModelPort(
+            mutableListOf(
+                AgentModelResult.Success(AgentTestFixtures.toolEnvelope()),
+                AgentModelResult.Success(AgentTestFixtures.finalEnvelope("never reached"))
+            )
+        )
+        val executor = RecordingToolExecutor(descriptor)
+        val slowPort = object : com.muyuchat.core.agent.contract.AgentModelPort {
+            override suspend fun infer(
+                request: com.muyuchat.core.agent.contract.AgentModelRequest,
+                progress: AgentModelProgressSink
+            ): AgentModelResult {
+                val result = port.infer(request, progress)
+                // The step ran long: the next boundary must notice.
+                nowMillis += 10L
+                return result
+            }
+
+            override suspend fun requestStop(
+                attempt: com.muyuchat.core.agent.contract.AgentModelAttemptRef
+            ): com.muyuchat.core.agent.contract.AgentStopDispatch = port.requestStop(attempt)
+        }
+        val result = coordinator(
+            journal = journal,
+            modelPort = slowPort,
+            catalog = FakeToolCatalog(mapOf(descriptor.toolKey to executor)),
+            stepWatchdog = watchdog
+        ).execute(run, task, null, AgentModelProgressSink { })
+
+        assertTrue("expected a pause, got $result", result is AgentLoopResult.Paused)
+        result as AgentLoopResult.Paused
+        assertEquals(AgentPauseReason.BUDGET_LIMIT, result.reason)
+        assertEquals(AgentErrorCodes.BUDGET_STEP_TIMEOUT, result.error?.code)
+        val hint = result.transcript.entries
+            .filterIsInstance<AgentTranscriptEntry.ProtocolError>()
+            .single { it.errorCode == AgentErrorCodes.BUDGET_STEP_TIMEOUT }
+        assertTrue(
+            "the transcript must explain the timeout, got ${hint.schemaHintJson}",
+            hint.schemaHintJson.contains("step_timeout")
+        )
+    }
+
+    /**
+     * The context passes must run before the model call, not after.
+     *
+     * A repeated observation reaches the model as a pointer to the first copy, while the authoritative
+     * transcript still holds both results verbatim — the passes are a view, never a lossy edit of the
+     * run's own record.
+     */
+    @Test
+    fun repeatedToolResultsAreDeduplicatedBeforeTheyReachTheModel() = runTest {
+        val (journal, task, run) = setup()
+        val port = QueueModelPort(
+            mutableListOf(
+                // The same read twice: identical argv, identical result.
+                AgentModelResult.Success(AgentTestFixtures.toolEnvelope()),
+                AgentModelResult.Success(AgentTestFixtures.toolEnvelope()),
+                AgentModelResult.Success(AgentTestFixtures.finalEnvelope("两次读取结果相同。"))
+            )
+        )
+        val executor = RecordingToolExecutor(descriptor)
+
+        val result = coordinator(journal, port, FakeToolCatalog(mapOf(descriptor.toolKey to executor)))
+            .execute(run, task, null, AgentModelProgressSink { })
+
+        assertTrue("expected completion, got $result", result is AgentLoopResult.Completed)
+        result as AgentLoopResult.Completed
+        assertEquals("both reads must still execute", 2, executor.executeCount)
+
+        // The third request is the first one that carries both observations.
+        val modelView = port.requests[2].messages.map { it.content }
+        assertTrue(
+            "the repeat must reach the model as a dedupe pointer",
+            modelView.any { it.contains(AgentToolResultDeduper.FIELD_DEDUPLICATED) }
+        )
+        assertEquals(
+            "exactly one pointer, and it names the first result",
+            1,
+            modelView.count { it.contains(AgentToolResultDeduper.pointerMessage(1, 0).substringBefore("（")) }
+        )
+
+        // The authoritative transcript is untouched: both observations are still complete results.
+        val recorded = result.transcript.entries.filterIsInstance<AgentTranscriptEntry.ToolResult>()
+        assertEquals(2, recorded.size)
+        assertTrue(
+            "a dedupe pointer must never be written back into the run transcript",
+            recorded.none { AgentToolResultDeduper.isPointer(it.result) }
         )
     }
 

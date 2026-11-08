@@ -201,14 +201,16 @@ interface AgentSystemPromptBuilder {
     /**
      * [operationKnowledge] is the already-resolved fragment from
      * [com.muyuchat.core.agent.contract.AgentKnowledgePort] (empty when the feature is unwired or
-     * nothing matched). It defaults to empty so every existing caller — and every stored prompt
-     * hash — keeps producing the identical string.
+     * nothing matched). [userPreferences] is the already-resolved fragment from
+     * [com.muyuchat.core.agent.contract.AgentPreferencePort]. Both default to empty so every existing
+     * caller — and every stored prompt hash — keeps producing the identical string.
      */
     fun build(
         tools: List<AgentToolDescriptor>,
         policyVersion: Long,
         budgetSummaryJson: String,
         protocolMode: AgentProtocolMode = AgentProtocolMode.PROMPTED_V1,
-        operationKnowledge: String = ""
+        operationKnowledge: String = "",
+        userPreferences: String = ""
     ): String
 }

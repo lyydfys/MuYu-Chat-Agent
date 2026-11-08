@@ -48,12 +48,9 @@ import kotlinx.coroutines.CancellationException
  * Deterministic PROMPTED_V1 step coordinator.
  *
  * One execution consumes one run from RUNNING until it needs the owner (terminal, pause, user
- * question, approval) or the caller cancels it. It never spawns unscoped work and never starts a
- * second model call in parallel: tool calls are serial, at most one per response.
- *
- * It uses the frozen K02 seams through injection and commits only append-only events/attempt facts
- * to the journal here; run state transitions and the single terminal write stay with
- * [AgentRunOwner], so there is exactly one run-state writer.
+ * question, approval) or the caller cancels it. Tool calls are serial and it never spawns unscoped
+ * work; run state transitions and the single terminal write stay with [AgentRunOwner], so there is
+ * exactly one run-state writer.
  */
 class AgentPromptedLoopCoordinator(
     private val decoderFactory: (Set<String>) -> AgentTurnDecoder,
@@ -71,24 +68,18 @@ class AgentPromptedLoopCoordinator(
     internal val ids: AgentIdGenerator,
     internal val clock: AgentMonotonicClock,
     private val attemptRegistry: AgentActiveAttemptRegistry = AgentActiveAttemptRegistry(),
-    /**
-     * Dispatcher for the bounded read-only batch (N06). Null keeps the caller's execution context,
-     * so the production assembly is unchanged; the coordinator never creates its own dispatcher.
-     */
+    /** Bounded read-only batch dispatcher (N06); null keeps the caller's context. */
     internal val parallelDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
-    /**
-     * Interjections typed while the run is in flight (Mika's "read at the next step boundary").
-     *
-     * Shared with the owner through the same registry instance; tests inject their own so a case can
-     * assert the exact drained text without touching process-wide state.
-     */
+    /** Interjections typed mid-run, drained at the next step boundary; shared with the owner. */
     private val interjectionQueues: AgentInterjectionQueues = AgentInterjectionQueues.global,
-    /**
-     * Optional operation knowledge for the SYSTEM prompt. [AgentKnowledgePort.NONE] is the default,
-     * so a run built without an app-side provider produces byte-identical prompts.
-     */
+    /** Optional operation knowledge; [AgentKnowledgePort.NONE] keeps prompts byte-identical. */
     private val knowledgePort: com.muyuchat.core.agent.contract.AgentKnowledgePort =
-        com.muyuchat.core.agent.contract.AgentKnowledgePort.NONE
+        com.muyuchat.core.agent.contract.AgentKnowledgePort.NONE,
+    /** Optional user preferences; NONE keeps prompts byte-identical. */
+    private val preferencePort: com.muyuchat.core.agent.contract.AgentPreferencePort =
+        com.muyuchat.core.agent.contract.AgentPreferencePort.NONE,
+    /** Per-step watchdog; the loop's calls live in `AgentLoopWatchdogCalls.kt`. */
+    internal val stepWatchdog: AgentStepWatchdog = AgentStepWatchdog()
 ) : AgentRunExecutor {
 
     internal val codec: StrictJsonCodec = StrictAgentJsonCodec()
@@ -114,13 +105,8 @@ class AgentPromptedLoopCoordinator(
     }
 
     /**
-     * S3a prompt-only frame: run the same loop under the parent run/task with an explicit empty
-     * tool catalog.
-     *
-     * The frame does not resolve, record or release the parent run's catalog: the workflow
-     * gateway owns that lifecycle. An empty catalog is enforced here, not inferred from policy
-     * fields, so a frame can never propose or execute a tool. A model that still emits a call
-     * fails through the normal tool resolution path and produces no side effect.
+     * S3a prompt-only frame: the same loop with an explicit empty tool catalog, so a frame can
+     * never propose or execute a tool. The workflow gateway owns the parent catalog's lifecycle.
      */
     suspend fun executePromptOnlyFrame(
         run: AgentRun,
@@ -136,14 +122,10 @@ class AgentPromptedLoopCoordinator(
     )
 
     /**
-     * S3b same-root frame: tools, skills or memory execute only when the resolved run catalog is
-     * strictly [AgentToolSideEffect.READ_ONLY].
+     * S3b same-root frame: only a strictly [AgentToolSideEffect.READ_ONLY] catalog may run.
      *
-     * A write/network/external tool could suspend for approval, and the parent workflow frame has
-     * no nested-approval checkpoint yet. The guard therefore runs before the first model request:
-     * such a catalog returns a typed failure with zero side effects. A read-only catalog runs the
-     * one loop with the exact run-scoped snapshot; like the prompt-only frame it neither records nor
-     * releases the parent's catalog identity (the workflow gateway owns that lifecycle).
+     * A write/network/external tool could suspend for approval and this frame has no nested-approval
+     * checkpoint, so such a catalog fails typed before the first model request, with no side effects.
      */
     suspend fun executeSameRootFrame(
         run: AgentRun,
@@ -352,6 +334,7 @@ class AgentPromptedLoopCoordinator(
         val activeSince = clock.nowMillis()
         try {
             modelLoop@ while (true) {
+                watchdogBeginStep(currentRun, entries, stepIndex, repairs, spent)?.let { return it }
                 budgetPolicy.checkRunActiveTime(activeSince, currentRun.budget)
                     .exceededOrNull()?.let { exceeded ->
                         return pause(currentRun, entries, stepIndex, repairs, spent, exceeded)
@@ -370,19 +353,27 @@ class AgentPromptedLoopCoordinator(
                 if (drained.isNotEmpty()) entries.addAll(drained)
                 // Operation knowledge is resolved once per step from the run's own goal, so a
                 // retry inside the step cannot see a different fragment than the first attempt.
-                val operationKnowledge = resolveOperationKnowledge(task.goal)
-                val systemPrompt = systemPromptBuilder.build(
-                    catalog.snapshot(),
-                    currentRun.policy.policyVersion,
-                    budgetSummaryJson(currentRun.budget),
-                    currentRun.modelBinding.protocolMode,
-                    operationKnowledge
+                val operationKnowledge = knowledgePort.relevantKnowledgeSafely(task.goal)
+                val userPreferences = preferencePort.preferenceTextSafely()
+                val systemPrompt = withBudgetAdvisory(
+                    systemPromptBuilder.build(
+                        catalog.snapshot(),
+                        currentRun.policy.policyVersion,
+                        budgetSummaryJson(currentRun.budget),
+                        currentRun.modelBinding.protocolMode,
+                        operationKnowledge,
+                        userPreferences
+                    ),
+                    // Appended, never prepended: a prefix change would invalidate the prompt cache
+                    // the provider already holds for this run.
+                    budgetPressureOf(spent, currentRun, stepIndex)
                 )
                 val assembly = contextAssembler.assemble(
                     AgentContextAssemblyRequest(
                         systemPrompt = systemPrompt,
                         userGoal = task.goal,
-                        entries = entries,
+                        // Context passes: dedupe repeat observations, then compact large ones.
+                        entries = entries.applyContextPasses(),
                         contextWindowTokens = currentRun.modelBinding.contextWindowTokens,
                         reservedOutputTokens = currentRun.budget.textOutputTokens,
                         toolResultToModelBytes = currentRun.budget.toolResultToModelBytes,
@@ -799,11 +790,3 @@ class AgentPromptedLoopCoordinator(
         internal const val CATALOG_EVENT_SCAN_LIMIT = 200
     }
 }
-
-/** Explicit empty surface for a prompt-only same-root frame: no tool can be proposed or executed. */
-private object PromptOnlyFrameCatalog : AgentToolCatalog {
-    override fun find(toolKey: String): AgentToolExecutor? = null
-
-    override fun snapshot(): List<AgentToolDescriptor> = emptyList()
-}
-

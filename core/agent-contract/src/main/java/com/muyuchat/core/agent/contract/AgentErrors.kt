@@ -83,6 +83,14 @@ object AgentErrorCodes {
 
     // BUDGET_*
     const val BUDGET_STEP_LIMIT = "BUDGET_STEP_LIMIT"
+
+    /**
+     * A single step exceeded the per-step watchdog limit.
+     *
+     * Distinct from [BUDGET_STEP_LIMIT] (the run used up its attempt allowance): this one means the loop
+     * is stuck inside one step, which is a hang rather than a spend.
+     */
+    const val BUDGET_STEP_TIMEOUT = "BUDGET_STEP_TIMEOUT"
     const val BUDGET_TOKEN_LIMIT = "BUDGET_TOKEN_LIMIT"
     const val BUDGET_TIME_LIMIT = "BUDGET_TIME_LIMIT"
     const val BUDGET_DISK_LIMIT = "BUDGET_DISK_LIMIT"

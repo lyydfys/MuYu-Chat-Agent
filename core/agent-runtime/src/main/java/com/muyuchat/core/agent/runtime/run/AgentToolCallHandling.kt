@@ -119,7 +119,8 @@ internal suspend fun AgentPromptedLoopCoordinator.handleToolCall(
                 stepIndex = stepIndex,
                 catalog = catalog,
                 spent = spent,
-                providerCallId = providerCallId
+                providerCallId = providerCallId,
+                entries = entries
             )
         ) {
             is AgentToolPreparation.Handled -> {
@@ -200,7 +201,9 @@ internal suspend fun AgentPromptedLoopCoordinator.prepareToolCall(
         stepIndex: Int,
         catalog: AgentToolCatalog,
         spent: AgentSpentBudget,
-        providerCallId: String? = null
+        providerCallId: String? = null,
+        /** Transcript the model already saw; feeds the repeated-failure guard. */
+        entries: List<AgentTranscriptEntry> = emptyList()
     ): AgentToolPreparation {
         val pipeline = AgentToolInvocationPipeline(
             catalog = catalog,
@@ -220,7 +223,8 @@ internal suspend fun AgentPromptedLoopCoordinator.prepareToolCall(
                 callHash = callHash,
                 stepIndex = stepIndex,
                 spent = spent,
-                providerCallId = providerCallId
+                providerCallId = providerCallId,
+                entries = entries
             )
         ) { runNow, proposal, descriptor, normalizedArgumentsJson ->
             appendEvent(

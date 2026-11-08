@@ -1,5 +1,7 @@
 ﻿package com.muyuchat.core.agent.runtime.run
 
+import com.muyuchat.core.agent.runtime.AgentTranscriptEntry
+
 import com.muyuchat.core.agent.contract.AgentApproval
 import com.muyuchat.core.agent.contract.AgentErrorCodes
 import com.muyuchat.core.agent.contract.AgentRun
@@ -33,7 +35,15 @@ data class AgentInvocationProposalRequest(
      * workflow node passes its node-derived step id so a crash/resume re-proposes the same durable
      * invocation instead of minting a second side effect.
      */
-    val stepId: String? = null
+    val stepId: String? = null,
+    /**
+     * The transcript the model already saw, for the repeated-failure guard.
+     *
+     * Empty by default so every existing caller keeps its behaviour; the model loop passes its own
+     * entries, which is where a repeated call actually comes from. A workflow node that proposes the
+     * same node twice is not a model retry and must not be blocked by this.
+     */
+    val entries: List<AgentTranscriptEntry> = emptyList()
 )
 
 /**
@@ -52,7 +62,10 @@ class AgentToolInvocationPipeline(
     private val commandHook: AgentFrozenCommandHook,
     private val budgetPolicy: AgentBudgetPolicy,
     private val ids: AgentIdGenerator,
-    private val clock: AgentMonotonicClock
+    private val clock: AgentMonotonicClock,
+    /** JSON codec used to canonicalise arguments for the repeated-failure guard. */
+    private val codec: com.muyuchat.core.agent.runtime.StrictJsonCodec =
+        com.muyuchat.core.agent.runtime.protocol.StrictAgentJsonCodec()
 ) {
     sealed interface Preparation {
         /**
@@ -182,6 +195,31 @@ class AgentToolInvocationPipeline(
             providerCallId = request.providerCallId,
             typedScope = providedScope
         )
+        // The transcript must be consulted *before* freezing: freezing reserves an invocation id,
+        // writes tool.proposed and charges the budget, so a block afterwards would leave a ledger row
+        // for a call that never ran.
+        if (shouldBlockRepeatedToolCall(
+                codec,
+                request.entries,
+                descriptor.toolKey,
+                frozenRequest.callHash,
+                validation.normalizedArgumentsJson
+            )
+        ) {
+            // The rejection names the failure and asks for a different approach; recording it as a
+            // transcript entry stays the loop's job, because only the loop owns the mutable entries
+            // list it appends observations to.
+            return Preparation.Rejected(
+                invocationId = invocationId,
+                status = AgentToolResultStatus.NOT_EXECUTED,
+                errorCode = BLOCKED_ERROR_CODE,
+                safeMessage = retryAdvice(
+                    descriptor.toolKey,
+                    lastFailureReasonFor(request.entries, descriptor.toolKey)
+                ),
+                toolKey = descriptor.toolKey
+            )
+        }
         val decision = try {
             commandHook.freeze(frozenRequest)
         } catch (cancelled: CancellationException) {

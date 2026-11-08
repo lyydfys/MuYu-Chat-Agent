@@ -220,6 +220,12 @@ class McaLoopbackServer(
                 writeHtml(client, mcaLocalApiChatPageHtml())
                 return
             }
+            // A2A: both paths bypass the header-time 401 above and are resolved here. Disabled means
+            // "does not exist" (404) for both; enabled serves the public card and the authenticated RPC.
+            if (!a2aEnabled && (path == A2aProtocol.AGENT_CARD_PATH || path == A2aProtocol.RPC_PATH)) {
+                writeError(client, "404 Not Found", "not_found", "接口不存在：$path")
+                return
+            }
             if (!isPublicRoute(method, path)) {
                 // The API can listen on 0.0.0.0, so a wrong key is a network event: count failures
                 // per client address and refuse the whole address for a cool-down instead of letting
@@ -329,7 +335,8 @@ class McaLoopbackServer(
     }
 
     internal fun isPublicRoute(method: String, path: String): Boolean =
-        method == "OPTIONS" ||
+        isA2aRouteHandledBeforeAuth(path) ||
+            method == "OPTIONS" ||
             // A2A discovery cards are world-readable by spec; the RPC endpoint is not.
             method == "GET" && a2aEnabled && path == A2aProtocol.AGENT_CARD_PATH ||
             method == "HEAD" && path == "/health" ||
@@ -340,6 +347,16 @@ class McaLoopbackServer(
                     path == "/v1/models" ||
                     path == "/models"
                 )
+
+    /**
+     * A2A paths whose answer is decided *before* the auth gate.
+     *
+     * Both are unconditionally exempt from the header-time 401 in [readHttpRequest] so the routing
+     * table owns the answer: a disabled surface 404s exactly like an unknown path, an enabled card is
+     * public, and [handleA2aRpc] enforces Bearer auth itself for the RPC endpoint.
+     */
+    private fun isA2aRouteHandledBeforeAuth(path: String): Boolean =
+        path == A2aProtocol.RPC_PATH || path == A2aProtocol.AGENT_CARD_PATH
 
     private fun writeHtml(socket: Socket, body: String, status: String = "200 OK") {
         writeText(socket, body, status, "text/html; charset=utf-8")
@@ -378,6 +395,12 @@ class McaLoopbackServer(
      * cancel/approval guarantee.
      */
     private fun handleA2aRpc(socket: Socket, body: String, headers: Map<String, String>) {
+        // The route is answered before the header-time auth check (so a disabled surface can 404
+        // instead of 401), which means auth must be enforced here, explicitly.
+        if (!isAuthorized(headers)) {
+            writeError(socket, "401 Unauthorized", "unauthorized", "API Key 不正确或缺失。")
+            return
+        }
         if (!A2aProtocol.acceptsVersion(headers[A2aProtocol.VERSION_HEADER])) {
             writeA2aJson(
                 socket,

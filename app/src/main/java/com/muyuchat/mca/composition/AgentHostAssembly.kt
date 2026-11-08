@@ -192,6 +192,20 @@ internal class AgentHostAssembly(
     private var agentRuntimeRef: AgentRuntimeAssembly? = null
 
     /**
+     * One preference store for the whole process: the extraction side (`createTask`) and the prompt
+     * side ([com.muyuchat.mca.agent.knowledge.MemoryAgentPreferencePort]) must observe the same
+     * instance, otherwise a preference would be stored but never reach a prompt.
+     */
+    private val agentPreferenceMemory by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.muyuchat.mca.agent.knowledge.AgentPreferenceMemory()
+    }
+
+    /** Prompt-side adapter over [agentPreferenceMemory]; cached render per store revision. */
+    private val agentPreferencePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.muyuchat.mca.agent.knowledge.MemoryAgentPreferencePort(agentPreferenceMemory)
+    }
+
+    /**
      * Process-protection guard driven by committed run transitions (via ObservingAgentJournal). It
      * acquires only while RUNNING and releases on waiting/paused/terminal states.
      */
@@ -473,7 +487,10 @@ internal class AgentHostAssembly(
             workflowDefinitions = workflowDefinitionStore,
             workflowCheckpointRoot = File(workflowRoot, "checkpoints"),
             // S4: a park that remains waiting after cold-start recovery gets a platform wake hint.
-            parkWakeScheduler = com.muyuchat.mca.WorkManagerAgentParkWakeScheduler(application)
+            parkWakeScheduler = com.muyuchat.mca.WorkManagerAgentParkWakeScheduler(application),
+            // Explicit user preferences: extracted from a task goal on the same store this port reads.
+            preferencePort = agentPreferencePort,
+            preferenceMemory = agentPreferenceMemory
         ).also { runtime ->
             agentRuntimeRef = runtime
             McaGenerationForegroundService.agentStopActionHandler = { intent ->

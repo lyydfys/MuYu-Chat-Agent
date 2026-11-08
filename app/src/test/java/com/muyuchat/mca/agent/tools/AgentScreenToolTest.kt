@@ -46,7 +46,7 @@ class AgentScreenToolTest {
         val result = execute(port, """{"action":"read"}""")
 
         assertEquals(AgentToolResultStatus.SUCCEEDED, result.status)
-        assertEquals(listOf(AgentScreenAction.ReadScreen), port.actions)
+        assertEquals(listOf<AgentScreenAction>(AgentScreenAction.ReadScreen), port.actions)
         assertEquals(
             "设置\n[0,0 1080x2400] WLAN (tap)",
             resultData(result).getString("text")
@@ -136,6 +136,7 @@ class AgentScreenToolTest {
         assertEquals(descriptor.schemaHash, AgentToolJson.sha256Hex(descriptor.schemaJson))
         assertTrue(descriptor.schemaJson.contains("\"additionalProperties\":false"))
         assertTrue(descriptor.schemaJson.contains("\"action\""))
+        assertTrue(descriptor.schemaJson.contains("\"screenshot\""))
         assertTrue(descriptor.schemaJson.contains("\"tap\""))
     }
 

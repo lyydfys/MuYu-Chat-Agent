@@ -124,7 +124,10 @@ class AgentWebFetchToolTest {
         assertEquals("标题", data.getString("title"))
         assertEquals("标题\n\n正文", data.getString("text"))
         assertFalse(data.getBoolean("truncated"))
-        assertEquals(5, data.getInt("chars"))
+        // "标题" (2) + the paragraph break (2) + "正文" (2) = 6. The count is of the extracted
+        // text the tool returns, which is exactly the `text` asserted above; an off-by-one here
+        // would silently pin a wrong character budget on every fetch.
+        assertEquals(6, data.getInt("chars"))
 
         val request = client.requests.single()
         assertEquals("https://example.com/doc", request.url)

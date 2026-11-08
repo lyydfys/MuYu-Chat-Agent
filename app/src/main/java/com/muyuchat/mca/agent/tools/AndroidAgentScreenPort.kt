@@ -39,20 +39,40 @@ import org.json.JSONObject
  *
  * Honesty rules kept from the controller's own contract:
  *  - a disabled service is [AgentScreenOutcome.ServiceDisabled], never a fake success;
- *  - a tap that found no clickable node is [AgentScreenOutcome.Failed] with the controller's reason;
+ *  - a tap that found no clickable node is a failure **unless** a nearby candidate can be described:
+ *    then it is an [AgentScreenOutcome.Observed] that reports "nothing was tapped" plus the ranked
+ *    candidates, so the model can choose instead of guessing coordinates. The fallback never taps on
+ *    its own — picking a "close enough" control would be an unapproved side effect on a real phone;
  *  - nothing here invents a result when the engine refuses.
  */
-class AndroidAgentScreenPort(
-    private val controller: () -> DshA11yController = { DshA11yController.instance },
-    /** Text a tap may match, in physical pixels; kept as a seam so the mapping is JVM-testable. */
+class AndroidAgentScreenPort internal constructor(
+    /**
+     * The accessibility engine, expressed as one command function.
+     *
+     * A seam rather than a direct `DshA11yController` reference: the controller is a final
+     * Android-service singleton, so without this the whole mapping — including the screenshot
+     * fallback — could only be tested on a device. Production passes the process singleton.
+     */
+    private val engineProvider: () -> AgentScreenEngine = {
+        agentScreenEngine(DshA11yController.instance)
+    },
+    /** Renders the captured tree as model-facing text; kept as a seam for the same reason. */
     private val snapshotParser: (List<com.muyuchat.core.dsh.a11y.policy.A11yNode>) -> String =
-        ::renderSnapshotText
+        ::renderSnapshotText,
+    /**
+     * Encodes screenshot bytes into a `data:` URL. Production is [encodeScreenshotForModel]; a test
+     * injects the same shape with a fake so no `Bitmap` decode is needed.
+     */
+    private val encodeImage: (ByteArray) -> String? = { bytes -> encodeScreenshotForModel(bytes) },
+    /** Reads the PNG the capture wrote. Returns null when the file is gone or unreadable. */
+    private val readScreenshot: (String) -> ByteArray? = ::readScreenshotBytes
 ) : AgentScreenPort {
 
     override suspend fun act(action: AgentScreenAction): AgentScreenOutcome {
-        val engine = controller()
+        val engine = engineProvider()
         return when (action) {
-            AgentScreenAction.ReadScreen -> readScreen(engine)
+            AgentScreenAction.ReadScreen -> readScreen(engine, withImage = false)
+            AgentScreenAction.ReadScreenshot -> readScreen(engine, withImage = true)
             is AgentScreenAction.Tap -> tap(engine, action)
             is AgentScreenAction.InputText -> inputText(engine, action.text)
             is AgentScreenAction.Scroll -> scroll(engine, action)
@@ -62,12 +82,93 @@ class AndroidAgentScreenPort(
         }
     }
 
-    private suspend fun readScreen(engine: DshA11yController): AgentScreenOutcome =
+    /**
+     * Observe the screen, optionally with pixels.
+     *
+     * Degradation is intentional and ordered, because "cannot see" must never be reported as a
+     * failed observation when *some* observation succeeded:
+     *  1. the tree is always read (text is the cheap, reliable half);
+     *  2. when [withImage] is set (the `screenshot` action), one capture is attempted — no image,
+     *     an unreadable file, a codec `null`, or an image too large for the tool-result budget all
+     *     keep the text and add an honest note instead of failing;
+     *  3. only when the tree *and* the image are both unavailable does the call fail.
+     */
+    private suspend fun readScreen(
+        engine: AgentScreenEngine,
+        withImage: Boolean
+    ): AgentScreenOutcome {
+        var text: String? = null
+        var treeFailure: String? = null
         when (val outcome = engine.execute(A11yCommand.Dump)) {
-            is A11yOutcome.Dump -> AgentScreenOutcome.Observed(snapshotParser(outcome.snapshot.nodes))
-            is A11yOutcome.Rejected -> rejected(outcome.rejection)
-            else -> AgentScreenOutcome.Failed("the accessibility engine returned no screen")
+            is A11yOutcome.Dump -> text = snapshotParser(outcome.snapshot.nodes)
+            is A11yOutcome.Rejected -> {
+                // A disabled service cannot capture either, so it is reported once, unchanged,
+                // instead of spending a second refused command.
+                if (outcome.rejection.code == DshCapabilityErrorCode.NOT_ENABLED) {
+                    return AgentScreenOutcome.ServiceDisabled
+                }
+                treeFailure = outcome.rejection.message
+            }
+
+            else -> treeFailure = "the accessibility engine returned no screen"
         }
+        if (!withImage) {
+            return text?.let { AgentScreenOutcome.Observed(it) }
+                ?: AgentScreenOutcome.Failed(treeFailure ?: "the accessibility engine returned no screen")
+        }
+        val image = captureImageDataUrl(engine)
+        val textValue = text
+        return when {
+            textValue != null && image.dataUrl != null ->
+                AgentScreenOutcome.Observed(textValue, image.dataUrl)
+
+            textValue != null -> AgentScreenOutcome.Observed(
+                textValue + image.fallbackNote(),
+                null
+            )
+
+            image.dataUrl != null -> AgentScreenOutcome.Observed(
+                "The accessibility tree is not readable, so this observation is the image only." +
+                    image.fallbackNote(includeText = false),
+                image.dataUrl
+            )
+
+            // Neither half produced anything: this is the only genuinely failed observation.
+            else -> AgentScreenOutcome.Failed(
+                listOfNotNull(treeFailure, image.reason).distinct().joinToString("; ")
+                    .ifBlank { "the screen could not be read" }
+            )
+        }
+    }
+
+    /** One screenshot attempt, reduced to "a usable data URL or why not". */
+    private suspend fun captureImageDataUrl(engine: AgentScreenEngine): ImageAttempt {
+        val outcome = engine.execute(A11yCommand.Screenshot(grid = 0, displayId = 0))
+        val screenshot = when (outcome) {
+            is A11yOutcome.Screenshot -> outcome.result
+            is A11yOutcome.Rejected -> return ImageAttempt(null, outcome.rejection.message)
+            else -> return ImageAttempt(null, "the screenshot did not complete")
+        }
+        val bytes = readScreenshot(screenshot.path)
+            ?: return ImageAttempt(null, "the screenshot file could not be read")
+        val dataUrl = encodeImage(bytes)
+            ?: return ImageAttempt(null, "the screenshot could not be encoded for the model")
+        if (dataUrl.length > MAX_IMAGE_DATA_URL_CHARS) {
+            // The tool-result envelope has a 16 KiB model budget; an image that does not fit would
+            // replace the whole observation with a truncation note, so the image is dropped here
+            // while the text half still reaches the model.
+            return ImageAttempt(null, "the screenshot is too large to send with this result")
+        }
+        return ImageAttempt(dataUrl, null)
+    }
+
+    private data class ImageAttempt(val dataUrl: String?, val reason: String?) {
+        fun fallbackNote(includeText: Boolean = true): String = when {
+            reason == null -> ""
+            includeText -> "\n(screenshot unavailable: $reason)"
+            else -> " (screenshot unavailable: $reason)"
+        }
+    }
 
     /**
      * A tap carries either a control's text or a point. Both go through one [A11yCommand.Tap]:
@@ -75,7 +176,7 @@ class AndroidAgentScreenPort(
      * node's centre) and dispatches a gesture at a pixel target.
      */
     private suspend fun tap(
-        engine: DshA11yController,
+        engine: AgentScreenEngine,
         action: AgentScreenAction.Tap
     ): AgentScreenOutcome {
         val hasText = action.text.isNotBlank()
@@ -91,10 +192,57 @@ class AndroidAgentScreenPort(
             expectedPackage = null
         )
         return when (val outcome = engine.execute(command)) {
-            is A11yOutcome.Tap -> tapResult(outcome.result)
+            is A11yOutcome.Tap -> {
+                val result = outcome.result
+                // A text tap that matched nothing is the case this self-rescue exists for: the
+                // model named a control the tree could not match verbatim (a partial label, a
+                // differently-worded goal, a self-drawn row). Instead of a bare failure it gets the
+                // ranked candidate list, so it can pick an index or tap a coordinate.
+                if (result.found || !hasText) {
+                    tapResult(result)
+                } else {
+                    tapMissWithCandidates(engine, action.text, result)
+                }
+            }
+
             is A11yOutcome.Rejected -> rejected(outcome.rejection)
             else -> AgentScreenOutcome.Failed("the tap did not complete")
         }
+    }
+
+    /**
+     * What to report when a text tap found no control.
+     *
+     * The fallback is deliberately *observation-only*: nothing is tapped here. The tool may not
+     * decide that a "close enough" control was the intended one — a wrong tap on a real phone is a
+     * side effect the user never approved — so the candidates go back to the model, which picks.
+     *
+     * A second tree capture is required rather than assumed: the tap outcome carries no nodes, and
+     * a screen the engine cannot dump leaves nothing to rank, so the original failure stands.
+     */
+    private suspend fun tapMissWithCandidates(
+        engine: AgentScreenEngine,
+        requestedText: String,
+        result: A11yTapResult
+    ): AgentScreenOutcome {
+        val failure = result.error?.takeIf(String::isNotBlank)
+            ?: "no clickable control matched the request"
+        val nodes = when (val dump = engine.execute(A11yCommand.Dump)) {
+            is A11yOutcome.Dump -> dump.snapshot.nodes
+            else -> return AgentScreenOutcome.Failed(failure)
+        }
+        val candidates = AgentScreenTargetResolver.candidates(
+            ScreenTarget(byText = listOf(requestedText), byDescription = listOf(requestedText)),
+            nodes
+        )
+        if (candidates.isEmpty()) return AgentScreenOutcome.Failed(failure)
+        return AgentScreenOutcome.Observed(
+            buildString {
+                append("No exact control matched \"").append(requestedText).append("\" — ")
+                append("nothing was tapped. Choose one candidate index or tap its bounds.\n")
+                append(AgentScreenTargetResolver.describeCandidates(candidates))
+            }
+        )
     }
 
     private fun tapResult(result: A11yTapResult): AgentScreenOutcome = when {
@@ -104,7 +252,7 @@ class AndroidAgentScreenPort(
         )
     }
 
-    private suspend fun inputText(engine: DshA11yController, text: String): AgentScreenOutcome {
+    private suspend fun inputText(engine: AgentScreenEngine, text: String): AgentScreenOutcome {
         if (text.isEmpty()) return AgentScreenOutcome.Failed("input needs the text to type")
         if (text.length > A11yLimits.MAX_INPUT_TEXT_CHARS) {
             return AgentScreenOutcome.Failed(
@@ -128,7 +276,7 @@ class AndroidAgentScreenPort(
     }
 
     private suspend fun scroll(
-        engine: DshA11yController,
+        engine: AgentScreenEngine,
         action: AgentScreenAction.Scroll
     ): AgentScreenOutcome {
         // The tool's `forward` flag is "towards the end of the content", which is a downward scroll;
@@ -155,7 +303,7 @@ class AndroidAgentScreenPort(
     }
 
     private suspend fun globalAction(
-        engine: DshA11yController,
+        engine: AgentScreenEngine,
         command: A11yCommand,
         label: String
     ): AgentScreenOutcome = when (val outcome = engine.execute(command)) {
@@ -233,3 +381,41 @@ internal fun renderSnapshotText(
 
 /** One screen's worth of text; well under the tool result budget. */
 internal const val MAX_SCREEN_TEXT_CHARS: Int = 6_000
+
+/**
+ * The one engine operation the port needs, as a function type.
+ *
+ * `DshA11yController.execute(A11yCommand)` is the production implementation; a JVM test supplies an
+ * in-memory script instead, which is what makes the tap/input/scroll mapping and the screenshot
+ * fallback testable without an Android service.
+ */
+internal fun interface AgentScreenEngine {
+    suspend fun execute(command: A11yCommand): A11yOutcome
+}
+
+/** Production adapter: the process-wide accessibility controller. */
+internal fun agentScreenEngine(controller: DshA11yController): AgentScreenEngine =
+    AgentScreenEngine { command -> controller.execute(command) }
+
+/** Reads the PNG the capture wrote, or null when it is gone/unreadable/oversized. */
+internal fun readScreenshotBytes(path: String): ByteArray? {
+    if (path.isBlank()) return null
+    return runCatching {
+        val file = java.io.File(path)
+        if (!file.isFile) return null
+        if (file.length() <= 0L || file.length() > MAX_SCREENSHOT_BYTES) return null
+        file.readBytes()
+    }.getOrNull()
+}
+
+/**
+ * Longest `data:` URL kept in one observation.
+ *
+ * The tool-result envelope has a 16 KiB model budget ([AgentToolResults.MODEL_RESULT_MAX_BYTES]); an
+ * image near that would push the whole observation into "truncated", losing both the pixels and the
+ * text, so the image half is dropped first and the text still reaches the model.
+ */
+internal const val MAX_IMAGE_DATA_URL_CHARS: Int = 8_000
+
+/** Same source cap the capture enforces before it writes the PNG. */
+private const val MAX_SCREENSHOT_BYTES: Long = 8L * 1024 * 1024

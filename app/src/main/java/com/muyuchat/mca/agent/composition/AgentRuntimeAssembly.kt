@@ -127,7 +127,40 @@ class AgentRuntimeAssembly(
      * [com.muyuchat.mca.agent.projection.AgentTurnSummarySink]).
      */
     private val agentTurnSummarySink: AgentTurnSummarySink =
-        com.muyuchat.mca.agent.projection.NoAgentTurnSummarySink
+        com.muyuchat.mca.agent.projection.NoAgentTurnSummarySink,
+    /**
+     * Bundled operation knowledge ("how to drive WeChat / settings / a browser page") appended to
+     * the SYSTEM prompt. [com.muyuchat.core.agent.contract.AgentKnowledgePort.NONE] keeps every
+     * prompt byte-identical for harnesses and tests that do not wire the asset index.
+     */
+    private val knowledgePort: com.muyuchat.core.agent.contract.AgentKnowledgePort =
+        com.muyuchat.core.agent.contract.AgentKnowledgePort.NONE,
+    /**
+     * Explicit user preferences appended to the SYSTEM prompt.
+     * [com.muyuchat.core.agent.contract.AgentPreferencePort.NONE] keeps every prompt byte-identical
+     * for harnesses and tests that wire no preference memory.
+     */
+    private val preferencePort: com.muyuchat.core.agent.contract.AgentPreferencePort =
+        com.muyuchat.core.agent.contract.AgentPreferencePort.NONE,
+    /**
+     * Where an explicit preference stated in a task goal is remembered.
+     *
+     * The goal text *is* the user's message on this path: `CreateAgentTask` is the single entry point
+     * through which a user's instruction becomes an Agent run, so this is the only place the
+     * extraction can see it exactly once. Null keeps harnesses without a memory extraction-free.
+     * Extraction is deduplicated inside the store, so an idempotent command replay stores nothing new.
+     */
+    private val preferenceMemory: com.muyuchat.mca.agent.knowledge.AgentPreferenceMemory? = null,
+    /**
+     * Which chat session a created task belongs to.
+     *
+     * Null keeps every existing construction unchanged. When present, a created task is bound to the
+     * caller's session so the run's terminal summary can be written back to that conversation; without
+     * it the summary writer correctly stays silent rather than guessing a session.
+     */
+    private val taskChatBindingStore: com.muyuchat.mca.agent.projection.AgentTaskChatBindingStore? = null,
+    /** Session the caller is creating the task from; ignored when no store is wired. */
+    private val chatSessionIdForNewTask: String? = null
 ) : AgentWorkspaceCommands {
 
     /**
@@ -200,7 +233,9 @@ class AgentRuntimeAssembly(
         },
         ids = ids,
         clock = clock,
-        attemptRegistry = attemptRegistry
+        attemptRegistry = attemptRegistry,
+        knowledgePort = knowledgePort,
+        preferencePort = preferencePort
     )
 
     /**
@@ -324,8 +359,29 @@ class AgentRuntimeAssembly(
 
     /** Task creation is the repository path so the frozen binding/policy/budget are persisted. */
     override suspend fun createTask(command: CreateAgentTask): AgentCommandResult {
+        // Extraction point: a task goal is the user's own instruction, so an explicit preference in it
+        // ("以后都用中文回答") is remembered before the run starts and is therefore already in the SYSTEM
+        // prompt of this task's first step. Idempotent replays re-extract the same text, and the store
+        // de-duplicates it, so a replay changes nothing.
+        preferenceMemory?.let { memory ->
+            runCatching {
+                com.muyuchat.mca.agent.knowledge.AgentPreferenceExtractor
+                    .extract(command.goal)
+                    .forEach { preference -> memory.add(preference) }
+            }
+        }
         return when (val outcome = data.taskRepository.createTask(command)) {
-            is AgentTaskCreationOutcome.Created -> AgentCommandResult.Accepted(
+            is AgentTaskCreationOutcome.Created -> {
+                // Bind before returning: the summary writer resolves the session from this store when
+                // the run terminates, and a replay must not create a second binding.
+                if (!outcome.idempotentReplay) {
+                    val store = taskChatBindingStore
+                    val session = chatSessionIdForNewTask
+                    if (store != null && !session.isNullOrBlank()) {
+                        runCatching { store.bind(outcome.task.taskId, session, clock.nowMillis()) }
+                    }
+                }
+                AgentCommandResult.Accepted(
                 appliedRevision = outcome.task.revision,
                 runId = null,
                 idempotentReplay = outcome.idempotentReplay,
@@ -338,7 +394,8 @@ class AgentRuntimeAssembly(
                     appliedRevision = outcome.task.revision,
                     idempotentReplay = outcome.idempotentReplay
                 )
-            )
+                )
+            }
             is AgentTaskCreationOutcome.Rejected -> AgentCommandResult.Rejected(outcome.error)
         }
     }

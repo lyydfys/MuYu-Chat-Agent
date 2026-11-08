@@ -36,7 +36,7 @@ class AgentScreenArgumentNormalizer : AgentToolArgumentNormalizer {
         val normalized = linkedMapOf<String, AgentArgValue>("action" to AgentArgValue.Text(action))
         try {
             when (action) {
-                "read", "back", "home" -> Unit
+                "read", "screenshot", "back", "home" -> Unit
                 "tap" -> {
                     val text = optionalText(fields, "text", AgentScreenTool.MAX_TEXT_CHARS)
                     val x = optionalInt(fields, "x", AGENT_MAX_COORDINATE)
@@ -72,6 +72,7 @@ class AgentScreenArgumentNormalizer : AgentToolArgumentNormalizer {
             return reject(rejected.message ?: "device.screen arguments are invalid.")
         }
         val allowed = when (action) {
+            "read", "screenshot" -> setOf("action")
             "tap" -> setOf("action", "x", "y", "text")
             "input" -> setOf("action", "text")
             "scroll" -> setOf("action", "forward", "distance")
@@ -116,7 +117,7 @@ class AgentScreenArgumentNormalizer : AgentToolArgumentNormalizer {
     private class RejectedField(message: String) : RuntimeException(message)
 
     private companion object {
-        val ACTIONS: Set<String> = setOf("read", "tap", "input", "scroll", "back", "home")
+        val ACTIONS: Set<String> = setOf("read", "screenshot", "tap", "input", "scroll", "back", "home")
         const val AGENT_MAX_COORDINATE: Long = 100_000L
     }
 }

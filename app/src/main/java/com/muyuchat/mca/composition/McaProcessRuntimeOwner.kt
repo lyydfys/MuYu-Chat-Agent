@@ -78,4 +78,26 @@ internal class McaProcessRuntimeOwner(private val application: Application) {
         check(!processRoot.isClosed) { "The process runtime root closed during the park wake." }
         agentHost.runtime().wakeParked(runId, wakeId)
     }
+
+    /**
+     * Background entry for one received external workflow trigger.
+     *
+     * It borrows the same root as the schedule workers, lets startup recovery/fence run first, then
+     * delegates to the one workflow facade. The registration table is the platform singleton the
+     * receiver already consulted, so the same table decides here as there — a broadcast cannot
+     * register an action on its way in.
+     */
+    suspend fun dispatchWorkflowIntent(
+        envelope: com.muyuchat.mca.agent.workflow.WorkflowIntentEnvelope
+    ): com.muyuchat.mca.agent.workflow.WorkflowIntentDispatchResult = schedulesMutex.withLock {
+        val scopeId = container().runtimeProfileStore.installationScopeId()
+        val processRoot = root(scopeId)
+        val agentHost = processRoot.assembly.agentHost
+        agentHost.runtime().reconcileStartup()
+        check(!processRoot.isClosed) { "The process runtime root closed during the intent dispatch." }
+        com.muyuchat.mca.agent.workflow.WorkflowIntentTrigger(
+            registry = com.muyuchat.mca.agent.platform.WorkflowIntentPlatform.registry(),
+            facade = agentHost.workflowTriggerFacade()
+        ).dispatch(envelope)
+    }
 }
