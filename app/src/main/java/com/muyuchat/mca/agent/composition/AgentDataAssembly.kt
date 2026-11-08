@@ -51,6 +51,7 @@ import com.muyuchat.mca.agent.security.AgentApprovalStorePort
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 
 /**
@@ -74,6 +75,28 @@ class AgentDataAssembly(
      */
     internal val transactions = RoomAgentTransactionRunner(database)
     private val agentRoot = File(filesDir, AGENT_ROOT_DIRECTORY)
+
+    /**
+     * Writes an already-built chat-history seed into a task's read-only `inputs/` area.
+     *
+     * Exposed here because `agentRoot` is deliberately private to this assembly: the data layer is the
+     * only place that knows where a task's workspace lives, and leaking the root so callers could
+     * compute paths themselves is exactly the coupling this boundary exists to prevent.
+     *
+     * @return the workspace-relative logical path, or null when nothing was written.
+     */
+    internal suspend fun writeChatHistorySeed(
+        workspaceId: String,
+        taskId: String,
+        seed: com.muyuchat.mca.agent.projection.ChatHistorySeed
+    ): String? = withContext(ioDispatcher) {
+        com.muyuchat.mca.agent.projection.ChatHistorySeedWriter.write(
+            agentRoot = agentRoot,
+            workspaceId = workspaceId,
+            taskId = taskId,
+            seed = seed
+        )
+    }
     private val packageStagingRoot = File(agentRoot, PACKAGE_STAGING_DIRECTORY)
     private val grantDao = database.agentGrantDao()
 

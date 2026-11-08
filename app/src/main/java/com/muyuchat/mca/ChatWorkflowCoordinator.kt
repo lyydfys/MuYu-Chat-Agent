@@ -135,7 +135,13 @@ internal class ChatWorkflowCoordinator(
                     input = preparedInput.text,
                     sessionId = state.activeChatSessionId,
                     displayTitle = preparedInput.text,
-                    binding = binding
+                    binding = binding,
+                    // The conversation so far, minus the turn being submitted: "help me fix that paragraph
+                    // we just wrote" only works if the agent can read what was written.
+                    history = state.messages,
+                    seedFileName = com.muyuchat.mca.agent.projection.chatHistorySeedFileName(
+                        System.currentTimeMillis()
+                    )
                 )
                 if (failure != null) {
                     viewModel.showStatus(failure)

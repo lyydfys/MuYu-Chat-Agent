@@ -367,6 +367,44 @@ class AgentRuntimeAssembly(
         dispatchLoop = it
     }
 
+    /**
+     * Creates a task from a conversation, handing the agent the history that preceded it.
+     *
+     * The runtime has no chat-history channel: `CreateAgentTask` has no context field and the goal is
+     * capped at 8 KiB, so the history travels as a read-only workspace input instead. The order matters:
+     * the goal hint must be part of the goal *at creation time*, because the goal is frozen into the task;
+     * appending it afterwards would leave the model without a pointer on its first step.
+     *
+     * So the sequence is: build the seed -> append its hint to the goal -> create the task -> write the
+     * seed into the task's `inputs/`. A failed write is not fatal: the task still exists and simply runs
+     * without history, which is the pre-existing behaviour.
+     */
+    suspend fun createTaskFromConversation(
+        command: CreateAgentTask,
+        history: List<com.muyuchat.core.engine.ChatMessage>,
+        seedFileName: String
+    ): AgentCommandResult {
+        val seed = com.muyuchat.mca.agent.projection.buildSeed(
+            history = history,
+            inputFileName = seedFileName
+        )
+        val goalWithHint = seed.goalHint?.let { hint -> "${command.goal}\n\n$hint" } ?: command.goal
+        val result = createTask(command.copy(goal = goalWithHint))
+        if (result is AgentCommandResult.Accepted && !seed.isEmpty) {
+            val receipt = result.creationReceipt
+            if (receipt != null) {
+                runCatching {
+                    data.writeChatHistorySeed(
+                        workspaceId = receipt.workspaceId,
+                        taskId = receipt.taskId,
+                        seed = seed
+                    )
+                }
+            }
+        }
+        return result
+    }
+
     /** Task creation is the repository path so the frozen binding/policy/budget are persisted. */
     override suspend fun createTask(command: CreateAgentTask): AgentCommandResult {
         // Extraction point: a task goal is the user's own instruction, so an explicit preference in it

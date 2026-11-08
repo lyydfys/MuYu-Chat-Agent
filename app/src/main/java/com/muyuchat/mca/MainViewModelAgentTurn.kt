@@ -5,6 +5,7 @@ import com.muyuchat.core.agent.contract.AgentCommandResult
 import com.muyuchat.core.agent.contract.AgentModelBinding
 import com.muyuchat.core.agent.contract.AgentRunPolicy
 import com.muyuchat.core.agent.contract.CreateAgentTask
+import com.muyuchat.core.engine.ChatMessage
 
 /**
  * Hands one chat turn to the agent instead of the chat model.
@@ -32,7 +33,9 @@ internal suspend fun MainViewModel.submitAgentTurn(
     input: String,
     sessionId: String?,
     displayTitle: String,
-    binding: AgentModelBinding?
+    binding: AgentModelBinding?,
+    history: List<ChatMessage> = emptyList(),
+    seedFileName: String = "chat-history.txt"
 ): String? {
     val goal = input.trim()
     if (goal.isEmpty()) return null
@@ -46,7 +49,16 @@ internal suspend fun MainViewModel.submitAgentTurn(
         budget = AgentBudget(),
         chatSessionId = sessionId
     )
-    return when (val result = agentWorkspacePorts.runtime.createTask(command)) {
+    // The history travels beside the goal, not inside it: the goal is capped at 8 KiB and the runtime
+    // has no context channel. The seed is written only after the task exists, because a workspace path
+    // needs a task id.
+    return when (
+        val result = agentWorkspacePorts.runtime.createTaskFromConversation(
+            command = command,
+            history = history,
+            seedFileName = seedFileName
+        )
+    ) {
         is AgentCommandResult.Accepted -> null
         is AgentCommandResult.Rejected -> result.error.safeMessage
     }
