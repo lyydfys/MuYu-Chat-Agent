@@ -476,6 +476,11 @@ class ChatViewModel(
             onBrowserTaskEvent = ::handleBrowserTaskEvent,
             onOpenBrowserTask = ::openBrowserTask,
             onSelectWebSearchResearchMode = ::selectWebSearchResearchMode,
+            // The three exclusive composer modes reach the app through these two callbacks. They are
+            // forwarded from the injected capabilities, not handled here: the app owns Agent mode
+            // because its send path reads the flag after the session is saved.
+            onChangeAgentMode = capabilities.shell.onChangeAgentMode,
+            onClearWebSearchResearchMode = capabilities.shell.onClearWebSearchResearchMode,
             onToggleWebSearchForTurn = ::toggleWebSearchForTurn,
             onDeleteFileAsset = ::deleteFileAsset,
             onUseFileAsset = ::useFileAsset,

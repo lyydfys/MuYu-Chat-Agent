@@ -28,7 +28,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$adb = 'D:\model\android-sdk\platform-tools\adb.exe'
+$adb = 'E:\model\android-sdk\platform-tools\adb.exe'
 if (-not (Test-Path $adb)) { $adb = 'adb' }
 $logDir = Split-Path -Parent $LogPath
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }

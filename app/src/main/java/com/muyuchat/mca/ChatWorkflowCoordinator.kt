@@ -131,6 +131,13 @@ internal class ChatWorkflowCoordinator(
                     choices = choices,
                     selectedCloudChatModelId = state.selectedCloudChatModelId
                 )
+                // The user's turn must appear in the conversation even though the agent (not the chat
+                // model) answers it: the thread is the record of what was asked, and a reply with no
+                // question above it reads as an unexplained agent monologue.
+                val userMessage = ChatMessage(
+                    role = Role.USER,
+                    content = preparedInput.text
+                )
                 val failure = viewModel.submitAgentTurn(
                     input = preparedInput.text,
                     sessionId = state.activeChatSessionId,
@@ -148,7 +155,32 @@ internal class ChatWorkflowCoordinator(
                 } else {
                     // The turn belongs to the agent now. Clearing only after acceptance means a
                     // rejected task leaves the user's text in place instead of eating it.
-                    store.update { it.copy(input = "") }
+                    //
+                    // The user message must be *persisted*, not only added to the in-memory list: the
+                    // agent's summary is appended by position from the store's own row, so an
+                    // unpersisted user turn makes the summary land at position 0 and the thread reads
+                    // reply-then-question. Writing both through the session path keeps the order.
+                    val occurredAt = System.currentTimeMillis()
+                    val rollback = state.conversationMutationRollbackState()
+                    val sessionIdForTurn = state.activeChatSessionId
+                        ?: java.util.UUID.randomUUID().toString()
+                    val committed = store.updateAndGet {
+                        val sessions = it.chatSessions.upsertSessionFor(
+                            state = it.snapshot,
+                            sessionId = sessionIdForTurn,
+                            messages = it.messages + userMessage,
+                            assistantId = it.selectedAssistantId,
+                            modelMode = it.selectedChatBackend.bindingValue(),
+                            modelId = it.snapshot.currentChatModelId(),
+                            occurredAt = occurredAt
+                        )
+                        it.copy(
+                            input = "",
+                            messages = it.messages + userMessage,
+                            chatSessions = sessions
+                        )
+                    }
+                    persistConversationMutation(committed.chatSessions, rollback, true)
                 }
             }
             return true

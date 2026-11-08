@@ -39,6 +39,7 @@ class RoomAgentTurnSummarySink(
     override suspend fun onAgentTurnCompleted(runId: String, chatSessionId: String?) {
         if (chatSessionId.isNullOrBlank()) return
 
+
         val snapshot = journal.readRun(runId) ?: return
         val run = snapshot.run
         val events = readAllEvents(runId)

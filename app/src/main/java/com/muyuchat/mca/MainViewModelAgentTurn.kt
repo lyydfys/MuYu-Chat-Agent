@@ -3,8 +3,10 @@ package com.muyuchat.mca
 import com.muyuchat.core.agent.contract.AgentBudget
 import com.muyuchat.core.agent.contract.AgentCommandResult
 import com.muyuchat.core.agent.contract.AgentModelBinding
+import com.muyuchat.core.agent.contract.AgentNetworkPolicy
 import com.muyuchat.core.agent.contract.AgentRunPolicy
 import com.muyuchat.core.agent.contract.CreateAgentTask
+import com.muyuchat.core.agent.contract.StartAgentRun
 import com.muyuchat.core.engine.ChatMessage
 
 /**
@@ -45,22 +47,47 @@ internal suspend fun MainViewModel.submitAgentTurn(
         goal = goal,
         displayTitle = displayTitle.take(MAX_AGENT_TITLE_CHARS),
         modelBinding = binding,
-        policy = AgentRunPolicy(),
+        // The policy default is LOCAL_ONLY/offlineForced, which is right for the standalone Agent page
+        // and wrong here: this turn uses the conversation's own model, and a cloud model cannot run
+        // offline. The invariant in AgentRunPolicy requires the two to move together.
+        policy = AgentRunPolicy(
+            networkPolicy = if (binding.isCloud) {
+                AgentNetworkPolicy.NETWORK_ENABLED
+            } else {
+                AgentNetworkPolicy.LOCAL_ONLY
+            },
+            offlineForced = !binding.isCloud
+        ),
         budget = AgentBudget(),
         chatSessionId = sessionId
     )
     // The history travels beside the goal, not inside it: the goal is capped at 8 KiB and the runtime
     // has no context channel. The seed is written only after the task exists, because a workspace path
     // needs a task id.
+    val created = agentWorkspacePorts.runtime.createTaskFromConversation(
+        command = command,
+        history = history,
+        seedFileName = seedFileName
+    )
+    if (created is AgentCommandResult.Rejected) return created.error.safeMessage
+    created as AgentCommandResult.Accepted
+
+    // `CreateAgentTask` deliberately does not start a run (its contract says so), so a created task
+    // sits idle until this second command. Without it the user's turn is accepted into the database
+    // and nothing ever happens — the exact failure seen on device.
+    val receipt = created.creationReceipt
+        ?: return "Agent 任务已创建，但拿不到任务锚点，无法启动执行。"
     return when (
-        val result = agentWorkspacePorts.runtime.createTaskFromConversation(
-            command = command,
-            history = history,
-            seedFileName = seedFileName
+        val started = agentWorkspacePorts.runtime.startRun(
+            StartAgentRun(
+                commandId = "chat-agent-start-" + stableAgentTurnId(goal, sessionId.orEmpty()),
+                taskId = receipt.taskId,
+                expectedTaskRevision = receipt.appliedRevision
+            )
         )
     ) {
         is AgentCommandResult.Accepted -> null
-        is AgentCommandResult.Rejected -> result.error.safeMessage
+        is AgentCommandResult.Rejected -> started.error.safeMessage
     }
 }
 
@@ -81,3 +108,13 @@ internal const val MAX_AGENT_TITLE_CHARS = 60
 
 /** Narrows a model-selection failure to the one action that fixes it. */
 internal const val NO_AGENT_MODEL_HINT = "已加载的本地模型或已配置的云端对话模型都可以使用。"
+
+/**
+ * True when this binding targets a cloud provider.
+ *
+ * The agent contract has no is-cloud bit; the provider id is the only signal, and it is the same
+ * `cloud:` prefix the model picker writes. A local engine id never starts with that prefix, so the
+ * test is exact rather than heuristic.
+ */
+internal val AgentModelBinding.isCloud: Boolean
+    get() = providerId.startsWith("cloud:")

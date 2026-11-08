@@ -201,7 +201,10 @@ internal fun ChatInputBar(
     // owner. Every enable-path below funnels through this, so the three can never disagree.
     val applyModes: (ChatComposerModes) -> Unit = { next ->
         imagePromptMode = next.imagePromptMode
-        if (next.agentMode != agentMode) onAgentModeChange(next.agentMode)
+        if (next.agentMode != agentMode) {
+            onAgentModeChange(next.agentMode)
+        } else {
+        }
     }
     // Selecting a research mode arms that mode and clears the other two first. Both entry points
     // (the sheet row and the floating capsule) use this same wrapper, so "research on + agent on"
