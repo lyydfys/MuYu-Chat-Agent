@@ -1,0 +1,14 @@
+mca.mac-api.xyz {
+	encode zstd gzip
+
+	# 抹掉上游 nginx 的 Server 头（nginx.conf 里已 server_tokens off，
+	# 这里再去掉 "Server: nginx"，少暴露一层技术栈）
+	header {
+		-Server
+	}
+
+	# 静态站安全头由 nginx 下发；Caddy 侧再加 HSTS（只在 HTTPS 上生效）
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	reverse_proxy mca-site:80
+}

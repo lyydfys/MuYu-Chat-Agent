@@ -1,0 +1,56 @@
+# MCA 官网 —— 部署到 mac-api 生产服务器
+#
+# 与 aether-site 同一模式：
+#   1. 不映射宿主机端口（80/443 由现有 Caddy 占用），只在 mac-api_mac-net 内网暴露
+#   2. Caddy 反代 mca-site:80
+#   3. 内存上限 64M（服务器总内存 1.8G，可用约 450M）
+#   4. read_only + tmpfs，静态站不需要写盘
+#
+# 目录：/opt/mca-site/
+# 启动：docker compose -f docker-compose.yml up -d --build
+
+services:
+  site:
+    image: nginx:1.25-alpine
+    container_name: mca-site
+    restart: unless-stopped
+
+    expose:
+      - "80"
+
+    read_only: true
+
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+
+    networks:
+      - mac-net
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  mac-net:
+    external: true
+    name: mac-api_mac-net
