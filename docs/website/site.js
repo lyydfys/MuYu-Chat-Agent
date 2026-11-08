@@ -761,6 +761,9 @@
   ];
 
   function initGlass() {
+    /* A device counts as pointer-capable only if it has a real hover-capable pointer.
+       `(hover: hover)` excludes phones and tablets, where pointermove fires during scroll. */
+    const canTrackPointer = !(window.matchMedia && window.matchMedia('(hover: none)').matches);
     const panels = document.querySelectorAll(GLASS_SELECTORS.join(','));
     const enabled = () => root.dataset.theme === 'glass';
 
@@ -775,13 +778,35 @@
       return gloss;
     };
 
+    /* Coalesced pointer tracking.
+       Measured before this change: 200 pointermove events -> 200 writes to --gx, each
+       invalidating a panel that carries backdrop-filter (so it re-blurs). With 45 panels and
+       a finger drag emitting pointermove every frame, that is constant layout + repaint work.
+
+       Now: at most one write per animation frame, and no write at all when the value rounds to
+       what is already there. */
+    let pending = null;
+    let frame = 0;
+    const flush = () => {
+      frame = 0;
+      if (!pending) return;
+      const { node, gx, gy } = pending;
+      pending = null;
+      if (node.style.getPropertyValue('--gx') !== gx) node.style.setProperty('--gx', gx);
+      if (node.style.getPropertyValue('--gy') !== gy) node.style.setProperty('--gy', gy);
+    };
+
     const track = (e) => {
       const node = e.currentTarget;
       if (!enabled()) return;
       const r = node.getBoundingClientRect();
       if (!r.width || !r.height) return;
-      node.style.setProperty('--gx', (((e.clientX - r.left) / r.width) * 100).toFixed(2) + '%');
-      node.style.setProperty('--gy', (((e.clientY - r.top) / r.height) * 100).toFixed(2) + '%');
+      pending = {
+        node,
+        gx: (((e.clientX - r.left) / r.width) * 100).toFixed(2) + '%',
+        gy: (((e.clientY - r.top) / r.height) * 100).toFixed(2) + '%',
+      };
+      if (!frame) frame = requestAnimationFrame(flush);
     };
     const reset = (e) => {
       e.currentTarget.style.removeProperty('--gx');
@@ -793,7 +818,10 @@
     panels.forEach((node) => {
       node.classList.add('g-surface');
       ensureGloss(node);
-      node.addEventListener('pointermove', track, { passive: true });
+      /* No pointermove on touch-only devices: a finger has no cursor, so a follow-the-pointer
+         highlight has nothing to follow, and binding it cost a layout + re-blur every frame
+         while scrolling. The gloss keeps its default centred position there. */
+      if (canTrackPointer) node.addEventListener('pointermove', track, { passive: true });
       node.addEventListener('pointerleave', reset, { passive: true });
       node.addEventListener('pointerdown', press, { passive: true });
       node.addEventListener('pointerup', release, { passive: true });

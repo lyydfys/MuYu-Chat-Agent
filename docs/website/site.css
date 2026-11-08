@@ -3690,3 +3690,46 @@ html {
      contain: paint                -> blur area 3.74 -> 4.83 M px² (changes the sampled box)
      will-change: backdrop-filter  -> keeps a larger composited layer alive (84 -> 85 layers)
 */
+
+/* ---------- touch devices: remove object-position animation ---------- */
+/*
+  `object-position` is not compositor-animated — the browser re-samples the image bitmap every
+  frame. 19 elements here declare a transition on it, all inside the already-blurred workspace
+  surface. On a phone the hover that would trigger the reveal cannot happen, so the transition
+  can never run; it only adds a repaint hazard while scrolling.
+
+  `@media (hover: none)` covers phones and tablets. Desktop is untouched and keeps the reveal.
+*/
+@media (hover: none) {
+  .shot-box img,
+  .shot-box picture img,
+  .rail-screen img,
+  .phone-screen img {
+    transition: none;
+  }
+
+  /* Keep the default framing: the top of the capture, as if never hovered. */
+  .shot-card:hover .shot-box img,
+  .shot-card:focus-within .shot-box img,
+  .shot-box:hover img,
+  .rail-device:focus-within .rail-screen img {
+    object-position: 50% 0%;
+  }
+}
+
+/* ---------- touch devices: no pointer-following gloss ---------- */
+/*
+  `.g-gloss` is 45 layers, each with `mix-blend-mode: screen`. That property forces an offscreen
+  buffer plus a per-pixel blend, and 45 of them composite on every scroll frame.
+
+  The layer only does something when a cursor drives it via `--gx/--gy` and `:hover`. On a touch
+  screen neither exists, so it renders a flat 55% wash for the whole lifetime of the page.
+
+  The rest of the glass recipe — gradient fill, 1px rim, inset bevel, inner light — is
+  untouched, so the surface still reads as glass.
+*/
+@media (hover: none) {
+  :root[data-theme="glass"] .g-gloss {
+    display: none;
+  }
+}
