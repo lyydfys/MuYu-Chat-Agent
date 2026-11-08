@@ -27,8 +27,50 @@ import org.json.JSONObject
 class AgentTerminalExecTool(
     private val sandbox: AgentTerminalSandbox = AgentTerminalSandbox.UNAVAILABLE,
     private val whitelist: Set<String> = AgentTerminalWhitelist.DEFAULT
-) : AgentToolExecutor {
+) : AgentToolExecutor,
+    com.muyuchat.core.agent.runtime.run.AgentTypedScopeSource {
     override val descriptor: AgentToolDescriptor = AgentExtendedToolDescriptors.TERMINAL_EXEC
+
+    /**
+     * A terminal command touches no workspace file, so it has no `logicalPaths`.
+     *
+     * Without a typed scope the freeze path rejects the call before it can run: a frozen command must
+     * name at least one resource, and "run this argv on the device" names none of the workspace kinds.
+     * [AgentResourceScope.Device] is the contract shape for exactly this case, so the tool declares the
+     * device operation it is about to perform plus the sentence the approval prompt shows.
+     *
+     * The effect is `DEVICE_ACTION`, **not** `PROCESS_EXEC`, and that is forced by the contract rather
+     * than chosen: `AgentScopePrecondition.covers` admits only the effects
+     * `requiredEffects(scope)` lists, and for a `Device` scope that set is exactly
+     * `{DEVICE_ACTION}`. Declaring `PROCESS_EXEC` here makes the precondition constructor throw
+     * `"scope Device declares no matching effect"` — i.e. the call would be rejected at freeze time,
+     * which is the very failure this scope exists to prevent.
+     *
+     * [AgentResourceScope.Process] + `PROCESS_EXEC` would describe the argv even more precisely, but
+     * it requires a `runtimeId` (`AgentContract.requireId`), a `cwdHandle` and a real `argvHash` — host
+     * facts that live in [AgentTerminalSandbox], not in this tool, and that must never be taken from
+     * model text. `AgentExtendedToolScopes.terminalExec(...)` is that richer scope, for the caller that
+     * does own those facts; this tool declares the coarse, always-true one. The user-visible summary
+     * carries the part that matters for approval: a command really does execute.
+     */
+    override fun scopePrecondition(): com.muyuchat.core.agent.contract.AgentScopePrecondition {
+        return com.muyuchat.core.agent.contract.AgentScopePrecondition(
+            scopes = listOf(
+                com.muyuchat.core.agent.contract.AgentResourceScope.Device(
+                    operation = DEVICE_OPERATION,
+                    // No target package: the command runs in the app's sandbox, not inside another
+                    // app's surface. Naming one would overstate what the approval covers.
+                    targetPackage = null,
+                    selectorHash = null,
+                    userVisibleSummary = DEVICE_SCOPE_SUMMARY
+                )
+            ),
+            // Contract-required for a Device scope; see the KDoc above. A process really does start,
+            // which is why every result path that can leave the process running reports
+            // `possibleSideEffects = true` and why the summary says so in words.
+            effects = setOf(com.muyuchat.core.agent.contract.AgentEffectKind.DEVICE_ACTION)
+        )
+    }
 
     override suspend fun execute(command: FrozenToolCommand, context: AgentToolContext): AgentToolResult =
         runBuiltInTool(command, descriptor, context, requiresReadGrant = false) {
@@ -162,6 +204,13 @@ class AgentTerminalExecTool(
     companion object {
         /** Not part of the core contract codes yet; keep the TOOL_* family shape and document it. */
         const val TOOL_NOT_SUPPORTED: String = "TOOL_NOT_SUPPORTED"
+
+        /** Scope operation name; mirrors `device.screen`'s `"screen"` convention. */
+        internal const val DEVICE_OPERATION: String = "terminal"
+
+        /** What the approval prompt shows. Says exactly what is (not) done: argv only, never a shell. */
+        internal const val DEVICE_SCOPE_SUMMARY: String =
+            "在设备上执行一条 shell 命令（argv 形式，不经过 shell）"
 
         const val MAX_OUTPUT_BYTES: Int = 64 * 1024
         const val MAX_ARGUMENTS: Int = 16

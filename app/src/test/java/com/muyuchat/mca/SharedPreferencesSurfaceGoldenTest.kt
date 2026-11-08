@@ -87,12 +87,19 @@ class SharedPreferencesSurfaceGoldenTest {
             if (!text.contains("getSharedPreferences")) return@forEach
             val constants = CONSTANT.findAll(text)
                 .associate { it.groupValues[1] to it.groupValues[2] }
+            // A store may take the file name as a constructor parameter defaulted to its own
+            // constant (`name: String = PREFERENCES_NAME`). That is still one fixed file name, so
+            // it must resolve rather than degrade to the unresolved sentinel.
+            val aliases = PARAMETER_DEFAULT.findAll(text)
+                .associate { it.groupValues[1] to it.groupValues[2] }
             CALL.findAll(text).forEach { match ->
                 val literal = match.groupValues[1]
                 val identifier = match.groupValues[2]
                 names += when {
                     literal.isNotEmpty() -> literal
                     constants.containsKey(identifier) -> constants.getValue(identifier)
+                    aliases[identifier]?.let(constants::get) != null ->
+                        constants.getValue(aliases.getValue(identifier))
                     // P9/S30: the ChatScreen split moved a getSharedPreferences call next to
                     // its sibling file while the constant stayed behind. Resolve a name that
                     // is unambiguous across sibling files of the same directory; a name with
@@ -148,6 +155,12 @@ class SharedPreferencesSurfaceGoldenTest {
 
         /** `const val NAME = "value"`, used to resolve names passed as constants. */
         val CONSTANT = Regex("const\\s+val\\s+([A-Za-z_]\\w*)\\s*(?::\\s*String\\s*)?=\\s*\"([^\"]*)\"")
+
+        /**
+         * `name: String = PREFERENCES_NAME`, the constructor-parameter form used by the newer
+         * stores. The default is a same-file constant, so the file name is still fixed.
+         */
+        val PARAMETER_DEFAULT = Regex("\\b([A-Za-z_]\\w*)\\s*:\\s*String\\s*=\\s*([A-Za-z_]\\w*)")
 
         /**
          * `getSharedPreferences(<literal or constant>,`. `\s` matches newlines in Kotlin's

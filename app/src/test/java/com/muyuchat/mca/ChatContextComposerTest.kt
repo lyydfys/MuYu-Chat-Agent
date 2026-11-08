@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.engine.AgentTurnTrace
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerationParams
@@ -9,6 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -68,7 +70,7 @@ class ChatContextComposerTest {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatContextComposer.kt")
         val compose = functionBody(source, "fun compose(")
 
-        assertTrue(compose.contains("messages.asReversed()"))
+        assertTrue(compose.contains("contextMessages.asReversed()"))
         assertTrue(compose.contains("firstOrNull { it.role == Role.USER && it.content.isNotBlank() }"))
         assertTrue(compose.contains("?.content"))
         assertTrue(compose.contains("?.let(::boundedQuery)"))
@@ -167,6 +169,135 @@ class ChatContextComposerTest {
         // 旧 VM wrapper（deduplicateVisionAttachmentsForSend）已删除；断言跟踪到 owner 名。
         assertTrue(sendMessage.contains("deduplicatedVisionAttachmentsForSend"))
     }
+
+    // ---------------------------------------------------------------- agent projection (multi-turn)
+
+    @Test
+    fun tenAgentTurnsCollapseToTheirSummariesWithoutLeakingRawSteps() {
+        val messages = (1..10).flatMap { turn ->
+            val traceId = "run-$turn"
+            listOf(
+                agentStep(traceId, 1, "步骤一：读取 $traceId 的原始工具输出，内容很长且不应进入模型上下文"),
+                agentStep(traceId, 2, "步骤二：$traceId approval 请求原文"),
+                agentStep(traceId, 3, "步骤三：$traceId question 原文"),
+                agentSummary(traceId, "第 $turn 轮总结：完成了 $turn 项操作。")
+            )
+        }
+
+        val projected = messages.agentContextProjection()
+
+        assertEquals("10 轮任务只应留下 10 条 summary", 10, projected.size)
+        assertTrue("任何原始 step 都不能泄漏", projected.none { it.content.contains("原始工具输出") })
+        assertTrue(projected.none { it.content.contains("approval 请求原文") })
+        assertTrue(projected.none { it.content.contains("question 原文") })
+        assertEquals(
+            (1..10).map { "第 $it 轮总结：完成了 $it 项操作。" },
+            projected.map { it.content }
+        )
+        assertEquals(
+            (1..10).map { "run-$it" },
+            projected.map { it.agentTrace?.turnId }
+        )
+    }
+
+    @Test
+    fun everyProjectedAgentMessageCarriesItsFinalSummaryAsContent() {
+        val summary = "整理完成：3 条结论，写入 summary.md。"
+        val raw = "非常长的原始 transcript ".repeat(200)
+        val message = ChatMessage(
+            role = Role.ASSISTANT,
+            content = raw,
+            agentTrace = AgentTurnTrace(
+                turnId = "run-1",
+                kind = AgentTurnTrace.SUMMARY,
+                finalSummary = summary
+            )
+        )
+
+        val projected = message.let { listOf(it) }.agentContextProjection()
+
+        assertEquals(1, projected.size)
+        assertEquals("投影后的正文必须是 finalSummary，而不是原始长文本", summary, projected.single().content)
+        assertFalse(projected.single().content.contains("原始 transcript"))
+        assertEquals(message.agentTrace, projected.single().agentTrace)
+    }
+
+    @Test
+    fun aConversationWithNoAgentTraceReturnsTheVerySameInstance() {
+        val messages = listOf(
+            ChatMessage(role = Role.USER, content = "你好"),
+            ChatMessage(role = Role.ASSISTANT, content = "你好，有什么可以帮你？")
+        )
+
+        val projected = messages.agentContextProjection()
+
+        assertSame("普通对话必须零改动，连实例都不应重建", messages, projected)
+    }
+
+    @Test
+    fun mixedConversationKeepsPlainTurnsVerbatimAndKeepsOnlyAgentSummaries() {
+        val plainUser = ChatMessage(role = Role.USER, content = "  帮我看看这张图\n（注意前导空格）")
+        val plainAssistant = ChatMessage(role = Role.ASSISTANT, content = "好的，我看看。")
+        val messages = listOf(
+            plainUser,
+            agentSummary("run-1", "总结一"),
+            plainAssistant,
+            agentStep("run-2", 1, "步骤原文"),
+            agentSummary("run-2", "总结二"),
+            agentStep("run-3", 1, "另一段步骤原文"),
+            agentSummary("run-3", "总结三")
+        )
+
+        val projected = messages.agentContextProjection()
+
+        assertEquals("2 条普通对话 + 3 条 summary", 5, projected.size)
+        assertEquals(plainUser.content, projected[0].content)
+        assertEquals(plainUser.role, projected[0].role)
+        assertEquals(plainAssistant.content, projected[2].content)
+        assertEquals("总结一", projected[1].content)
+        assertEquals("总结二", projected[3].content)
+        assertEquals("总结三", projected[4].content)
+        assertTrue(projected.none { it.content.contains("步骤原文") })
+    }
+
+    @Test
+    fun aSummaryMessageWithBlankFinalSummaryIsDropped() {
+        val messages = listOf(
+            ChatMessage(
+                role = Role.ASSISTANT,
+                content = "看起来像结论的正文",
+                agentTrace = AgentTurnTrace(turnId = "run-1", kind = AgentTurnTrace.SUMMARY, finalSummary = "")
+            ),
+            ChatMessage(
+                role = Role.ASSISTANT,
+                content = "空白结论的正文",
+                agentTrace = AgentTurnTrace(turnId = "run-2", kind = AgentTurnTrace.SUMMARY, finalSummary = "   ")
+            ),
+            agentSummary("run-3", "真正的结论")
+        )
+
+        val projected = messages.agentContextProjection()
+
+        assertEquals(1, projected.size)
+        assertEquals("真正的结论", projected.single().content)
+        assertEquals("run-3", projected.single().agentTrace?.turnId)
+    }
+
+    private fun agentStep(turnId: String, index: Int, content: String) = ChatMessage(
+        role = Role.ASSISTANT,
+        content = content,
+        agentTrace = AgentTurnTrace(turnId = turnId, kind = "step")
+    )
+
+    private fun agentSummary(turnId: String, summary: String) = ChatMessage(
+        role = Role.ASSISTANT,
+        content = summary,
+        agentTrace = AgentTurnTrace(
+            turnId = turnId,
+            kind = AgentTurnTrace.SUMMARY,
+            finalSummary = summary
+        )
+    )
 
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

@@ -20,8 +20,12 @@ class AgentDeviceAccessSettingsKeyContractTest {
     private val storeSource = source(
         "app/src/main/java/com/muyuchat/mca/agent/device/AgentDeviceAccessStore.kt"
     )
+    // The device-authorisation card lives on its own settings page now (the settings IA split the
+    // "what may the phone hand over" rows out of 隐私与数据 into 设备与外设). The contract itself is
+    // unchanged: the card still writes the store's preference file and keys by literal, and this
+    // test still fails on any drift between the two sides.
     private val settingsSource = source(
-        "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsLogsPrivacyScreens.kt"
+        "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsDeviceScreen.kt"
     )
     private val manifest = source("app/src/main/AndroidManifest.xml")
 

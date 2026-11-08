@@ -8,6 +8,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -215,5 +216,51 @@ class AgentTerminalExecToolTest {
             "minimal"
         )
         assertTrue(different != other)
+    }
+
+    /**
+     * The tool itself must supply a typed scope, not rely on the caller.
+     *
+     * Without it the freeze path rejects every `terminal.exec` call with "The resolved resource scope
+     * is not canonical" before the approval is ever shown, because the tool names no workspace path.
+     * Device scope + PROCESS_EXEC is the contract-legal pair: `AgentScopePrecondition.covers` only
+     * admits the effects `requiredEffects(scope)` lists, and for `Device` that is `DEVICE_ACTION` —
+     * so this test also pins the pair that actually composes, instead of trusting the comment.
+     */
+    @Test
+    fun `the tool declares its own typed device scope`() {
+        val tool = AgentTerminalExecTool(AgentTerminalSandbox.UNAVAILABLE)
+
+        val scope = requireNotNull(tool.scopePrecondition()) {
+            "terminal.exec must declare a typed scope or the freeze path rejects it"
+        }
+
+        val device = scope.scopes.single() as com.muyuchat.core.agent.contract.AgentResourceScope.Device
+        assertEquals("terminal", device.operation)
+        assertNull("the command runs in the app sandbox, not inside another app", device.targetPackage)
+        assertNull("no selector: the scope covers the tool, not one argument", device.selectorHash)
+        assertTrue(device.userVisibleSummary.isNotBlank())
+        assertTrue(
+            "the summary must say it is argv-only, which is the security claim",
+            device.userVisibleSummary.contains("argv")
+        )
+        assertFalse(
+            "no workspace path may be invented for a tool that touches no workspace file",
+            scope.scopes.any { it is com.muyuchat.core.agent.contract.AgentResourceScope.Workspace }
+        )
+        assertTrue("the scope needs at least one effect", scope.effects.isNotEmpty())
+        // DEVICE_ACTION, not PROCESS_EXEC: AgentScopePrecondition.covers only admits the effects
+        // requiredEffects(Device) lists, so PROCESS_EXEC would throw in the precondition constructor —
+        // the call would be rejected at freeze time, before any approval could be shown.
+        assertEquals(
+            setOf(com.muyuchat.core.agent.contract.AgentEffectKind.DEVICE_ACTION),
+            scope.effects
+        )
+        assertTrue(
+            "canonical JSON must be generatable or the freeze path rejects the call",
+            com.muyuchat.core.agent.contract.AgentScopePreconditionCodec
+                .canonicalJson(scope)
+                .contains("\"kind\":\"device\"")
+        )
     }
 }

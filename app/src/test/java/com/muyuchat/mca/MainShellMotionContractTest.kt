@@ -18,6 +18,12 @@ import org.junit.Test
 class MainShellMotionContractTest {
     private val shell = sourceFile("MainActivity.kt").replace("\r\n", "\n")
 
+    /**
+     * The first-frame shell: it owns the one `McaTheme` node and the guide/app gate, so the
+     * "exactly one theme node" contract is counted there and the shell is checked to add none.
+     */
+    private val firstRunHost = sourceFile("FirstRunHost.kt").replace("\r\n", "\n")
+
     @Test
     fun tabOverlaysAllUseTheSharedCrossfadeAndMcaMotionFade() {
         assertEquals(
@@ -136,7 +142,16 @@ class MainShellMotionContractTest {
         assertEquals(
             "both splash and app must share exactly one McaTheme node during the handoff",
             1,
-            countMatches("McaTheme \\{")
+            // Counts the theme *call*, not one particular argument list: the contract being pinned is
+            // "exactly one theme node owns both branches", which must not depend on whether arguments
+            // are supplied. The node now lives in FirstRunContent (which owns the guide branch too), so
+            // the count is taken there and the shell is required to add none of its own.
+            countMatches(firstRunHost, "McaTheme\\(")
+        )
+        assertEquals(
+            "the shell must not open a second theme node around the app body",
+            0,
+            countMatches("McaTheme\\(")
         )
         val target = shell.indexOf("targetState = startupState.model")
         assertTrue(target >= 0)
@@ -182,6 +197,9 @@ class MainShellMotionContractTest {
     }
 
     private fun countMatches(pattern: String): Int = Regex(pattern).findAll(shell).count()
+
+    /** Same counter against the first-frame shell, where the theme node and the gate now live. */
+    private fun countMatches(source: String, pattern: String): Int = Regex(pattern).findAll(source).count()
 
     private fun sourceFile(name: String): String = sequenceOf(
         File("src/main/java/com/muyuchat/mca/$name"),
