@@ -1,0 +1,12 @@
+{
+  "version": "0.4.3",
+  "asset": "MCA-v0.4.3-arm64-v8a.apk",
+  "size_bytes": 642500040,
+  "size_label": "612.7 MB",
+  "abi": "arm64-v8a",
+  "min_android": "Android 8.0",
+  "sha256": "bf23aa462bde2427095c4577ed9e41569a0ad8fdb24098f80f66eb988990c71e",
+  "fetched_at": "2026-11-09T04:32Z",
+  "source": "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.4.3/MCA-v0.4.3-arm64-v8a.apk",
+  "sha256_verified": true
+}
