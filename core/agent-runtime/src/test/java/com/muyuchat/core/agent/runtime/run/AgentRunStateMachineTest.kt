@@ -121,10 +121,70 @@ class AgentRunStateMachineTest {
         assertTrue(AgentRunState.PAUSING.holdsActiveSlot)
         assertTrue(AgentRunState.STOPPING.holdsActiveSlot)
         assertTrue(AgentRunState.WAITING_APPROVAL.holdsActiveSlot)
-        assertTrue(AgentRunState.WAITING_USER.holdsActiveSlot)
         assertFalse(AgentRunState.PAUSED.holdsActiveSlot)
         assertFalse(AgentRunState.NEEDS_REVIEW.holdsActiveSlot)
         assertFalse(AgentRunState.INTERRUPTED.holdsActiveSlot)
+    }
+
+    /**
+     * A park is not work: the runtime already released the admission slot when the loop asked the
+     * user a question, so counting WAITING_USER as an occupant made one unanswered question block
+     * every later run ("已到运行上限 0 轮 0 步") and made its task undeletable.
+     */
+    @Test
+    fun aParkedRunHoldsNoExecutionSlot() {
+        assertFalse(AgentRunState.WAITING_USER.holdsActiveSlot)
+    }
+
+    /**
+     * ...but an open question still outlives its rows: deleting the task must close the question
+     * first, so the deletion gate is deliberately wider than the slot gate.
+     */
+    @Test
+    fun anOpenQuestionStillRequiresCancelBeforeDeletion() {
+        assertTrue(AgentRunState.WAITING_USER.needsCancelBeforeDeletion)
+        // Resumable-but-idle states need no cancel: deleting a stopped task must not emit one.
+        assertFalse(AgentRunState.PAUSED.needsCancelBeforeDeletion)
+        assertFalse(AgentRunState.NEEDS_REVIEW.needsCancelBeforeDeletion)
+        assertFalse(AgentRunState.INTERRUPTED.needsCancelBeforeDeletion)
+        assertFalse(AgentRunState.SUCCEEDED.needsCancelBeforeDeletion)
+        assertFalse(AgentRunState.CANCELLED.needsCancelBeforeDeletion)
+        // Everything that is actually running still needs the cancel.
+        listOf(
+            AgentRunState.QUEUED,
+            AgentRunState.RUNNING,
+            AgentRunState.WAITING_RESOURCE,
+            AgentRunState.WAITING_APPROVAL,
+            AgentRunState.PAUSING,
+            AgentRunState.STOPPING
+        ).forEach { assertTrue("${it.name} must cancel before deletion", it.needsCancelBeforeDeletion) }
+    }
+
+    /**
+     * A workflow must not hang on a settled-but-resumable child, and must not race ahead of an
+     * open question. `!holdsActiveSlot` got both wrong once WAITING_USER stopped holding a slot.
+     */
+    @Test
+    fun aWorkflowWaitsForEverySettledStateButNeverForAnOpenQuestion() {
+        assertFalse(AgentRunState.WAITING_USER.isSettledForWorkflow)
+        listOf(
+            AgentRunState.PAUSED,
+            AgentRunState.NEEDS_REVIEW,
+            AgentRunState.INTERRUPTED,
+            AgentRunState.SUCCEEDED,
+            AgentRunState.FAILED,
+            AgentRunState.CANCELLED,
+            AgentRunState.SUPERSEDED
+        ).forEach { assertTrue("${it.name} must settle a workflow", it.isSettledForWorkflow) }
+        // Work that is still in flight does not settle a workflow either.
+        listOf(
+            AgentRunState.QUEUED,
+            AgentRunState.RUNNING,
+            AgentRunState.WAITING_RESOURCE,
+            AgentRunState.WAITING_APPROVAL,
+            AgentRunState.PAUSING,
+            AgentRunState.STOPPING
+        ).forEach { assertFalse("${it.name} must not settle a workflow", it.isSettledForWorkflow) }
     }
 
     @Test

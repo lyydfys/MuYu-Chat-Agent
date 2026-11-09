@@ -136,7 +136,12 @@ class WorkspaceCommandWorkflowAgentTaskRunner(
                     }
                     .first { snapshot ->
                         snapshot.run.runId == runId &&
-                            (snapshot.run.state.isTerminal || !snapshot.run.state.holdsActiveSlot)
+                            // A parked child (WAITING_USER) is not finished: it still owes an answer,
+                            // so it must not release the parent. `!holdsActiveSlot` used to be true
+                            // there and let the parent race ahead of a question. Every other settled
+                            // state (PAUSED / NEEDS_REVIEW / INTERRUPTED / any terminal) does end the
+                            // wait -- the adapter turns those into typed outcomes below.
+                            snapshot.run.state.isSettledForWorkflow
                     }
             }
         } catch (_: TimeoutCancellationException) {

@@ -140,9 +140,48 @@ enum class AgentRunState {
     val isTerminal: Boolean
         get() = this == SUCCEEDED || this == FAILED || this == CANCELLED || this == SUPERSEDED
 
+    /**
+     * True only while this run holds the single execution slot.
+     *
+     * [WAITING_USER] is deliberately **excluded**: it is a park, not work. The runtime already
+     * releases the admission slot when the loop asks the user a question
+     * (`AgentOwnerExecution`'s park path sets the active run id to null), so a run sitting here
+     * consumes no execution resource. Counting it as an occupant made one unanswered question — a
+     * two-hour one was observed on device — block every later run with "已到运行上限 0 轮 0 步"
+     * and made the task impossible to delete.
+     *
+     * Callers that used this to mean "not finished yet" must ask [isTerminal] instead; asking a
+     * parked run is not a stale run.
+     */
     val holdsActiveSlot: Boolean
         get() = this == QUEUED || this == RUNNING || this == WAITING_RESOURCE ||
-            this == WAITING_APPROVAL || this == WAITING_USER || this == PAUSING || this == STOPPING
+            this == WAITING_APPROVAL || this == PAUSING || this == STOPPING
+
+    /**
+     * True when deleting a task must first cancel the run that owns it.
+     *
+     * Wider than [holdsActiveSlot] on purpose. A parked [WAITING_USER] run occupies no execution
+     * slot, yet an open question is still bound to it: removing its rows would strand the answer
+     * the user may still give, so the cancel closes the question first. Conversely a merely
+     * resumable run ([PAUSED], [NEEDS_REVIEW], [INTERRUPTED]) has nothing in flight -- deleting it
+     * is how a user discards a stopped task, and requiring a cancel would make every deletion of a
+     * paused task emit a cancel command that has nothing to cancel.
+     */
+    val needsCancelBeforeDeletion: Boolean
+        get() = this == QUEUED || this == RUNNING || this == WAITING_RESOURCE ||
+            this == WAITING_APPROVAL || this == WAITING_USER || this == PAUSING ||
+            this == STOPPING
+
+    /**
+     * True when a workflow waiting on this run may stop waiting and report a typed outcome.
+     *
+     * Wider than [isTerminal] and narrower than `!holdsActiveSlot`: a merely resumable state
+     * ([PAUSED], [NEEDS_REVIEW], [INTERRUPTED]) has settled -- nobody is working and the workflow
+     * must not hang on it -- while a parked [WAITING_USER] run has not: it still owes the answer
+     * the workflow is waiting for.
+     */
+    val isSettledForWorkflow: Boolean
+        get() = isTerminal || this == PAUSED || this == NEEDS_REVIEW || this == INTERRUPTED
 }
 
 enum class AgentPauseReason {

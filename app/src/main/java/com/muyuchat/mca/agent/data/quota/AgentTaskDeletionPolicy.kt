@@ -108,7 +108,12 @@ class AgentTaskDeletionPolicy(
             return AgentTaskDeletionResult.Deleted(taskId, recordsDeleted, cleanup)
         }
         val nonTerminal = safe { port.findLatestNonTerminalRun(taskId) }
-        if (nonTerminal != null && nonTerminal.state.holdsActiveSlot) {
+        // Cancel only a run that is still alive *as work*: a parked run (WAITING_USER) holds no
+        // execution slot now, but it is still an open question the user may answer, so its rows
+        // must not be removed under it -- and the cancel is what closes that question. A merely
+        // resumable run (PAUSED / NEEDS_REVIEW / INTERRUPTED) needs no cancel: nothing is running,
+        // and deleting it is the normal way to discard a stopped task.
+        if (nonTerminal != null && nonTerminal.state.needsCancelBeforeDeletion) {
             val outcome = safe { port.requestCancel(nonTerminal) }
                 ?: return rejected(AgentDeletionErrorCode.CANCEL_REJECTED, "cancel request failed")
             when (outcome) {
@@ -120,7 +125,7 @@ class AgentTaskDeletionPolicy(
                 AgentCancelOutcome.Accepted -> Unit
             }
             val stillActive = safe { port.findLatestNonTerminalRun(taskId) }
-            if (stillActive != null && stillActive.state.holdsActiveSlot) {
+            if (stillActive != null && stillActive.state.needsCancelBeforeDeletion) {
                 return when (stillActive.state.name) {
                     "STOPPING", "PAUSING" -> AgentTaskDeletionResult.AwaitingStop(taskId, stillActive.runId)
                     else -> AgentTaskDeletionResult.CancellationRequested(taskId, stillActive.runId)

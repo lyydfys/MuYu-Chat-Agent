@@ -585,7 +585,10 @@ class AgentWorkspaceViewModel(
         if (ephemeral.value.commandInFlight != null) return
         val snapshot = (runFeed.value as? AgentRunFeed.Loaded)?.snapshot ?: return
         val run = snapshot.run
-        if (!run.state.holdsActiveSlot || run.state == AgentRunState.STOPPING) return
+        // Stop must work on a parked run as well: WAITING_USER holds no execution slot, but it
+        // is exactly the state where a user wants to give up. Gating on holdsActiveSlot made the
+        // button silently do nothing there.
+        if (run.state.isTerminal || run.state == AgentRunState.STOPPING) return
         launchCommand(AgentWorkspaceCommandKind.CANCEL_RUN) {
             when (val result = commands.requestCancel(
                 CancelAgentRun(
