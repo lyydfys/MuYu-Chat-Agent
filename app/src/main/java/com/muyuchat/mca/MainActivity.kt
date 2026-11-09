@@ -60,6 +60,7 @@ import com.muyuchat.mca.video.settings.VideoDraftFileStore
 import com.muyuchat.mca.video.settings.VideoEnginePreferenceStore
 import com.muyuchat.mca.presentation.startup.TtfdProbe
 import com.muyuchat.core.designsystem.appearance.McaAppearanceThemeChoice
+import com.muyuchat.mca.appearance.rememberAppearanceSettingsWiring
 import com.muyuchat.mca.presentation.startup.TtfdProbeHost
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -360,6 +361,10 @@ private fun McaApp(
     onAppearanceRememberedChange: (McaAppearanceThemeChoice) -> Unit,
     onReplayOnboarding: () -> Unit
 ) {
+    // Built here rather than inside the settings page: it needs a ContentResolver, a package manager
+    // and a SAF launcher, none of which belong to the settings module. The background owner it uses is
+    // the process-wide one, so the shell's backdrop and this page write and read the same flow.
+    val appearanceWiring = rememberAppearanceSettingsWiring()
     val timestampLocale = androidx.compose.ui.platform.LocalLocale.current.platformLocale
     state.contentImportPreview?.let { preview ->
         ContentImportPreviewDialog(
@@ -547,6 +552,8 @@ private fun McaApp(
                 onDismissStart = { if (appMenuOpen) appMenuOpen = true },
                 onDismiss = { onTab(AppTab.CHAT) }
             ) { pageModifier, closePage ->
+                val agentNetworkContext =
+                    androidx.compose.ui.platform.LocalContext.current.applicationContext
                 AgentWorkspaceRoute(
                     queries = viewModel.agentWorkspacePorts.runtime.queries,
                     commands = viewModel.agentWorkspacePorts.runtime,
@@ -562,6 +569,11 @@ private fun McaApp(
                     workflowAdmin = viewModel.agentWorkspacePorts.workflowAdmin,
                     workflowLaunch = viewModel.agentWorkspacePorts.workflowAdmin,
                     workflowSchedule = viewModel.agentWorkspacePorts.workflowSchedule,
+                    // Durable so the user's network grant survives a cold start; the switch used to
+                    // live in SavedStateHandle and reset to "off" on every restart.
+                    networkPreference = remember(agentNetworkContext) {
+                        com.muyuchat.mca.settings.AgentNetworkPreferenceStore(agentNetworkContext)
+                    },
                     documentLauncher = rememberAgentDocumentLauncher()
                 )
             }
@@ -836,7 +848,13 @@ private fun McaApp(
                     startInWebSearch = startSettingsInWebSearch, modifier = pageModifier,
                     appearanceThemeChoice = appearanceRememberedChoice,
                     onAppearanceThemeChoiceChange = onAppearanceRememberedChange,
-                    onReplayOnboarding = onReplayOnboarding
+                    onReplayOnboarding = onReplayOnboarding,
+                    // Wallpaper, launch image and launcher icon: the settings module only draws these
+                    // rows, so without this spread every one of them would render and do nothing.
+                    // App-wide background and launcher icon: the settings module only draws these rows,
+                    // so without this spread they would render and do nothing.
+                    appearanceIcon = appearanceWiring.icon,
+                    onSelectAppearanceIcon = appearanceWiring.onSelectIcon
                 )
             }
 

@@ -14,8 +14,11 @@ image_upscalers_v1
 mca.dsh.account.attempt
 mca_about_ui
 mca_agent_device_access
+mca_agent_network
+mca_agent_tool_approval
 mca_api
 mca_app_updates_v1
+mca_appearance
 mca_assistants
 mca_chat_appearance
 mca_chat_image_tool_authorization
@@ -32,6 +35,7 @@ mca_local_api_idempotency_journal
 mca_local_image_models
 mca_mcp_credentials
 mca_model_generation_profiles_v1
+mca_onboarding
 mca_video_settings
 mca_web_search
 mca_web_search_diagnostics

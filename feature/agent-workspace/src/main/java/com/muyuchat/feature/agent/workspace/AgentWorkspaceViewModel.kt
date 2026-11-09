@@ -72,7 +72,8 @@ class AgentWorkspaceViewModel(
     memoryAdmin: AgentMemoryAdminPort = AgentMemoryAdminPort.Unavailable,
     workflowAdmin: AgentWorkflowAdminPort = AgentWorkflowAdminPort.Unavailable,
     workflowLaunch: AgentWorkflowLaunchPort = AgentWorkflowLaunchPort.Unavailable,
-    workflowSchedule: AgentWorkflowSchedulePort = AgentWorkflowSchedulePort.Unavailable
+    workflowSchedule: AgentWorkflowSchedulePort = AgentWorkflowSchedulePort.Unavailable,
+    networkPreference: AgentNetworkPreferencePort = AgentNetworkPreferencePort.Unavailable
 ) : ViewModel() {
 
     private val selectedTaskId = savedStateHandle.getStateFlow<String?>(KEY_SELECTED_TASK_ID, null)
@@ -80,7 +81,11 @@ class AgentWorkspaceViewModel(
     private val detailGoalDraft = savedStateHandle.getStateFlow(KEY_DETAIL_GOAL_DRAFT, "")
     private val questionAnswerDraft = savedStateHandle.getStateFlow(KEY_QUESTION_ANSWER_DRAFT, "")
     private val selectedModelKey = savedStateHandle.getStateFlow<String?>(KEY_SELECTED_MODEL, null)
-    private val networkEnabled = savedStateHandle.getStateFlow(KEY_NETWORK_ENABLED, false)
+    // Seeded from the durable preference, not from SavedStateHandle: the user's network grant has to
+    // survive a cold start. See AgentNetworkPreferencePort for why the old store was wrong.
+    private val networkStore = networkPreference
+    private val networkEnabled =
+        kotlinx.coroutines.flow.MutableStateFlow(networkStore.read())
 
     private val archivedFilter = AgentArchivedFilterCoordinator(savedStateHandle) { include ->
         restartTaskFeed(include)
@@ -404,7 +409,8 @@ class AgentWorkspaceViewModel(
     }
 
     fun setNetworkEnabled(enabled: Boolean) {
-        savedStateHandle[KEY_NETWORK_ENABLED] = enabled
+        networkEnabled.value = enabled
+        networkStore.write(enabled)
     }
 
     fun toggleTimelineRow(rowKey: String) {
@@ -788,8 +794,7 @@ class AgentWorkspaceViewModel(
         private const val KEY_DETAIL_GOAL_DRAFT = "agent.workspace.detailGoalDraft"
         private const val KEY_QUESTION_ANSWER_DRAFT = "agent.workspace.questionAnswerDraft"
         private const val KEY_SELECTED_MODEL = "agent.workspace.selectedModel"
-        private const val KEY_NETWORK_ENABLED = "agent.workspace.networkEnabled"
-        private const val KEY_HOME_SCROLL_INDEX = "agent.workspace.homeScrollIndex"
+            private const val KEY_HOME_SCROLL_INDEX = "agent.workspace.homeScrollIndex"
         private const val KEY_DETAIL_SCROLL_INDEX = "agent.workspace.detailScrollIndex"
     }
 }

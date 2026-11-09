@@ -33,7 +33,8 @@ object AgentWorkspaceViewModelFactory {
         memoryAdmin = AgentMemoryAdminPort.Unavailable,
         workflowAdmin = AgentWorkflowAdminPort.Unavailable,
         workflowLaunch = AgentWorkflowLaunchPort.Unavailable,
-        workflowSchedule = AgentWorkflowSchedulePort.Unavailable
+        workflowSchedule = AgentWorkflowSchedulePort.Unavailable,
+        networkPreference = AgentNetworkPreferencePort.Unavailable
     )
 
     fun create(
@@ -48,7 +49,8 @@ object AgentWorkspaceViewModelFactory {
         memoryAdmin: AgentMemoryAdminPort = AgentMemoryAdminPort.Unavailable,
         workflowAdmin: AgentWorkflowAdminPort = AgentWorkflowAdminPort.Unavailable,
         workflowLaunch: AgentWorkflowLaunchPort = AgentWorkflowLaunchPort.Unavailable,
-        workflowSchedule: AgentWorkflowSchedulePort = AgentWorkflowSchedulePort.Unavailable
+        workflowSchedule: AgentWorkflowSchedulePort = AgentWorkflowSchedulePort.Unavailable,
+        networkPreference: AgentNetworkPreferencePort = AgentNetworkPreferencePort.Unavailable
     ): ViewModelProvider.Factory = viewModelFactory {
         initializer {
             AgentWorkspaceViewModel(
@@ -64,7 +66,8 @@ object AgentWorkspaceViewModelFactory {
                 memoryAdmin = memoryAdmin,
                 workflowAdmin = workflowAdmin,
                 workflowLaunch = workflowLaunch,
-                workflowSchedule = workflowSchedule
+                workflowSchedule = workflowSchedule,
+                networkPreference = networkPreference
             )
         }
     }

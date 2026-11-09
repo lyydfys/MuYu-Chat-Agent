@@ -44,6 +44,7 @@ fun AgentWorkspaceRoute(
     workflowAdmin: AgentWorkflowAdminPort = AgentWorkflowAdminPort.Unavailable,
     workflowLaunch: AgentWorkflowLaunchPort = AgentWorkflowLaunchPort.Unavailable,
     workflowSchedule: AgentWorkflowSchedulePort = AgentWorkflowSchedulePort.Unavailable,
+    networkPreference: AgentNetworkPreferencePort = AgentNetworkPreferencePort.Unavailable,
     viewModel: AgentWorkspaceViewModel = viewModel(
         factory = AgentWorkspaceViewModelFactory.create(
             queries = queries,
@@ -57,7 +58,8 @@ fun AgentWorkspaceRoute(
             memoryAdmin = memoryAdmin,
             workflowAdmin = workflowAdmin,
             workflowLaunch = workflowLaunch,
-            workflowSchedule = workflowSchedule
+            workflowSchedule = workflowSchedule,
+            networkPreference = networkPreference
         )
     )
 ) {
