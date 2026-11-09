@@ -36,7 +36,10 @@ API="https://api.github.com/repos/lyydfys/MuYu-Chat-Agent/releases"
 FORCE="${FORCE:-0}"
 DRY="${DRY:-0}"
 
-log() { printf '%s  %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
+# Log to stdout only: the cron line redirects to $LOG, and `tee -a` here would write
+# every line twice (once via tee, once via the redirect). Interactive runs print to the
+# terminal instead, which is the same information.
+log() { printf '%s  %s\n' "$(date -Iseconds)" "$*"; }
 die() { log "FAIL: $*"; exit 1; }
 
 # ---------------------------------------------------------------- single instance
